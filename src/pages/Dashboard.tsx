@@ -41,7 +41,12 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     icon: SlidersHorizontal,
     hint: "EQ → Dyn-EQ → MB → AGC → Limit",
   },
-  { id: "encoder", label: "Encoder", icon: Antenna, hint: "Mounts · formats · output" },
+  {
+    id: "encoder",
+    label: "Stream TX",
+    icon: Antenna,
+    hint: "Transmitter · mounts · metadata",
+  },
   { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
   { id: "telemetry", label: "Telemetry", icon: Activity, hint: "Compliance · logs · health" },
 ];

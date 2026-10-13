@@ -9,14 +9,12 @@ import {
   FORMATS,
   formatProfile,
   formatUptime,
-  formatSupport,
   isCodecSupported,
   jsFormatFor,
   mountUrl,
   probeEndpoint,
   supportedCodecs,
   StreamEncoder,
-  type BroadcastFormat,
   type EncoderStats,
   type ProbeResult,
 } from "@/lib/audio/encoder";
@@ -354,57 +352,6 @@ export function EncoderPanel() {
     toast.success("Output configuration exported");
   };
 
-  /** Punch up a delivery-matrix format (WASM-backed ones record in-browser). */
-  const selectFormat = (f: BroadcastFormat) => {
-    const sup = formatSupport(f);
-    const profile = formatProfile(f);
-    const channels = f.channels.toLowerCase().includes("mono") ? "mono" : "stereo";
-    const bitrate = f.bitrateKbps > 0 ? f.bitrateKbps : undefined;
-    const jsFmt = jsFormatFor(f.id);
-    if (sup.ready && jsFmt) {
-      // WASM-encoded (MP3 / FLAC / Ogg Vorbis / AAC-LC / HE-AAC v2): no
-      // MediaRecorder codec involved — punch the profile into the form and
-      // let connect() route it through the encoder worker
-      setForm((prev) => ({
-        ...prev,
-        bitrateKbps: bitrate ?? prev.bitrateKbps,
-        sampleRateKhz: f.sampleRateKhz,
-        channels,
-        targetFormat: profile,
-      }));
-      toast.success(`${f.label} punched up`, {
-        description: `${profile} · WASM encoder`,
-      });
-    } else if (sup.ready) {
-      // MediaRecorder (Opus / browser-shipped AAC-LC)
-      // Ogg-container Opus when the browser offers it, else WebM/Opus; AAC-LC maps to the aac codec
-      const codecId = f.mimes.some((m) => m.startsWith("audio/ogg"))
-        ? isCodecSupported("audio/ogg;codecs=opus")
-          ? "vorbis"
-          : "opus"
-        : "aac";
-      setForm((prev) => ({
-        ...prev,
-        codec: codecId,
-        bitrateKbps: bitrate ?? prev.bitrateKbps,
-        sampleRateKhz: f.sampleRateKhz,
-        channels,
-        targetFormat: profile,
-      }));
-      toast.success(`${f.label} punched up`, { description: profile });
-    } else {
-      setForm((prev) => ({
-        ...prev,
-        bitrateKbps: bitrate ?? prev.bitrateKbps,
-        targetFormat: profile,
-      }));
-      toast(`${f.label} stored as relay target`, {
-        description:
-          "No browser encoder — a transcoder relay consumes the local proxy stream and emits this format.",
-      });
-    }
-  };
-
   const sendNowPlaying = async () => {
     if (!npTitle.trim()) {
       toast.error("Enter a title first");
@@ -476,123 +423,6 @@ export function EncoderPanel() {
           {rt.onAir ? ` · broadcasting output ${liveSlot + 1}` : ""}
         </span>
       </div>
-
-      {/* ── delivery matrix: twelve broadcast formats ── */}
-      <ModuleCard
-        className="lg:col-span-12"
-        title="Output formats"
-        subtitle="Station delivery matrix — every codec format has an installed in-browser encoder; HLS is stored as a relay target"
-        bodyClassName="p-0"
-        right={
-          <span className="hidden text-[10px] text-muted-foreground sm:inline">
-            {FORMATS.filter((f) => formatSupport(f).ready).length}/{FORMATS.length}{" "}
-            recordable in this browser
-          </span>
-        }
-      >
-        <div className="overflow-x-auto px-4 pb-4">
-          <table className="w-full min-w-[52rem] text-sm">
-            <thead>
-              <tr className="border-b border-border/60 text-left text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-                <th className="py-2.5 pr-3 font-semibold">Format</th>
-                <th className="py-2.5 pr-3 font-semibold">Bitrate</th>
-                <th className="py-2.5 pr-3 font-semibold">Sample rate</th>
-                <th className="py-2.5 pr-3 font-semibold">Channels</th>
-                <th className="py-2.5 pr-3 font-semibold">Support</th>
-                <th className="py-2.5 pr-3 font-semibold">Use</th>
-                <th className="py-2.5 font-semibold" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {FORMATS.map((f) => {
-                const sup = formatSupport(f);
-                const profile = formatProfile(f);
-                const active = form.targetFormat === profile;
-                return (
-                  <tr
-                    key={f.id}
-                    className={cn(
-                      "transition-colors hover:bg-muted/40",
-                      active && "bg-signal/5",
-                    )}
-                  >
-                    <td className="py-2.5 pr-3 text-[13px] font-medium whitespace-nowrap">
-                      <span className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "led size-1.5",
-                            active ? "led-hot" : undefined,
-                          )}
-                        />
-                        {f.label}
-                      </span>
-                    </td>
-                    <td className="text-readout py-2.5 pr-3 text-xs whitespace-nowrap">
-                      {f.bitrateMaxKbps
-                        ? `${f.bitrateKbps}–${f.bitrateMaxKbps}`
-                        : f.bitrateKbps > 0
-                          ? f.bitrateKbps
-                          : "—"}
-                      {(f.bitrateKbps > 0 || f.bitrateMaxKbps) && (
-                        <span className="ml-0.5 text-[9px] text-muted-foreground">
-                          kbps
-                        </span>
-                      )}
-                    </td>
-                    <td className="text-readout py-2.5 pr-3 text-xs whitespace-nowrap">
-                      {f.sampleRateKhz.toFixed(1)} kHz
-                    </td>
-                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap">
-                      {f.channels}
-                    </td>
-                    <td className="py-2.5 pr-3">
-                      <span
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase",
-                          sup.ready
-                            ? "border-meter-ok/30 bg-meter-ok/10 text-meter-ok"
-                            : "border-amber-led/30 bg-amber-led/10 text-amber-led",
-                        )}
-                      >
-                        {sup.ready ? "Ready" : "Relay"}
-                      </span>
-                      <span className="ml-2 hidden text-[10px] text-muted-foreground lg:inline">
-                        {sup.note}
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap text-muted-foreground">
-                      {f.use}
-                    </td>
-                    <td className="py-2.5 text-right">
-                      <Button
-                        size="sm"
-                        variant={active ? "default" : "outline"}
-                        className="h-7 cursor-pointer text-[11px]"
-                        disabled={rt.onAir}
-                        onClick={() => selectFormat(f)}
-                      >
-                        {active ? "Active" : sup.ready ? "Select" : "Set target"}
-                      </Button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-        <p className="border-t border-border/60 px-4 py-3 text-[11px] leading-4 text-muted-foreground">
-          Every codec format above has an installed in-browser encoder driver:
-          MP3 (LAME), Ogg Vorbis and Ogg Opus (libvorbis / libopus), FLAC
-          (libflac) and AAC-LC / HE-AAC v2 (WebCodecs or FDK) all encode
-          locally in a worker — the manual codec picker below still offers
-          MediaRecorder (Opus / AAC-LC) when you stream without a matrix
-          profile. HLS has no browser packager: selecting it stores the full
-          ladder profile as this mount’s{" "}
-          <span className="text-foreground/80">relay target</span>, and your
-          transcoder relay consumes the local proxy stream to emit the target
-          format to the endpoint.
-        </p>
-      </ModuleCard>
 
       {/* ── mount configuration ── */}
       <ModuleCard
@@ -790,7 +620,7 @@ export function EncoderPanel() {
         </div>
       </ModuleCard>
 
-      {/* ── on-air control ── */}
+      {/* ── stream TX transmitter ── */}
       <div className="flex flex-col gap-4 lg:col-span-5">
         <div className="panel rounded-xl p-4">
           <div className="flex items-center justify-between">
@@ -802,7 +632,7 @@ export function EncoderPanel() {
                 )}
               />
               <span className="text-[11px] font-semibold tracking-[0.18em] text-panel-mut uppercase">
-                Stream encoder
+                Stream TX
               </span>
             </div>
             <span
@@ -817,7 +647,21 @@ export function EncoderPanel() {
             </span>
           </div>
 
-          <div className="mt-4 grid grid-cols-4 gap-2">
+          {/* transmitter identity: what this TX is broadcasting */}
+          <div className="panel-well mt-3 rounded-md px-2.5 py-2">
+            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Transmitting
+            </p>
+            <p className="mt-0.5 truncate text-sm font-semibold text-white">
+              {form.name || "— no output selected —"}
+            </p>
+            <p className="text-readout mt-0.5 truncate text-[10px] text-panel-mut">
+              {url || "—"}
+              {rt.onAir ? ` · ${currentCodec.label} · ${form.channels}` : ""}
+            </p>
+          </div>
+
+          <div className="mt-3 grid grid-cols-4 gap-2">
             {[
               { label: "Uptime", value: formatUptime(uptime) },
               {
