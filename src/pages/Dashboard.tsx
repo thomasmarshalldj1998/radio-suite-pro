@@ -98,12 +98,12 @@ export default function Dashboard() {
   });
   const [tab, setTab] = useState<TabId>("input");
   const [powerBusy, setPowerBusy] = useState(false);
-  const [activePreset, setActivePreset] = useState("Broadcast Standard FM");
+  const [activePreset, setActivePreset] = useState("Omnia · General");
 
   // preset baseline (what REVERT restores) + engine power timestamp
   const baselineRef = useRef<{ params: ProcessorParams; name: string }>({
     params: cloneParams(DEFAULT_PARAMS),
-    name: "Broadcast Standard FM",
+    name: "Omnia · General",
   });
   const poweredAtRef = useRef(0);
   const paramsRef = useRef(params);
