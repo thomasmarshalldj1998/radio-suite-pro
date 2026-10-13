@@ -227,15 +227,16 @@ export interface FormatSupport {
 
 /** Probe whether the browser can record a delivery-matrix format. */
 export function formatSupport(f: BroadcastFormat): FormatSupport {
+  // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / Ogg Opus / AAC-LC /
+  // HE-AAC v2) encode in the worker — the same path connect() routes them
+  // through — regardless of what MediaRecorder offers
+  if (jsFormatFor(f.id)) {
+    return { ready: true, mime: null, note: "Encodes in-browser (WASM)" };
+  }
   for (const mime of f.mimes) {
     if (isCodecSupported(mime)) {
       return { ready: true, mime, note: "Records in this browser" };
     }
-  }
-  // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / AAC-LC / HE-AAC v2) encode
-  // in a worker regardless of what MediaRecorder offers
-  if (jsFormatFor(f.id)) {
-    return { ready: true, mime: null, note: "Encodes in-browser (WASM)" };
   }
   return f.mimes.length === 0
     ? { ready: false, mime: null, note: "No browser encoder — relay target" }
@@ -278,10 +279,11 @@ export interface ProgramEncoder {
 }
 
 /** WASM-backed capture formats (see js-encoder.ts + encoder.worker.ts). */
-export type JsFormat = "mp3" | "flac" | "ogg" | "aac" | "aac-lc";
+export type JsFormat = "mp3" | "flac" | "ogg" | "aac" | "aac-lc" | "opus";
 
 /** Delivery-matrix formats that encode in-browser via the WASM workers. */
 export const JS_ENCODED: Record<string, JsFormat> = {
+  "opus-96": "opus",
   "mp3-320": "mp3",
   "mp3-192": "mp3",
   "mp3-128": "mp3",

@@ -58,6 +58,9 @@ function optionsFor(msg: InitMsg): EncodeOptions {
     case "aac-lc":
       // standard AAC-LC (WebCodecs where available, else FDK wasm)
       return { ...base, bitrate: msg.bitrateKbps, profile: "lc" };
+    case "opus":
+      // libopus → real Ogg Opus container (matches the "Ogg Opus" profile)
+      return { ...base, bitrate: msg.bitrateKbps, application: "audio" };
     default:
       return { ...base, bitrate: msg.bitrateKbps };
   }
@@ -70,7 +73,9 @@ worker.onmessage = (e: MessageEvent<WorkerIn>) => {
 async function handle(msg: WorkerIn): Promise<void> {
   try {
     if (msg.cmd === "init") {
-      encoder = await encode(msg.format, optionsFor(msg));
+      // "aac-lc" is our own label — the package's format name is "aac" (profile lc)
+      const fmt = msg.format === "aac-lc" ? "aac" : msg.format;
+      encoder = await encode(fmt, optionsFor(msg));
       worker.postMessage({ type: "ready" } satisfies WorkerOut);
     } else if (msg.cmd === "chunk" && encoder) {
       const out = await encoder(msg.channels);

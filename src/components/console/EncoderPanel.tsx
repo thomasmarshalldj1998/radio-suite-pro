@@ -378,7 +378,7 @@ export function EncoderPanel() {
       <ModuleCard
         className="lg:col-span-12"
         title="Output formats"
-        subtitle="Station delivery matrix — formats record locally via MediaRecorder or the in-browser WASM encoders; HLS is stored as a relay target"
+        subtitle="Station delivery matrix — every codec format has an installed in-browser encoder; HLS is stored as a relay target"
         bodyClassName="p-0"
         right={
           <span className="hidden text-[10px] text-muted-foreground sm:inline">
@@ -478,11 +478,13 @@ export function EncoderPanel() {
           </table>
         </div>
         <p className="border-t border-border/60 px-4 py-3 text-[11px] leading-4 text-muted-foreground">
-          Ready rows encode locally: Opus and browser-shipped AAC-LC through
-          MediaRecorder; MP3, HE-AAC v2, Ogg Vorbis, FLAC and AAC-LC through
-          the in-browser WASM encoders (LAME, FDK, libvorbis, libflac) running
-          in a worker. HLS has no browser packager: selecting it stores the
-          full ladder profile as this mount’s{" "}
+          Every codec format above has an installed in-browser encoder driver:
+          MP3 (LAME), Ogg Vorbis and Ogg Opus (libvorbis / libopus), FLAC
+          (libflac) and AAC-LC / HE-AAC v2 (WebCodecs or FDK) all encode
+          locally in a worker — the manual codec picker below still offers
+          MediaRecorder (Opus / AAC-LC) when you stream without a matrix
+          profile. HLS has no browser packager: selecting it stores the full
+          ladder profile as this mount’s{" "}
           <span className="text-foreground/80">relay target</span>, and your
           transcoder relay consumes the local proxy stream to emit the target
           format to the endpoint.

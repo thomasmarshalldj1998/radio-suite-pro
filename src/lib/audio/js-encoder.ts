@@ -18,6 +18,7 @@ const MIME: Record<JsFormat, { mime: string; ext: string }> = {
   ogg: { mime: "audio/ogg", ext: "ogg" },
   aac: { mime: "audio/aac", ext: "aac" },
   "aac-lc": { mime: "audio/aac", ext: "aac" },
+  opus: { mime: "audio/ogg", ext: "ogg" },
 };
 
 const TAP_NAME = "signalpath-pcm-tap";
