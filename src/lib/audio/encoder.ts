@@ -232,6 +232,11 @@ export function formatSupport(f: BroadcastFormat): FormatSupport {
       return { ready: true, mime, note: "Records in this browser" };
     }
   }
+  // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / AAC-LC / HE-AAC v2) encode
+  // in a worker regardless of what MediaRecorder offers
+  if (jsFormatFor(f.id)) {
+    return { ready: true, mime: null, note: "Encodes in-browser (WASM)" };
+  }
   return f.mimes.length === 0
     ? { ready: false, mime: null, note: "No browser encoder — relay target" }
     : {
@@ -243,6 +248,9 @@ export function formatSupport(f: BroadcastFormat): FormatSupport {
 
 /** Full profile string for the mount config, e.g. “MP3 @ 128 kbps (44.1 kHz, Joint Stereo)”. */
 export function formatProfile(f: BroadcastFormat): string {
+  if (f.id === "hls-abr") {
+    return `HLS Adaptive Multi-Bitrate (${f.bitrateKbps}–${f.bitrateMaxKbps} kbps AAC Manifest)`;
+  }
   const rate = f.bitrateMaxKbps
     ? `${f.bitrateKbps}–${f.bitrateMaxKbps} kbps`
     : f.bitrateKbps > 0
@@ -256,6 +264,38 @@ export interface EncoderStats {
   elapsedMs: number;
   kbps: number;
   chunks: number;
+}
+
+/** Anything the broadcast runtime can run: MediaRecorder or a WASM encoder. */
+export interface ProgramEncoder {
+  running: boolean;
+  onStats: ((stats: EncoderStats) => void) | null;
+  start(timesliceMs?: number): void | Promise<void>;
+  stats(): EncoderStats;
+  stop(): Promise<Blob>;
+  /** Container extension for downloaded takes. */
+  readonly ext?: string;
+}
+
+/** WASM-backed capture formats (see js-encoder.ts + encoder.worker.ts). */
+export type JsFormat = "mp3" | "flac" | "ogg" | "aac" | "aac-lc";
+
+/** Delivery-matrix formats that encode in-browser via the WASM workers. */
+export const JS_ENCODED: Record<string, JsFormat> = {
+  "mp3-320": "mp3",
+  "mp3-192": "mp3",
+  "mp3-128": "mp3",
+  "mp3-64": "mp3",
+  "aac-lc-192": "aac-lc",
+  "aac-lc-128": "aac-lc",
+  "vorbis-128": "ogg",
+  "flac-16": "flac",
+  "heaac2-64": "aac",
+  "heaac2-48": "aac",
+};
+
+export function jsFormatFor(formatId: string): JsFormat | null {
+  return JS_ENCODED[formatId] ?? null;
 }
 
 export class StreamEncoder {
@@ -279,6 +319,15 @@ export class StreamEncoder {
 
   get running(): boolean {
     return this.recorder?.state === "recording";
+  }
+
+  /** Container extension derived from the recorder MIME. */
+  get ext(): string {
+    if (this.mime.includes("mpeg")) return "mp3";
+    if (this.mime.includes("flac")) return "flac";
+    if (this.mime.includes("ogg")) return "ogg";
+    if (this.mime.includes("mp4") || this.mime.includes("aac")) return "m4a";
+    return "webm";
   }
 
   start(timesliceMs = 1000) {

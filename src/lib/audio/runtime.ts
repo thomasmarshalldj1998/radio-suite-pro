@@ -1,4 +1,4 @@
-import type { EncoderStats, StreamEncoder } from "./encoder";
+import type { EncoderStats, ProgramEncoder } from "./encoder";
 
 /**
  * Module-scope broadcast runtime. The encoder must survive tab switches
@@ -18,7 +18,7 @@ export interface Take {
 
 export interface StreamRuntime {
   onAir: boolean;
-  encoder: StreamEncoder | null;
+  encoder: ProgramEncoder | null;
   stats: EncoderStats;
   startedAt: number;
   takes: Take[];

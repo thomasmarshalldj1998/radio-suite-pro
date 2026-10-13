@@ -11,6 +11,7 @@ import {
   formatUptime,
   formatSupport,
   isCodecSupported,
+  jsFormatFor,
   mountUrl,
   probeEndpoint,
   supportedCodecs,
@@ -19,6 +20,7 @@ import {
   type EncoderStats,
   type ProbeResult,
 } from "@/lib/audio/encoder";
+import { JsStreamEncoder } from "@/lib/audio/js-encoder";
 import {
   addTake,
   getRuntime,
@@ -195,12 +197,44 @@ export function EncoderPanel() {
 
   const connect = async () => {
     if (rt.onAir) return;
-    if (!isCodecSupported(currentCodec.mimeType)) {
+    const targetFmt = FORMATS.find((f) => formatProfile(f) === form.targetFormat);
+    const jsFmt = targetFmt ? jsFormatFor(targetFmt.id) : null;
+    if (!jsFmt && !isCodecSupported(currentCodec.mimeType)) {
       toast.error(`${currentCodec.label} is not supported in this browser`);
       return;
     }
     try {
       if (!engine.powered) await engine.powerOn();
+
+      // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / HE-AAC v2) encode in a
+      // worker straight off the program bus — no MediaRecorder involved
+      if (jsFmt && targetFmt) {
+        const enc = new JsStreamEncoder({
+          format: jsFmt,
+          sampleRate: engine.sampleRate || 48000,
+          channels: 2,
+          bitrateKbps: form.bitrateKbps || 128,
+        });
+        enc.onStats = (stats: EncoderStats) => patchRuntime({ stats });
+        await enc.start();
+        patchRuntime({
+          encoder: enc,
+          onAir: true,
+          startedAt: Date.now(),
+          stats: { bytes: 0, elapsedMs: 0, kbps: 0, chunks: 0 },
+        });
+        void saveMount({ ...form });
+        void pushLog({
+          kind: "session",
+          title: `ON AIR — ${form.name}`,
+          detail: `${targetFmt.label} · WASM encoder @ ${(engine.sampleRate / 1000).toFixed(1)} kHz → ${url}`,
+        });
+        toast.success("You are on air", {
+          description: `${targetFmt.label} · encoded natively at ${(engine.sampleRate / 1000).toFixed(1)} kHz`,
+        });
+        return;
+      }
+
       const stream = engine.getStream();
       if (!stream) throw new Error("No program bus available");
       const encoder = new StreamEncoder(stream, {
@@ -241,7 +275,7 @@ export function EncoderPanel() {
       id: nextTakeId(),
       name: `${form.name} · ${new Date().toLocaleTimeString()}`,
       url: URL.createObjectURL(blob),
-      ext: currentCodec.ext,
+      ext: runtime.encoder.ext || currentCodec.ext,
       bytes: blob.size || pre.bytes,
       durationMs: pre.elapsedMs,
       at: Date.now(),
@@ -269,13 +303,29 @@ export function EncoderPanel() {
     }
   };
 
-  /** Punch up a delivery-matrix format (or store it as the relay target). */
+  /** Punch up a delivery-matrix format (WASM-backed ones record in-browser). */
   const selectFormat = (f: BroadcastFormat) => {
     const sup = formatSupport(f);
     const profile = formatProfile(f);
     const channels = f.channels.toLowerCase().includes("mono") ? "mono" : "stereo";
     const bitrate = f.bitrateKbps > 0 ? f.bitrateKbps : undefined;
-    if (sup.ready) {
+    const jsFmt = jsFormatFor(f.id);
+    if (sup.ready && jsFmt) {
+      // WASM-encoded (MP3 / FLAC / Ogg Vorbis / AAC-LC / HE-AAC v2): no
+      // MediaRecorder codec involved — punch the profile into the form and
+      // let connect() route it through the encoder worker
+      setForm((prev) => ({
+        ...prev,
+        bitrateKbps: bitrate ?? prev.bitrateKbps,
+        sampleRateKhz: f.sampleRateKhz,
+        channels,
+        targetFormat: profile,
+      }));
+      toast.success(`${f.label} punched up`, {
+        description: `${profile} · WASM encoder`,
+      });
+    } else if (sup.ready) {
+      // MediaRecorder (Opus / browser-shipped AAC-LC)
       // Ogg-container Opus when the browser offers it, else WebM/Opus; AAC-LC maps to the aac codec
       const codecId = f.mimes.some((m) => m.startsWith("audio/ogg"))
         ? isCodecSupported("audio/ogg;codecs=opus")
@@ -328,7 +378,7 @@ export function EncoderPanel() {
       <ModuleCard
         className="lg:col-span-12"
         title="Output formats"
-        subtitle="Station delivery matrix — browser-encodable formats record locally, the rest are stored as relay targets"
+        subtitle="Station delivery matrix — formats record locally via MediaRecorder or the in-browser WASM encoders; HLS is stored as a relay target"
         bodyClassName="p-0"
         right={
           <span className="hidden text-[10px] text-muted-foreground sm:inline">
@@ -428,10 +478,11 @@ export function EncoderPanel() {
           </table>
         </div>
         <p className="border-t border-border/60 px-4 py-3 text-[11px] leading-4 text-muted-foreground">
-          Browsers can only record Opus — and, where the platform ships an
-          encoder, AAC-LC — directly. MP3, HE-AAC v2, Vorbis, FLAC and HLS
-          have no browser encoders: selecting one stores the full profile as
-          this mount’s{" "}
+          Ready rows encode locally: Opus and browser-shipped AAC-LC through
+          MediaRecorder; MP3, HE-AAC v2, Ogg Vorbis, FLAC and AAC-LC through
+          the in-browser WASM encoders (LAME, FDK, libvorbis, libflac) running
+          in a worker. HLS has no browser packager: selecting it stores the
+          full ladder profile as this mount’s{" "}
           <span className="text-foreground/80">relay target</span>, and your
           transcoder relay consumes the local proxy stream to emit the target
           format to the endpoint.
