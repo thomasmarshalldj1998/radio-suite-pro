@@ -228,6 +228,40 @@ export function GainReductionMeter({
   );
 }
 
+/* ── slim band GR bar for multiband channel strips ─────────────────────── */
+
+export function BandGrBar({
+  get,
+  maxDb = 15,
+  height = 44,
+}: {
+  get: () => number;
+  maxDb?: number;
+  height?: number;
+}) {
+  const mapped = () => -Math.min(maxDb, Math.max(0, get()));
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="panel-well rounded px-[3px] py-1" style={{ width: 14 }}>
+        <SegmentBar
+          get={mapped}
+          minDb={-maxDb}
+          maxDb={0}
+          height={height}
+          fromTop
+          zone={grZone}
+          decay={34}
+        />
+      </div>
+      <Readout
+        get={() => -mapped()}
+        suffix=""
+        className="text-[9px] text-panel-fg"
+      />
+    </div>
+  );
+}
+
 /* ── stereo correlation ─────────────────────────────────────────────────── */
 
 export function CorrelationMeter() {

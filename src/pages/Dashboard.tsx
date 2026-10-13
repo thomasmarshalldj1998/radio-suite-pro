@@ -2,6 +2,7 @@ import { Brand } from "@/components/Brand";
 import { LogoDropdown } from "@/components/LogoDropdown";
 import { EncoderPanel } from "@/components/console/EncoderPanel";
 import { InputTab } from "@/components/console/InputTab";
+import { MeterBar } from "@/components/console/MeterBar";
 import { PresetPanel } from "@/components/console/PresetPanel";
 import { ProcessingTab } from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
@@ -15,7 +16,15 @@ import {
 } from "@/lib/audio/params";
 import { getRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
-import { Power } from "lucide-react";
+import {
+  Activity,
+  Antenna,
+  Mic,
+  Power,
+  SlidersHorizontal,
+  Sparkles,
+  type LucideIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,12 +33,17 @@ const LEGACY_STORAGE_KEY = "signalpath.params.v1";
 
 type TabId = "input" | "processing" | "encoder" | "presets" | "telemetry";
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: "input", label: "Input" },
-  { id: "processing", label: "Processing" },
-  { id: "encoder", label: "Encoder" },
-  { id: "presets", label: "Presets" },
-  { id: "telemetry", label: "Telemetry" },
+const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
+  { id: "input", label: "Input", icon: Mic, hint: "Source · preamp · analysis" },
+  {
+    id: "processing",
+    label: "Processing",
+    icon: SlidersHorizontal,
+    hint: "EQ → Dyn-EQ → MB → AGC → Limit",
+  },
+  { id: "encoder", label: "Encoder", icon: Antenna, hint: "Mounts · formats · output" },
+  { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
+  { id: "telemetry", label: "Telemetry", icon: Activity, hint: "Compliance · logs · health" },
 ];
 
 /** hh:mm:ss uptime formatter (hours may exceed 24). */
@@ -176,7 +190,7 @@ export default function Dashboard() {
     <div className="dark rack-surface min-h-screen text-foreground">
       {/* ── chrome ── */}
       <header className="rack-rail sticky top-0 z-40">
-        <div className="mx-auto flex h-16 max-w-[1560px] items-center gap-4 px-4">
+        <div className="mx-auto flex h-14 max-w-[1560px] items-center gap-4 px-4">
           {/* left: logo + status badge */}
           <div className="flex shrink-0 items-center gap-3">
             <Brand size={26} />
@@ -282,18 +296,91 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* ── workflow tab bar ── */}
-        <nav className="border-t border-rack-line">
-          <div className="mx-auto flex max-w-[1560px] gap-1 overflow-x-auto px-4 py-1.5">
+        {/* ── always-on meter strip (StereoTool meter bar) ── */}
+        <MeterBar />
+      </header>
+
+      {/* ── body: left page rail + page ── */}
+      <div className="mx-auto flex max-w-[1560px] items-start">
+        {/* page navigation rail */}
+        <nav
+          aria-label="Console pages"
+          className="sticky top-[calc(3.5rem+var(--meterbar-h,64px))] hidden w-52 shrink-0 self-start border-r border-rack-line pt-4 pb-8 lg:block"
+        >
+          <p className="px-4 pb-2 text-[9px] font-semibold tracking-[0.2em] text-rack-mut uppercase">
+            Pages
+          </p>
+          <ul className="flex flex-col gap-0.5 px-2">
+            {TABS.map((t) => {
+              const Icon = t.icon;
+              const active = tab === t.id;
+              return (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    onClick={() => setTab(t.id)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "group flex w-full cursor-pointer items-start gap-2.5 rounded px-2.5 py-2 text-left transition-colors",
+                      active
+                        ? "bg-signal/12 text-signal"
+                        : "text-rack-mut hover:bg-white/5 hover:text-rack-fg",
+                    )}
+                  >
+                    <Icon className="mt-0.5 size-4 shrink-0" />
+                    <span className="min-w-0">
+                      <span className="block text-[11px] font-semibold tracking-[0.12em] uppercase">
+                        {t.label}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[9px] leading-3.5 text-rack-mut group-hover:text-rack-fg">
+                        {t.hint}
+                      </span>
+                    </span>
+                    {active && (
+                      <span className="mt-1.5 ml-auto size-1.5 shrink-0 rounded-full bg-signal shadow-[0_0_8px_rgba(74,144,226,0.8)]" />
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="mt-4 mx-2 rounded border border-rack-line bg-[#15181d] px-3 py-2.5">
+            <p className="text-[9px] font-semibold tracking-[0.16em] text-rack-mut uppercase">
+              Chain status
+            </p>
+            <p className="mt-1.5 flex items-center gap-2 text-[11px] font-semibold text-white">
+              <span
+                className={cn(
+                  "led size-1.5",
+                  status === "onair" && (hud.alarm ? "led-hot" : "led-on"),
+                  status === "standby" && "led-warn",
+                )}
+              />
+              {status === "offline"
+                ? "Engine off"
+                : status === "onair"
+                  ? "On air"
+                  : "Standby"}
+            </p>
+            <p className="mt-1 truncate text-[10px] text-rack-mut">
+              {activePreset}
+            </p>
+          </div>
+        </nav>
+
+        {/* mobile page tabs (rail hidden below lg) */}
+        <div className="min-w-0 flex-1 px-4 py-4">
+          <div className="mb-4 flex gap-1 overflow-x-auto lg:hidden">
             {TABS.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 onClick={() => setTab(t.id)}
                 className={cn(
-                  "shrink-0 cursor-pointer rounded px-4 py-2 text-[11px] font-semibold tracking-[0.14em] uppercase transition-colors",
+                  "shrink-0 cursor-pointer rounded px-3 py-2 text-[11px] font-semibold tracking-[0.12em] uppercase transition-colors",
                   tab === t.id
-                    ? "bg-signal text-signal-fg shadow-[0_0_14px_-4px_rgba(74,144,226,0.7)]"
+                    ? "bg-signal text-signal-fg"
                     : "text-rack-mut hover:bg-white/5 hover:text-rack-fg",
                 )}
                 aria-current={tab === t.id ? "page" : undefined}
@@ -302,26 +389,23 @@ export default function Dashboard() {
               </button>
             ))}
           </div>
-        </nav>
-      </header>
 
-      {/* ── body ── */}
-      <main className="mx-auto max-w-[1560px] px-4 py-5">
-        {tab === "input" && <InputTab params={params} setParams={setParams} />}
-        {tab === "processing" && (
-          <ProcessingTab params={params} setParams={setParams} />
-        )}
-        {tab === "encoder" && <EncoderPanel />}
-        {tab === "presets" && (
-          <PresetPanel
-            params={params}
-            activeName={activePreset}
-            onApply={applyPreset}
-            onRevert={revertPreset}
-          />
-        )}
-        {tab === "telemetry" && <TelemetryTab />}
-      </main>
+          {tab === "input" && <InputTab params={params} setParams={setParams} />}
+          {tab === "processing" && (
+            <ProcessingTab params={params} setParams={setParams} />
+          )}
+          {tab === "encoder" && <EncoderPanel />}
+          {tab === "presets" && (
+            <PresetPanel
+              params={params}
+              activeName={activePreset}
+              onApply={applyPreset}
+              onRevert={revertPreset}
+            />
+          )}
+          {tab === "telemetry" && <TelemetryTab />}
+        </div>
+      </div>
     </div>
   );
 }
