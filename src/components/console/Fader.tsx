@@ -36,7 +36,7 @@ export function Fader({
   accent = false,
   className,
 }: FaderProps) {
-  const display = format ? format(value) : value.toFixed(1);
+  const display = format ? format(value) : value.toFixed(2);
   const neutralPct =
     min < 0 && max > 0 ? ((0 - min) / (max - min)) * 100 : null;
 

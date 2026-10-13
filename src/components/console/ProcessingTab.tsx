@@ -1,28 +1,23 @@
 import { Knob } from "@/components/console/Knob";
 import { Fader } from "@/components/console/Fader";
 import { ModuleCard } from "@/components/console/ModuleCard";
-import {
-  GainReductionMeter,
-  StereoLevelMeter,
-} from "@/components/console/Meters";
+import { CtrlRow, Seg, Val } from "@/components/console/controls";
+import { StereoLevelMeter } from "@/components/console/Meters";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
 import {
-  DEFAULT_PARAMS,
-  DEFAULT_SPLITS,
   DEQ_LABELS,
   MB_LABELS,
   formatDb,
   formatHz,
-  type BandCompParams,
-  type DeqBand,
+  type DeqBands,
   type MultibandBands,
-  type MultibandSplits,
   type ProcessorParams,
 } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { Volume2, VolumeX, Zap } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 function useMeterSnapshot(intervalMs = 150): MeterSnapshot | null {
   const [snap, setSnap] = useState<MeterSnapshot | null>(null);
@@ -39,71 +34,20 @@ function useMeterSnapshot(intervalMs = 150): MeterSnapshot | null {
   return snap;
 }
 
-const SPLIT_RANGES: [number, number][] = [
-  [60, 300],
-  [200, 800],
-  [800, 3000],
-  [2500, 7000],
-  [6000, 14000],
-];
+/** Signed 2-dp value with typographic minus. */
+const sgn = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2).replace("-", "−")}`;
+/** ms → seconds, 2 dp (spec: time constants shown in seconds). */
+const secs = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
+/** Exciter insert level in dB (engine blend = mix% · 0.5). */
+const harmDb = (mix: number) => (20 * Math.log10(Math.max((mix / 100) * 0.5, 1e-6)))
+  .toFixed(2)
+  .replace("-", "−");
 
-const MB_ROWS = [
-  {
-    key: "thresholdDb" as const,
-    label: "Thresh",
-    min: -50,
-    max: 0,
-    step: 0.5,
-    bipolar: true,
-    fmt: (v: number) => formatDb(v),
-  },
-  {
-    key: "ratio" as const,
-    label: "Ratio",
-    min: 1,
-    max: 12,
-    step: 0.1,
-    bipolar: false,
-    fmt: (v: number) => `${v.toFixed(1)}:1`,
-  },
-  {
-    key: "attackMs" as const,
-    label: "Attack",
-    min: 0.5,
-    max: 200,
-    step: 0.5,
-    bipolar: false,
-    fmt: (v: number) => `${v < 10 ? v.toFixed(1) : Math.round(v)} ms`,
-  },
-  {
-    key: "releaseMs" as const,
-    label: "Release",
-    min: 10,
-    max: 1000,
-    step: 5,
-    bipolar: false,
-    fmt: (v: number) => `${Math.round(v)} ms`,
-  },
-  {
-    key: "makeupDb" as const,
-    label: "Makeup",
-    min: -6,
-    max: 12,
-    step: 0.5,
-    bipolar: true,
-    fmt: (v: number) => formatDb(v),
-  },
-] as const;
-
-const bandRange = (i: number, splits: MultibandSplits): string =>
-  i === 0
-    ? `20–${formatHz(splits[0])}`
-    : i === MB_LABELS.length - 1
-      ? `${formatHz(splits[4])}–20k`
-      : `${formatHz(splits[i - 1])}–${formatHz(splits[i])}`;
-
-/* ── processing tab ─────────────────────────────────────────────────────── */
-
+/**
+ * PROCESSING — wideband AGC, 6-band dynamic compression, dynamic EQ and the
+ * composite limiter per the broadcast console layout, plus the equalizer and
+ * output/monitor strip.
+ */
 export function ProcessingTab({
   params,
   setParams,
@@ -115,70 +59,384 @@ export function ProcessingTab({
   const snap = useMeterSnapshot();
   const [monitorMuted, setMonitorMuted] = useState(false);
 
-  const setMbBand = useCallback(
-    (i: number, key: keyof BandCompParams, v: number) =>
-      setParams((p) => ({
-        ...p,
-        multiband: {
-          ...p.multiband,
-          bands: p.multiband.bands.map((b, j) =>
-            j === i ? { ...b, [key]: v } : b,
-          ) as MultibandBands,
-        },
-      })),
-    [setParams],
-  );
-
-  const setSplit = useCallback(
-    (i: number, v: number) =>
-      setParams((p) => ({
-        ...p,
-        multiband: {
-          ...p.multiband,
-          splitsHz: p.multiband.splitsHz.map((s, j) =>
-            j === i ? v : s,
-          ) as MultibandSplits,
-        },
-      })),
-    [setParams],
-  );
-
-  const setDeqBand = useCallback(
-    (i: number, key: keyof DeqBand, v: number) =>
-      setParams((p) => ({
-        ...p,
-        deq: {
-          ...p.deq,
-          bands: p.deq.bands.map((b, j) =>
-            j === i ? { ...b, [key]: v } : b,
-          ) as ProcessorParams["deq"]["bands"],
-        },
-      })),
-    [setParams],
-  );
-
   const eqFlat = () =>
     setParams((prev) => ({
       ...prev,
       eq: { ...prev.eq, bands: prev.eq.bands.map((b) => ({ ...b, gainDb: 0 })) },
     }));
 
+  const ceilingPct = (Math.pow(10, params.limiter.ceilingDb / 20) * 100).toFixed(2);
+  const truePeak = snap?.truePeak ?? -70;
+  const peakOver =
+    (snap?.powered ?? false) && truePeak > params.limiter.ceilingDb + 0.05;
+  const preUs = Math.round(params.limiter.attackMs * 1000);
+  const preStandard = preUs === 1000 ? "uk" : preUs === 500 ? "us" : "custom";
+
   return (
     <div className="grid gap-4 xl:grid-cols-12">
-      {/* ── equalizer ── */}
+      {/* ── wideband AGC ── */}
+      <ModuleCard
+        className="xl:col-span-4"
+        title="Wideband AGC"
+        subtitle="Program leveller · loudness rider"
+        enabled={params.agc.on}
+        onToggle={() => setParams((p) => ({ ...p, agc: { ...p.agc, on: !p.agc.on } }))}
+        right={
+          <Seg
+            ariaLabel="Loudness rider"
+            value={params.rider.on ? "on" : "bypass"}
+            options={[
+              { value: "on", label: "Rider on" },
+              { value: "bypass", label: "Bypass" },
+            ]}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, rider: { ...p.rider, on: v === "on" } }))
+            }
+          />
+        }
+      >
+        <div className="divide-y divide-border/60 rounded border border-border/60">
+          <CtrlRow label="Attack">
+            <SliderRow
+              min={10}
+              max={500}
+              step={10}
+              value={params.agc.attackMs}
+              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, attackMs: v } }))}
+              label="AGC attack"
+            />
+            <Val>{secs(params.agc.attackMs)}</Val>
+          </CtrlRow>
+          <CtrlRow label="Release">
+            <SliderRow
+              min={50}
+              max={3000}
+              step={50}
+              value={params.agc.releaseMs}
+              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, releaseMs: v } }))}
+              label="AGC release"
+            />
+            <Val>{secs(params.agc.releaseMs)}</Val>
+          </CtrlRow>
+          <CtrlRow label="Target">
+            <SliderRow
+              min={-32}
+              max={-14}
+              step={0.5}
+              value={params.rider.targetLufs}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: v } }))
+              }
+              label="Loudness target"
+            />
+            <Val>{sgn(params.rider.targetLufs)} LUFS</Val>
+          </CtrlRow>
+          <CtrlRow label="Max">
+            <SliderRow
+              min={0}
+              max={16}
+              step={0.5}
+              value={params.rider.maxRideDb}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, maxRideDb: v } }))
+              }
+              label="Max ride"
+            />
+            <Val>
+              +{params.rider.maxRideDb.toFixed(2)} / −{params.rider.maxRideDb.toFixed(2)} dB
+            </Val>
+          </CtrlRow>
+          <CtrlRow label="Gate">
+            <SliderRow
+              min={-70}
+              max={-40}
+              step={0.5}
+              value={params.rider.gateDb}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, gateDb: v } }))
+              }
+              label="Rider silence gate"
+            />
+            <Val>{sgn(params.rider.gateDb)} dB</Val>
+          </CtrlRow>
+          <CtrlRow label="Ride">
+            <Seg
+              ariaLabel="Rider speed"
+              value={params.rider.speed}
+              options={[
+                { value: "fast", label: "Fast" },
+                { value: "slow", label: "Slow" },
+              ]}
+              onChange={(speed) =>
+                setParams((p) => ({
+                  ...p,
+                  rider: { ...p.rider, speed: speed as "fast" | "slow" },
+                }))
+              }
+            />
+            <Val>
+              {params.rider.on
+                ? `${sgn(snap?.riderDb ?? 0)} dB`
+                : "off"}
+            </Val>
+          </CtrlRow>
+          <CtrlRow label="AGC GR">
+            <Val className="min-w-0">−{(snap?.gr.agc ?? 0).toFixed(2)} dB</Val>
+          </CtrlRow>
+        </div>
+      </ModuleCard>
+
+      {/* ── 6-band dynamic compression ── */}
+      <ModuleCard
+        className="xl:col-span-8"
+        title="6-band dynamic compression"
+        subtitle="LR4 crossovers · per-band threshold dynamics"
+        enabled={params.multiband.on}
+        onToggle={() =>
+          setParams((p) => ({ ...p, multiband: { ...p.multiband, on: !p.multiband.on } }))
+        }
+      >
+        <div className="divide-y divide-border/60 rounded border border-border/60">
+          {MB_LABELS.map((label, i) => {
+            const band = params.multiband.bands[i];
+            return (
+              <CtrlRow key={label} label={label}>
+                <SliderRow
+                  className="max-w-md"
+                  min={-50}
+                  max={0}
+                  step={0.5}
+                  value={band.thresholdDb}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      multiband: {
+                        ...p.multiband,
+                        bands: p.multiband.bands.map((b, j) =>
+                          j === i ? { ...b, thresholdDb: v } : b,
+                        ) as MultibandBands,
+                      },
+                    }))
+                  }
+                  label={`${label} threshold`}
+                />
+                <Val className="min-w-16">
+                  <span className="text-[9px] text-panel-mut">THRESH </span>
+                  {sgn(band.thresholdDb)} dB
+                </Val>
+                <Val className="min-w-14">
+                  <span className="text-[9px] text-panel-mut">GR </span>
+                  −{(snap?.gr.bands[i] ?? 0).toFixed(2)}
+                </Val>
+              </CtrlRow>
+            );
+          })}
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          One threshold per band — ratio, timing and makeup ride with the
+          loaded preset. Sustained GR over 6 dB on a band means its threshold
+          is working too hard.
+        </p>
+      </ModuleCard>
+
+      {/* ── dynamic EQ ── */}
+      <ModuleCard
+        className="xl:col-span-7"
+        title="Dynamic EQ"
+        subtitle="5 level-detected subtractive bands · cut only"
+        enabled={params.deq.on}
+        onToggle={() => setParams((p) => ({ ...p, deq: { ...p.deq, on: !p.deq.on } }))}
+        right={
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            {DEQ_LABELS.join(" · ")}
+          </span>
+        }
+      >
+        <div className="divide-y divide-border/60 rounded border border-border/60">
+          {params.deq.bands.map((band, i) => (
+            <CtrlRow key={`${band.freqHz}-${i}`} label={formatHz(band.freqHz)}>
+              <SliderRow
+                className="max-w-40"
+                min={0}
+                max={20}
+                step={0.5}
+                value={band.maxCutDb}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    deq: {
+                      ...p.deq,
+                      bands: p.deq.bands.map((b, j) =>
+                        j === i ? { ...b, maxCutDb: v } : b,
+                      ) as DeqBands,
+                    },
+                  }))
+                }
+                label={`Band ${i + 1} cut`}
+              />
+              <Val>−{band.maxCutDb.toFixed(2)} dB</Val>
+              <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+                Q
+              </span>
+              <SliderRow
+                className="max-w-20"
+                min={0.3}
+                max={4}
+                step={0.1}
+                value={band.q}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    deq: {
+                      ...p.deq,
+                      bands: p.deq.bands.map((b, j) => (j === i ? { ...b, q: v } : b)) as DeqBands,
+                    },
+                  }))
+                }
+                label={`Band ${i + 1} Q`}
+              />
+              <Val className="min-w-10">{band.q.toFixed(2)}</Val>
+            </CtrlRow>
+          ))}
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          {DEQ_LABELS.slice(0, 2).join(", ")} and{" "}
+          {DEQ_LABELS.slice(2).join(", ")} — cut only, never boost, so the
+          detector can only ever clean the program up.
+        </p>
+      </ModuleCard>
+
+      {/* ── composite limit ── */}
       <ModuleCard
         className="xl:col-span-5"
-        title="Equalizer"
-        subtitle="6-band · shelving ends, peaking mids"
+        title="Composite limit"
+        subtitle="Pre-delay · clip stage · ceiling guard"
+      >
+        <div className="divide-y divide-border/60 rounded border border-border/60">
+          <CtrlRow label="Pre">
+            <SliderRow
+              min={10}
+              max={2000}
+              step={10}
+              value={params.limiter.attackMs * 1000}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, limiter: { ...p.limiter, attackMs: v / 1000 } }))
+              }
+              label="Composite pre-delay"
+            />
+            <Val>{preUs.toFixed(2)} µs</Val>
+            <Seg
+              ariaLabel="Pre-delay standard"
+              value={preStandard}
+              options={[
+                { value: "uk", label: "UK" },
+                { value: "us", label: "US" },
+              ]}
+              onChange={(v) =>
+                setParams((p) => ({
+                  ...p,
+                  limiter: { ...p.limiter, attackMs: v === "uk" ? 1 : 0.5 },
+                }))
+              }
+            />
+          </CtrlRow>
+          <CtrlRow label="Comp clip">
+            <Seg
+              ariaLabel="Composite clip stage"
+              value={params.limiter.on ? "on" : "bypass"}
+              options={[
+                { value: "on", label: "On" },
+                { value: "bypass", label: "Bypass" },
+              ]}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, limiter: { ...p.limiter, on: v === "on" } }))
+              }
+            />
+            <Val>{params.limiter.on ? "armed" : "bypassed"}</Val>
+          </CtrlRow>
+          <CtrlRow label="Ceil">
+            <SliderRow
+              min={-6}
+              max={0}
+              step={0.1}
+              value={params.limiter.ceilingDb}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, limiter: { ...p.limiter, ceilingDb: v } }))
+              }
+              label="Ceiling"
+            />
+            <Val>{ceilingPct} %</Val>
+          </CtrlRow>
+          <CtrlRow label="Harm">
+            <Seg
+              ariaLabel="Harmonic exciter"
+              value={params.exciter.on ? "on" : "bypass"}
+              options={[
+                { value: "on", label: "On" },
+                { value: "bypass", label: "Bypass" },
+              ]}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, exciter: { ...p.exciter, on: v === "on" } }))
+              }
+            />
+            <SliderRow
+              className="max-w-24"
+              min={0}
+              max={12}
+              step={0.5}
+              value={params.exciter.mix}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: v } }))
+              }
+              label="Harmonic level"
+            />
+            <Val>{harmDb(params.exciter.mix)} dB</Val>
+          </CtrlRow>
+          <CtrlRow label="True pk">
+            <Val className={cn(peakOver && "text-meter-hot")}>
+              {snap?.powered ? `${truePeak.toFixed(2).replace("-", "−")} dBTP` : "―"}
+            </Val>
+            <span
+              className={cn(
+                "led size-1.5",
+                snap?.powered ? (peakOver ? "led-hot" : "led-on") : undefined,
+              )}
+              aria-hidden
+            />
+          </CtrlRow>
+          <CtrlRow label="Limit GR">
+            <Val className="min-w-0">−{(snap?.gr.limiter ?? 0).toFixed(2)} dB</Val>
+          </CtrlRow>
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          The fast peak stage does the lifting; a 4×-oversampled per-sample
+          soft-clip guard downstream of the output trim makes{" "}
+          <span className="text-readout text-foreground/80">
+            {formatDb(params.limiter.ceilingDb)}
+          </span>{" "}
+          a hard promise on the composite bus.
+        </p>
+      </ModuleCard>
+
+      {/* ── equalizer ── */}
+      <ModuleCard
+        className="xl:col-span-8"
+        title="6-band equalizer"
+        subtitle="Shelving ends · peaking mids"
         enabled={params.eq.on}
         onToggle={() => setParams((p) => ({ ...p, eq: { ...p.eq, on: !p.eq.on } }))}
         right={
-          <Button size="sm" variant="ghost" className="h-7 text-[10px] cursor-pointer" onClick={eqFlat}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 cursor-pointer text-[10px]"
+            onClick={eqFlat}
+          >
             Flat
           </Button>
         }
       >
-        <div className="flex justify-between gap-1 overflow-x-auto pb-1">
+        <div className="flex justify-between gap-2 overflow-x-auto pb-1">
           {params.eq.bands.map((band, i) => (
             <Fader
               key={band.freq}
@@ -188,7 +446,7 @@ export function ProcessingTab({
               max={15}
               step={0.5}
               accent={Math.abs(band.gainDb) > 0.05}
-              format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`}
+              format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
               onChange={(v) =>
                 setParams((p) => ({
                   ...p,
@@ -201,532 +459,27 @@ export function ProcessingTab({
             />
           ))}
         </div>
-        <p className="mt-2 text-center text-[10px] text-muted-foreground">
-          ±15 dB · double-click a control anywhere in the rack to reset it
-        </p>
       </ModuleCard>
 
-      {/* ── dynamic EQ ── */}
-      <ModuleCard
-        className="xl:col-span-7"
-        title="Dynamic EQ"
-        subtitle="3 subtractive bands · level-detected cut only"
-        enabled={params.deq.on}
-        onToggle={() =>
-          setParams((p) => ({ ...p, deq: { ...p.deq, on: !p.deq.on } }))
-        }
-        right={
-          <span className="hidden text-[10px] text-muted-foreground sm:inline">
-            Cut engages only above each threshold
-          </span>
-        }
-      >
-        <div className="grid gap-3 sm:grid-cols-3">
-          {params.deq.bands.map((band, i) => (
-            <div
-              key={i}
-              className="flex flex-col items-center gap-2.5 rounded-lg border border-border/60 bg-muted/30 px-2 py-3"
-            >
-              <div className="text-center">
-                <p className="text-[10px] font-semibold tracking-[0.12em] text-foreground/80 uppercase">
-                  {DEQ_LABELS[i]}
-                </p>
-                <p className="text-readout mt-0.5 text-[10px] text-muted-foreground">
-                  {formatHz(band.freqHz)}
-                </p>
-              </div>
-              <div className="flex flex-wrap justify-center gap-x-2 gap-y-1">
-                <Knob
-                  label="Freq"
-                  size={40}
-                  value={band.freqHz}
-                  min={40}
-                  max={14000}
-                  step={10}
-                  format={formatHz}
-                  onChange={(v) => setDeqBand(i, "freqHz", v)}
-                  onReset={() => setDeqBand(i, "freqHz", DEFAULT_PARAMS.deq.bands[i].freqHz)}
-                />
-                <Knob
-                  label="Thresh"
-                  size={40}
-                  bipolar
-                  value={band.thresholdDb}
-                  min={-50}
-                  max={0}
-                  step={0.5}
-                  format={formatDb}
-                  onChange={(v) => setDeqBand(i, "thresholdDb", v)}
-                  onReset={() => setDeqBand(i, "thresholdDb", DEFAULT_PARAMS.deq.bands[i].thresholdDb)}
-                />
-                <Knob
-                  label="Max cut"
-                  size={40}
-                  accent
-                  value={band.maxCutDb}
-                  min={0}
-                  max={12}
-                  step={0.5}
-                  format={(v) => formatDb(v)}
-                  onChange={(v) => setDeqBand(i, "maxCutDb", v)}
-                  onReset={() => setDeqBand(i, "maxCutDb", DEFAULT_PARAMS.deq.bands[i].maxCutDb)}
-                />
-                <Knob
-                  label="Attack"
-                  size={40}
-                  value={band.attackMs}
-                  min={1}
-                  max={100}
-                  step={1}
-                  format={(v) => `${Math.round(v)} ms`}
-                  onChange={(v) => setDeqBand(i, "attackMs", v)}
-                  onReset={() => setDeqBand(i, "attackMs", DEFAULT_PARAMS.deq.bands[i].attackMs)}
-                />
-                <Knob
-                  label="Release"
-                  size={40}
-                  value={band.releaseMs}
-                  min={20}
-                  max={800}
-                  step={10}
-                  format={(v) => `${Math.round(v)} ms`}
-                  onChange={(v) => setDeqBand(i, "releaseMs", v)}
-                  onReset={() => setDeqBand(i, "releaseMs", DEFAULT_PARAMS.deq.bands[i].releaseMs)}
-                />
-              </div>
-              <div className="panel-well w-full rounded-md px-2 py-1 text-center">
-                <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-                  Live cut
-                </p>
-                <p className="text-readout text-[11px] font-medium text-panel-fg">
-                  {params.deq.on ? `−${(snap?.gr.deq[i] ?? 0).toFixed(1)} dB` : "bypassed"}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
-          Each band watches its own level and ducks itself when it pokes over
-          the threshold — mud control, harshness taming and de-essing without
-          touching the rest of the program.
-        </p>
-      </ModuleCard>
-
-      {/* ── 6-band multiband compressor ── */}
-      <ModuleCard
-        className="xl:col-span-8"
-        title="Multiband compressor"
-        subtitle="6 bands · LR4 crossovers · per-band dynamics"
-        enabled={params.multiband.on}
-        onToggle={() =>
-          setParams((p) => ({ ...p, multiband: { ...p.multiband, on: !p.multiband.on } }))
-        }
-      >
-        <div className="mb-3 flex flex-wrap items-end gap-3">
-          {SPLIT_RANGES.map(([min, max], i) => (
-            <Knob
-              key={i}
-              label={`X${i + 1}`}
-              size={40}
-              value={params.multiband.splitsHz[i]}
-              min={min}
-              max={max}
-              step={5}
-              format={formatHz}
-              onChange={(v) => setSplit(i, v)}
-              onReset={() => setSplit(i, DEFAULT_SPLITS[i])}
-            />
-          ))}
-          <p className="pb-1 max-w-[16rem] text-[10px] leading-4 text-muted-foreground">
-            Five crossover points split the program into six band-limited
-            lanes so bass transients never pump the midrange.
-          </p>
-        </div>
-
-        <div className="overflow-x-auto pb-1">
-          <div className="grid min-w-[46rem] grid-cols-[4rem_repeat(6,minmax(0,1fr))] items-center gap-x-2 gap-y-2.5">
-            <span />
-            {MB_LABELS.map((label, i) => (
-              <div key={label} className="text-center">
-                <p className="text-[10px] font-semibold tracking-[0.12em] text-foreground/80 uppercase">
-                  {label}
-                </p>
-                <p className="text-[9px] text-muted-foreground">
-                  {bandRange(i, params.multiband.splitsHz)}
-                </p>
-              </div>
-            ))}
-
-            {MB_ROWS.map((row) => (
-              <FragmentRow key={row.key} label={row.label}>
-                {params.multiband.bands.map((band, i) => (
-                  <Knob
-                    key={i}
-                    label=""
-                    size={40}
-                    value={band[row.key]}
-                    min={row.min}
-                    max={row.max}
-                    step={row.step}
-                    bipolar={row.bipolar}
-                    format={row.fmt}
-                    onChange={(v) => setMbBand(i, row.key, v)}
-                    onReset={() => setMbBand(i, row.key, DEFAULT_PARAMS.multiband.bands[i][row.key])}
-                  />
-                ))}
-              </FragmentRow>
-            ))}
-
-            <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-              GR
-            </span>
-            <div className="col-span-6 flex justify-around">
-              {MB_LABELS.map((label, i) => (
-                <GainReductionMeter
-                  key={label}
-                  get={() => snap?.gr.bands[i] ?? 0}
-                  height={84}
-                  width={7}
-                  label={label}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-      </ModuleCard>
-
-      {/* ── program AGC ── */}
+      {/* ── stereo & output ── */}
       <ModuleCard
         className="xl:col-span-4"
-        title="Program AGC"
-        subtitle="Wideband leveller ahead of the limiter"
-        enabled={params.agc.on}
-        onToggle={() => setParams((p) => ({ ...p, agc: { ...p.agc, on: !p.agc.on } }))}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="grid flex-1 grid-cols-3 gap-x-2 gap-y-3">
-            <Knob
-              label="Thresh"
-              size={44}
-              bipolar
-              value={params.agc.thresholdDb}
-              min={-40}
-              max={0}
-              step={0.5}
-              format={formatDb}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, thresholdDb: v } }))}
-            />
-            <Knob
-              label="Ratio"
-              size={44}
-              value={params.agc.ratio}
-              min={1}
-              max={10}
-              step={0.1}
-              format={(v) => `${v.toFixed(1)}:1`}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, ratio: v } }))}
-            />
-            <Knob
-              label="Knee"
-              size={44}
-              value={params.agc.kneeDb}
-              min={0}
-              max={24}
-              step={0.5}
-              format={(v) => formatDb(v, 0)}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, kneeDb: v } }))}
-            />
-            <Knob
-              label="Attack"
-              size={44}
-              value={params.agc.attackMs}
-              min={0.5}
-              max={200}
-              step={0.5}
-              format={(v) => `${v < 10 ? v.toFixed(1) : Math.round(v)} ms`}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, attackMs: v } }))}
-            />
-            <Knob
-              label="Release"
-              size={44}
-              value={params.agc.releaseMs}
-              min={50}
-              max={2000}
-              step={10}
-              format={(v) => `${Math.round(v)} ms`}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, releaseMs: v } }))}
-            />
-            <Knob
-              label="Makeup"
-              size={44}
-              bipolar
-              value={params.agc.makeupDb}
-              min={-6}
-              max={18}
-              step={0.5}
-              format={formatDb}
-              onChange={(v) => setParams((p) => ({ ...p, agc: { ...p.agc, makeupDb: v } }))}
-            />
-          </div>
-          <GainReductionMeter get={() => snap?.gr.agc ?? 0} height={150} width={10} label="AGC" />
-        </div>
-      </ModuleCard>
-
-      {/* ── composite limiter ── */}
-      <ModuleCard
-        className="xl:col-span-5"
-        title="Composite limiter"
-        subtitle="Fast peak stage + per-sample ceiling guard"
-        enabled={params.limiter.on}
-        onToggle={() =>
-          setParams((p) => ({ ...p, limiter: { ...p.limiter, on: !p.limiter.on } }))
-        }
-        right={
-          <span className="hidden items-center gap-1.5 text-[10px] text-muted-foreground sm:flex">
-            <span className={cn("led size-1.5", params.limiter.on ? "led-on" : undefined)} />
-            Guard {params.limiter.on ? "armed" : "off"}
-          </span>
-        }
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="grid flex-1 grid-cols-3 gap-x-2 gap-y-3">
-            <Knob
-              label="Ceiling"
-              size={46}
-              accent
-              value={params.limiter.ceilingDb}
-              min={-6}
-              max={0}
-              step={0.1}
-              format={formatDb}
-              onChange={(v) => setParams((p) => ({ ...p, limiter: { ...p.limiter, ceilingDb: v } }))}
-            />
-            <Knob
-              label="Attack"
-              size={46}
-              value={params.limiter.attackMs}
-              min={0.1}
-              max={20}
-              step={0.1}
-              format={(v) => `${v.toFixed(1)} ms`}
-              onChange={(v) => setParams((p) => ({ ...p, limiter: { ...p.limiter, attackMs: v } }))}
-            />
-            <Knob
-              label="Release"
-              size={46}
-              value={params.limiter.releaseMs}
-              min={10}
-              max={500}
-              step={5}
-              format={(v) => `${Math.round(v)} ms`}
-              onChange={(v) => setParams((p) => ({ ...p, limiter: { ...p.limiter, releaseMs: v } }))}
-            />
-          </div>
-          <GainReductionMeter get={() => snap?.gr.limiter ?? 0} height={110} width={10} label="LIMIT" />
-        </div>
-        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
-          The fast peak stage does the lifting; a 4×-oversampled per-sample
-          soft-clip guard downstream of the output trim makes{" "}
-          <span className="text-readout text-foreground/80">
-            {formatDb(params.limiter.ceilingDb)}
-          </span>{" "}
-          a hard promise on the composite bus.
-        </p>
-      </ModuleCard>
-
-      {/* ── loudness rider ── */}
-      <ModuleCard
-        className="xl:col-span-5"
-        title="Loudness rider"
-        subtitle="Compellor-style leveler · AERO long-term controller"
-        enabled={params.rider.on}
-        onToggle={() =>
-          setParams((p) => ({ ...p, rider: { ...p.rider, on: !p.rider.on } }))
-        }
-        right={
-          <span className="hidden text-[10px] text-muted-foreground sm:inline">
-            K-weighted · silence-gated
-          </span>
-        }
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="grid flex-1 grid-cols-2 gap-x-2 gap-y-3">
-            <Knob
-              label="Target"
-              size={46}
-              accent
-              value={params.rider.targetLufs}
-              min={-32}
-              max={-16}
-              step={0.5}
-              format={(v) => `${v.toFixed(1).replace("-", "−")} L`}
-              onChange={(v) =>
-                setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: v } }))
-              }
-              onReset={() =>
-                setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: -23 } }))
-              }
-            />
-            <Knob
-              label="Max ride"
-              size={46}
-              bipolar
-              value={params.rider.maxRideDb}
-              min={0}
-              max={12}
-              step={0.5}
-              format={formatDb}
-              onChange={(v) =>
-                setParams((p) => ({ ...p, rider: { ...p.rider, maxRideDb: v } }))
-              }
-              onReset={() =>
-                setParams((p) => ({ ...p, rider: { ...p.rider, maxRideDb: 8 } }))
-              }
-            />
-            <div className="col-span-2 flex gap-2">
-              {(["fast", "slow"] as const).map((speed) => (
-                <button
-                  key={speed}
-                  type="button"
-                  onClick={() =>
-                    setParams((p) => ({ ...p, rider: { ...p.rider, speed } }))
-                  }
-                  className={cn(
-                    "flex-1 cursor-pointer rounded-md border px-2 py-1 text-[10px] font-semibold tracking-wider uppercase transition-colors",
-                    params.rider.speed === speed
-                      ? "border-signal/40 bg-signal/10 text-signal"
-                      : "border-border/70 text-muted-foreground hover:bg-background",
-                  )}
-                >
-                  {speed === "fast" ? "Fast · 1.5 s/3 s" : "Slow · 5 s/10 s"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="panel-well flex flex-col items-center justify-center rounded-md px-3 py-4">
-            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-              Ride
-            </p>
-            <p className="text-readout mt-1 text-lg font-medium text-panel-fg">
-              {params.rider.on
-                ? `${(snap?.riderDb ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.riderDb ?? 0).toFixed(1)}`
-                : "off"}
-            </p>
-            <p className="text-[8px] text-panel-mut">dB</p>
-          </div>
-        </div>
-        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
-          Slow average-power ride toward {params.rider.targetLufs.toFixed(1).replace("-", "−")} LUFS.
-          Pauses freeze the ride (DVG-style silence gate), so background noise
-          never swells between segments.
-        </p>
-      </ModuleCard>
-
-      {/* ── harmonic exciter ── */}
-      <ModuleCard
-        className="xl:col-span-3"
-        title="Exciter"
-        subtitle="Parallel harmonic sweetening"
-        enabled={params.exciter.on}
-        onToggle={() =>
-          setParams((p) => ({ ...p, exciter: { ...p.exciter, on: !p.exciter.on } }))
-        }
+        title="Stereo & output"
+        subtitle="Width · trim · monitor"
       >
         <div className="flex items-start justify-around gap-2">
           <Knob
-            label="Mix"
-            size={46}
-            value={params.exciter.mix}
-            min={0}
-            max={12}
-            step={0.5}
-            format={(v) => `${v.toFixed(1)} %`}
-            onChange={(v) =>
-              setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: v } }))
-            }
-            onReset={() => setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: 3 } }))}
-          />
-          <Knob
-            label="Freq"
-            size={46}
-            value={params.exciter.freqHz}
-            min={2000}
-            max={12000}
-            step={100}
-            format={formatHz}
-            onChange={(v) =>
-              setParams((p) => ({ ...p, exciter: { ...p.exciter, freqHz: v } }))
-            }
-            onReset={() =>
-              setParams((p) => ({ ...p, exciter: { ...p.exciter, freqHz: 3200 } }))
-            }
-          />
-        </div>
-        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
-          Odd-order harmonics generated from a band around {formatHz(params.exciter.freqHz)}
-          and blended back — the Aphex/Prism “sweetening” trick for air and
-          presence without EQ boost.
-        </p>
-      </ModuleCard>
-
-      {/* ── stereo width ── */}
-      <ModuleCard
-        className="xl:col-span-4"
-        title="Stereo width"
-        subtitle="M/S side-channel gain · Stereo Tool boost"
-        right={
-          <span className="hidden text-[10px] text-muted-foreground sm:inline">
-            Matrix is exact at ×1.0 — stereo sources only
-          </span>
-        }
-      >
-        <div className="flex items-start justify-between gap-4">
-          <Knob
             label="Width"
-            size={56}
+            size={52}
             bipolar
             value={params.stereo.width}
             min={0.5}
             max={2}
             step={0.01}
             format={(v) => `×${v.toFixed(2)}`}
-            onChange={(v) =>
-              setParams((p) => ({ ...p, stereo: { width: v } }))
-            }
+            onChange={(v) => setParams((p) => ({ ...p, stereo: { width: v } }))}
             onReset={() => setParams((p) => ({ ...p, stereo: { width: 1 } }))}
           />
-          <div className="flex-1">
-            <div className="panel-well rounded-md px-2.5 py-2">
-              <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-                Correlation
-              </p>
-              <p className="text-readout mt-0.5 text-[11px] font-medium text-panel-fg">
-                {(snap?.correlation ?? 1).toFixed(2)}
-                <span className="ml-2 text-[9px] text-panel-mut">
-                  {params.stereo.width > 1.4
-                    ? "wide — watch multipath"
-                    : params.stereo.width < 0.8
-                      ? "collapsing toward mono"
-                      : "healthy"}
-                </span>
-              </p>
-            </div>
-            <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
-              Scales only the side signal. ×1.00 bypasses the matrix entirely;
-              keep an eye on the correlation readout — below 0.3 collapses
-              mono compatibility.
-            </p>
-          </div>
-        </div>
-      </ModuleCard>
-
-      {/* ── output & monitoring ── */}
-      <ModuleCard
-        className="xl:col-span-2"
-        title="Output"
-        subtitle="Trim & monitor"
-      >
-        <div className="flex flex-col items-center gap-4">
           <Knob
             label="Trim"
             size={52}
@@ -753,52 +506,85 @@ export function ProcessingTab({
             }}
             onReset={() => setParams((p) => ({ ...p, monitorDb: -6 }))}
           />
-          <div className="flex w-full gap-2">
-            <Button
-              size="sm"
-              variant={monitorMuted ? "default" : "outline"}
-              className="h-8 flex-1 text-[10px] cursor-pointer"
-              onClick={() => {
-                const next = !monitorMuted;
-                setMonitorMuted(next);
-                engine.setMonitorMuted(next);
-              }}
-            >
-              {monitorMuted ? <VolumeX className="mr-1 size-3.5" /> : <Volume2 className="mr-1 size-3.5" />}
-              {monitorMuted ? "Muted" : "Listen"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 flex-1 text-[10px] cursor-pointer"
-              onPointerDown={() => engine.duck()}
-            >
-              <Zap className="mr-1 size-3.5" />
-              Duck
-            </Button>
-          </div>
-          <StereoLevelMeter kind="out" height={140} />
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button
+            size="sm"
+            variant={monitorMuted ? "default" : "outline"}
+            className="h-8 cursor-pointer text-[10px]"
+            onClick={() => {
+              const next = !monitorMuted;
+              setMonitorMuted(next);
+              engine.setMonitorMuted(next);
+            }}
+          >
+            {monitorMuted ? <VolumeX className="size-3.5" /> : <Volume2 className="size-3.5" />}
+            {monitorMuted ? "Muted" : "Listen"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 cursor-pointer text-[10px]"
+            onPointerDown={() => engine.duck()}
+          >
+            <Zap className="size-3.5" />
+            Duck
+          </Button>
+        </div>
+
+        <div className="panel-well mt-2 rounded px-2.5 py-1.5">
+          <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+            Correlation
+          </p>
+          <p className="text-readout mt-0.5 text-[11px] font-medium text-white">
+            {(snap?.correlation ?? 1).toFixed(2)}
+            <span className="ml-2 text-[9px] text-panel-mut">
+              {params.stereo.width > 1.4
+                ? "wide — watch multipath"
+                : params.stereo.width < 0.8
+                  ? "collapsing toward mono"
+                  : "healthy"}
+            </span>
+          </p>
+        </div>
+
+        <div className="mt-2 flex justify-center">
+          <StereoLevelMeter kind="out" height={132} />
         </div>
       </ModuleCard>
     </div>
   );
 }
 
-/* ── row helper for the multiband matrix ────────────────────────────────── */
+/* ── inline horizontal slider used inside control rows ──────────────────── */
 
-function FragmentRow({
+function SliderRow({
+  min,
+  max,
+  step,
+  value,
+  onChange,
   label,
-  children,
+  className,
 }: {
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (v: number) => void;
   label: string;
-  children: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <>
-      <span className="self-center text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-        {label}
-      </span>
-      <div className="col-span-6 flex justify-around">{children}</div>
-    </>
+    <Slider
+      className={cn("w-40", className)}
+      min={min}
+      max={max}
+      step={step}
+      value={[value]}
+      onValueChange={(v) => onChange(v[0])}
+      aria-label={label}
+    />
   );
 }

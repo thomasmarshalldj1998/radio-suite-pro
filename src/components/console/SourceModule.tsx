@@ -1,15 +1,17 @@
 import type { SignalMode, SourceKind } from "@/lib/audio/engine";
 import { getEngine } from "@/lib/audio/engine";
 import type { ProcessorParams } from "@/lib/audio/params";
-import { formatHz, formatTime } from "@/lib/audio/params";
-import { StereoLevelMeter } from "@/components/console/Meters";
-import { Fader } from "@/components/console/Fader";
+import { formatTime } from "@/lib/audio/params";
+import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
 import { cn } from "@/lib/utils";
 import { FileAudio, Mic, Pause, Play, Radio, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
+/** Signed value with typographic minus, always 2 decimal places. */
+const sgn = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2).replace("-", "−")}`;
 
 /* ── waveform with scrub-to-seek ────────────────────────────────────────── */
 
@@ -50,7 +52,7 @@ function Waveform({ peaks, height = 52 }: { peaks: Float32Array; height?: number
         const bh = Math.max(1.5, v * (h - 6));
         const x = i * 3;
         ctx.fillStyle =
-          x / w <= posRatio ? "rgba(239,91,43,0.85)" : "rgba(255,255,255,0.22)";
+          x / w <= posRatio ? "rgba(74,144,226,0.9)" : "rgba(255,255,255,0.22)";
         ctx.fillRect(x, mid - bh / 2, 2, bh);
       }
       // playhead
@@ -88,7 +90,7 @@ function Waveform({ peaks, height = 52 }: { peaks: Float32Array; height?: number
   );
 }
 
-/* ── input module ───────────────────────────────────────────────────────── */
+/* ── program source & preamp ────────────────────────────────────────────── */
 
 export function SourceModule({
   params,
@@ -100,6 +102,7 @@ export function SourceModule({
   const engine = getEngine();
   const [source, setSourceState] = useState<SourceKind>(engine.sourceKind);
   const [signalMode, setSignalModeState] = useState<SignalMode>(engine.signalMode);
+  const [genOn, setGenOn] = useState(engine.generatorOn);
   const [micStatus, setMicStatus] = useState(engine.micStatus);
   const [micLabel, setMicLabel] = useState(engine.micLabel);
   const [fileMeta, setFileMeta] = useState<{
@@ -118,6 +121,11 @@ export function SourceModule({
         setMicLabel((prev) => (prev === engine.micLabel ? prev : engine.micLabel));
         setPlaying((prev) => (prev === engine.filePlaying ? prev : engine.filePlaying));
         setPosition(engine.filePosition);
+        setSourceState((prev) => (prev === engine.sourceKind ? prev : engine.sourceKind));
+        setSignalModeState((prev) =>
+          prev === engine.signalMode ? prev : engine.signalMode,
+        );
+        setGenOn((prev) => (prev === engine.generatorOn ? prev : engine.generatorOn));
       }),
     [engine],
   );
@@ -143,11 +151,12 @@ export function SourceModule({
       type="button"
       onClick={() => selectSource(kind)}
       className={cn(
-        "flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-2 py-2.5 text-[10px] font-medium tracking-wide uppercase transition-colors",
+        "flex items-center justify-center gap-2 rounded border px-3 py-2.5 text-[11px] font-semibold tracking-[0.12em] uppercase transition-colors",
         source === kind
-          ? "border-foreground/25 bg-foreground/[0.06] text-foreground"
+          ? "border-signal bg-signal/15 text-signal"
           : "border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
+      aria-pressed={source === kind}
     >
       {icon}
       {label}
@@ -155,34 +164,37 @@ export function SourceModule({
   );
 
   return (
-    <ModuleCard title="Input" subtitle="Program source & preamp">
-      <div className="flex gap-2">
+    <ModuleCard
+      title="Program source & preamp"
+      subtitle="Source select · trim · filter · phase · gate"
+    >
+      {/* source select */}
+      <div className="grid grid-cols-3 gap-2">
         {sourceBtn("mic", <Mic className="size-4" />, "Mic")}
-        {sourceBtn("signal", <Radio className="size-4" />, "Signal")}
+        {sourceBtn("signal", <Radio className="size-4" />, "Stream")}
         {sourceBtn("file", <FileAudio className="size-4" />, "File")}
       </div>
 
-      <div className="mt-3 min-h-[64px] rounded-lg border border-border/60 bg-muted/40 p-2.5">
+      {/* source detail */}
+      <div className="mt-3 min-h-[64px] rounded border border-border/60 bg-muted/40 p-2.5">
         {source === "signal" && (
-          <div className="flex items-center gap-2">
-            {(["tone", "pink"] as SignalMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => {
-                  setSignalModeState(mode);
-                  void engine.setSignalMode(mode);
-                }}
-                className={cn(
-                  "rounded-md border px-2.5 py-1 text-[10px] font-medium transition-colors",
-                  signalMode === mode
-                    ? "border-signal/40 bg-signal/10 text-signal"
-                    : "border-border/70 text-muted-foreground hover:bg-background",
-                )}
-              >
-                {mode === "tone" ? "1 kHz tone −18 dBFS" : "Pink noise −18 dBFS"}
-              </button>
-            ))}
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium">
+                {genOn
+                  ? signalMode === "tone"
+                    ? "1 kHz tone · −18 dBFS"
+                    : "Pink noise · −18 dBFS"
+                  : "Generator off — stream silent"}
+              </p>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                Built-in program stream feeding the chain.
+              </p>
+            </div>
+            <span
+              className={cn("led shrink-0", genOn && "led-on")}
+              aria-hidden
+            />
           </div>
         )}
 
@@ -273,46 +285,122 @@ export function SourceModule({
         )}
       </div>
 
-      {/* preamp + HPF */}
-      <div className="mt-4 flex items-end justify-between gap-3">
-        <div className="flex gap-4">
-          <Fader
-            label="Input"
-            value={params.inputGainDb}
+      {/* control strip */}
+      <div className="mt-3 divide-y divide-border/60 rounded border border-border/60 bg-card">
+        <CtrlRow label="Input trim">
+          <Slider
+            className="w-40"
             min={-24}
             max={24}
             step={0.5}
-            height={118}
-            format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`}
-            onChange={(v) => setParams((p) => ({ ...p, inputGainDb: v }))}
+            value={[params.inputGainDb]}
+            onValueChange={(v) => setParams((p) => ({ ...p, inputGainDb: v[0] }))}
+            aria-label="Input trim"
           />
-          <div className="flex flex-col items-center gap-2">
-            <Fader
-              label="HPF"
-              value={params.hpf.freqHz}
-              min={20}
-              max={300}
-              step={1}
-              height={118}
-              accent={params.hpf.on}
-              format={(v) => formatHz(v)}
-              onChange={(v) =>
-                setParams((p) => ({ ...p, hpf: { ...p.hpf, freqHz: v } }))
-              }
-            />
-            <label className="flex cursor-pointer items-center gap-1.5 text-[9px] font-semibold tracking-wider text-muted-foreground uppercase">
-              <Switch
-                checked={params.hpf.on}
-                onCheckedChange={(on) =>
-                  setParams((p) => ({ ...p, hpf: { ...p.hpf, on } }))
-                }
-                aria-label="High-pass filter"
-              />
-              On
-            </label>
-          </div>
-        </div>
-        <StereoLevelMeter kind="in" height={158} />
+          <Val>{sgn(params.inputGainDb)} dB</Val>
+        </CtrlRow>
+
+        <CtrlRow label="HPF">
+          <Slider
+            className="w-28"
+            min={20}
+            max={300}
+            step={1}
+            disabled={!params.hpf.on}
+            value={[params.hpf.freqHz]}
+            onValueChange={(v) =>
+              setParams((p) => ({ ...p, hpf: { ...p.hpf, freqHz: v[0] } }))
+            }
+            aria-label="High-pass filter frequency"
+          />
+          <Val>{params.hpf.freqHz.toFixed(2)} Hz</Val>
+          <Seg
+            ariaLabel="High-pass filter"
+            value={params.hpf.on ? "on" : "bypass"}
+            options={[
+              { value: "on", label: "On" },
+              { value: "bypass", label: "Bypass" },
+            ]}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, hpf: { ...p.hpf, on: v === "on" } }))
+            }
+          />
+        </CtrlRow>
+
+        <CtrlRow label="Phase rot">
+          <Seg
+            ariaLabel="Phase rotation mode"
+            value={params.phase.mode}
+            options={[
+              { value: "auto", label: "Auto" },
+              { value: "manual", label: "Manual" },
+            ]}
+            onChange={(mode) =>
+              setParams((p) => ({
+                ...p,
+                phase: { ...p.phase, mode: mode as "auto" | "manual" },
+              }))
+            }
+          />
+          <Slider
+            className="w-28"
+            min={100}
+            max={1000}
+            step={10}
+            disabled={params.phase.mode === "auto"}
+            value={[params.phase.freqHz]}
+            onValueChange={(v) =>
+              setParams((p) => ({ ...p, phase: { ...p.phase, freqHz: v[0] } }))
+            }
+            aria-label="Phase rotation frequency"
+          />
+          <Val>
+            {(params.phase.mode === "auto" ? 300 : params.phase.freqHz).toFixed(2)} Hz
+          </Val>
+        </CtrlRow>
+
+        <CtrlRow label="Silence gate">
+          <Slider
+            className="w-24"
+            min={-80}
+            max={-20}
+            step={1}
+            disabled={!params.gate.on}
+            value={[params.gate.thresholdDb]}
+            onValueChange={(v) =>
+              setParams((p) => ({ ...p, gate: { ...p.gate, thresholdDb: v[0] } }))
+            }
+            aria-label="Silence gate threshold"
+          />
+          <Val>{sgn(params.gate.thresholdDb)} dB</Val>
+          <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+            Hold
+          </span>
+          <Slider
+            className="w-16"
+            min={0}
+            max={2000}
+            step={50}
+            disabled={!params.gate.on}
+            value={[params.gate.holdMs]}
+            onValueChange={(v) =>
+              setParams((p) => ({ ...p, gate: { ...p.gate, holdMs: v[0] } }))
+            }
+            aria-label="Silence gate hold"
+          />
+          <Val>{(params.gate.holdMs / 1000).toFixed(2)} s</Val>
+          <Seg
+            ariaLabel="Silence gate"
+            value={params.gate.on ? "on" : "bypass"}
+            options={[
+              { value: "on", label: "On" },
+              { value: "bypass", label: "Bypass" },
+            ]}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, gate: { ...p.gate, on: v === "on" } }))
+            }
+          />
+        </CtrlRow>
       </div>
     </ModuleCard>
   );

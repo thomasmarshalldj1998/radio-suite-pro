@@ -25,6 +25,8 @@ export interface BandCompParams {
 /** One dynamic-EQ band: cut the band (up to maxCutDb) when it exceeds threshold. */
 export interface DeqBand {
   freqHz: number;
+  /** Detector/cut bandwidth (Q of the band-pass). */
+  q: number;
   thresholdDb: number;
   maxCutDb: number;
   attackMs: number;
@@ -40,6 +42,8 @@ export interface RiderParams {
   on: boolean;
   targetLufs: number;
   maxRideDb: number;
+  /** Silence gate — never ride background noise up during pauses. */
+  gateDb: number;
   /** "fast" ≈ Compellor fast leveler (1.5 s down / 3 s up), "slow" ≈ 5 s / 10 s. */
   speed: "fast" | "slow";
 }
@@ -53,11 +57,15 @@ export type MultibandBands = [
   BandCompParams,
   BandCompParams,
 ];
-export type DeqBands = [DeqBand, DeqBand, DeqBand];
+export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
 
 export interface ProcessorParams {
   inputGainDb: number;
   hpf: { on: boolean; freqHz: number };
+  /** Phase rotation (allpass): auto = fixed voice window, manual = user freq. */
+  phase: { mode: "auto" | "manual"; freqHz: number };
+  /** Input-stage silence gate (close below threshold, hold, reopen). */
+  gate: { on: boolean; thresholdDb: number; holdMs: number };
   eq: { on: boolean; bands: EqBand[] };
   deq: { on: boolean; bands: DeqBands };
   multiband: {
@@ -91,8 +99,15 @@ export interface ProcessorParams {
 }
 
 export const EQ_FREQS = [60, 200, 700, 2500, 6000, 12000] as const;
-export const MB_LABELS = ["Low", "Lo-mid", "Mid", "Hi-mid", "High", "Air"] as const;
-export const DEQ_LABELS = ["Mud", "Presence", "De-ess"] as const;
+export const MB_LABELS = [
+  "Sub-bass",
+  "Bass",
+  "Low-mid",
+  "High-mid",
+  "Presence",
+  "Hf rolloff",
+] as const;
+export const DEQ_LABELS = ["Sub", "Mud", "Mid", "Presence", "Air"] as const;
 export const LUFS_TARGET = -23;
 export const TRUE_PEAK_TARGET = -1;
 
@@ -102,6 +117,8 @@ export const DEFAULT_SPLITS: MultibandSplits = [140, 450, 1800, 4500, 9000];
 export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
   hpf: { on: true, freqHz: 80 },
+  phase: { mode: "auto", freqHz: 300 },
+  gate: { on: true, thresholdDb: -52, holdMs: 500 },
   eq: {
     on: true,
     bands: [
@@ -116,9 +133,11 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   deq: {
     on: true,
     bands: [
-      { freqHz: 120, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
-      { freqHz: 3200, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
-      { freqHz: 8000, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+      { freqHz: 80, q: 0.9, thresholdDb: -20, maxCutDb: 5, attackMs: 12, releaseMs: 280 },
+      { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+      { freqHz: 1600, q: 1.1, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+      { freqHz: 5000, q: 1.2, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 160 },
+      { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
     ],
   },
   multiband: {
@@ -145,7 +164,13 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
   stereo: { width: 1 },
   exciter: { on: false, mix: 3, freqHz: 3200 },
-  rider: { on: false, targetLufs: LUFS_TARGET, maxRideDb: 8, speed: "fast" },
+  rider: {
+    on: false,
+    targetLufs: LUFS_TARGET,
+    maxRideDb: 8,
+    gateDb: -55,
+    speed: "fast",
+  },
   outputGainDb: 0,
   monitorDb: -6,
   duckDb: 12,
@@ -236,9 +261,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 130, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
-          { freqHz: 3000, thresholdDb: -18, maxCutDb: 6, attackMs: 6, releaseMs: 170 },
-          { freqHz: 6500, thresholdDb: -24, maxCutDb: 10, attackMs: 4, releaseMs: 110 },
+          { freqHz: 80, q: 0.9, thresholdDb: -26, maxCutDb: 4, attackMs: 12, releaseMs: 280 },
+          { freqHz: 250, q: 1.0, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -22, maxCutDb: 4, attackMs: 8, releaseMs: 200 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -18, maxCutDb: 6, attackMs: 6, releaseMs: 170 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 10, attackMs: 4, releaseMs: 110 },
         ],
       },
       multiband: mb6(
@@ -281,9 +308,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 100, thresholdDb: -24, maxCutDb: 4, attackMs: 25, releaseMs: 450 },
-          { freqHz: 3500, thresholdDb: -26, maxCutDb: 3, attackMs: 20, releaseMs: 400 },
-          { freqHz: 9000, thresholdDb: -28, maxCutDb: 4, attackMs: 15, releaseMs: 350 },
+          { freqHz: 80, q: 0.9, thresholdDb: -28, maxCutDb: 3, attackMs: 30, releaseMs: 500 },
+          { freqHz: 250, q: 1.0, thresholdDb: -24, maxCutDb: 4, attackMs: 25, releaseMs: 450 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -28, maxCutDb: 2, attackMs: 22, releaseMs: 420 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -26, maxCutDb: 3, attackMs: 20, releaseMs: 400 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -28, maxCutDb: 4, attackMs: 15, releaseMs: 350 },
         ],
       },
       multiband: mb6(
@@ -326,9 +355,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 90, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
-          { freqHz: 3200, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
-          { freqHz: 7500, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+          { freqHz: 80, q: 0.9, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 240 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
         ],
       },
       multiband: mb6(
@@ -372,9 +403,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 110, thresholdDb: -20, maxCutDb: 8, attackMs: 8, releaseMs: 200 },
-          { freqHz: 2800, thresholdDb: -16, maxCutDb: 8, attackMs: 5, releaseMs: 150 },
-          { freqHz: 8000, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 120 },
+          { freqHz: 80, q: 0.9, thresholdDb: -24, maxCutDb: 6, attackMs: 10, releaseMs: 220 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 8, attackMs: 8, releaseMs: 200 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 7, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -16, maxCutDb: 8, attackMs: 5, releaseMs: 150 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 120 },
         ],
       },
       multiband: mb6(
@@ -417,9 +450,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 100, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
-          { freqHz: 3000, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
-          { freqHz: 6800, thresholdDb: -22, maxCutDb: 9, attackMs: 4, releaseMs: 120 },
+          { freqHz: 80, q: 0.9, thresholdDb: -26, maxCutDb: 5, attackMs: 12, releaseMs: 280 },
+          { freqHz: 250, q: 1.0, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -24, maxCutDb: 4, attackMs: 8, releaseMs: 200 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 9, attackMs: 4, releaseMs: 120 },
         ],
       },
       multiband: mb6(
@@ -488,7 +523,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 700,
         makeupDb: 3,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, speed: "fast" },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, gateDb: -55, speed: "fast" },
       limiter: { on: true, ceilingDb: -1, attackMs: 0.1, releaseMs: 200 },
     }),
   },
@@ -535,7 +570,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 500,
         makeupDb: 3,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 6, speed: "slow" },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 6, gateDb: -55, speed: "slow" },
       exciter: { on: true, mix: 3, freqHz: 3200 },
       stereo: { width: 1.06 },
       limiter: { on: true, ceilingDb: -1, attackMs: 0.3, releaseMs: 150 },
@@ -582,7 +617,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 600,
         makeupDb: 2,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, speed: "slow" },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, gateDb: -55, speed: "slow" },
       limiter: { on: true, ceilingDb: -2, attackMs: 0.5, releaseMs: 300 },
     }),
   },
@@ -609,9 +644,11 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       deq: {
         on: true,
         bands: [
-          { freqHz: 90, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
-          { freqHz: 3200, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
-          { freqHz: 7500, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+          { freqHz: 80, q: 0.9, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 240 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
         ],
       },
       multiband: {
@@ -656,8 +693,8 @@ export function cloneParams(p: ProcessorParams): ProcessorParams {
   return structuredClone(p);
 }
 
-/** Format dB with a typographic minus, e.g. \"−3.5 dB\". */
-export function formatDb(db: number, digits = 1): string {
+/** Format dB with a typographic minus, e.g. \"−3.50 dB\". Console values show 2 dp. */
+export function formatDb(db: number, digits = 2): string {
   const v = Math.abs(db) < Math.pow(10, -digits) / 2 ? 0 : db;
   return `${v.toFixed(digits).replace("-", "−")} dB`;
 }

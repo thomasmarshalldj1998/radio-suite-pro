@@ -1,28 +1,17 @@
 import { LogPanel } from "@/components/console/LogPanel";
-import {
-  CorrelationMeter,
-  GainReductionMeter,
-  LoudnessMeter,
-} from "@/components/console/Meters";
+import { CorrelationMeter, LoudnessMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
-import { api } from "@/convex/_generated/api";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
+import { formatBytes, formatUptime } from "@/lib/audio/encoder";
 import {
-  codecById,
-  formatBytes,
-  formatUptime,
-} from "@/lib/audio/encoder";
+  outputStatus,
+  useOutputs,
+  type OutputStatusKind,
+} from "@/lib/audio/outputs";
+import { LUFS_TARGET, TRUE_PEAK_TARGET } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
-import {
-  DEQ_LABELS,
-  LUFS_TARGET,
-  MB_LABELS,
-  TRUE_PEAK_TARGET,
-} from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
-import { useQuery } from "convex/react";
-import { Activity, CheckCircle2, Gauge, RadioTower, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
@@ -40,58 +29,92 @@ function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
   return snap;
 }
 
-function StatusChip({
+const fmt2 = (v: number) => v.toFixed(2).replace("-", "−");
+
+/* ── big compliance metric card ─────────────────────────────────────────── */
+
+function MetricCard({
   label,
   value,
+  unit,
   ok,
 }: {
   label: string;
   value: string;
+  unit: string;
   ok: boolean | null;
 }) {
   return (
-    <div className="panel-well flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5">
-      <span className="text-[9px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-        {label}
-      </span>
-      <span className="flex items-center gap-1.5">
+    <div className="panel rounded-lg p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[9px] font-semibold tracking-[0.16em] text-panel-mut uppercase">
+          {label}
+        </p>
         <span
           className={cn(
             "led size-1.5",
-            ok === true ? "led-on" : ok === false ? "led-hot" : undefined,
+            ok === true && "led-on",
+            ok === false && "led-hot",
           )}
+          aria-hidden
         />
+      </div>
+      <p className="text-readout mt-2 text-3xl leading-none font-semibold text-white">
+        {value}
+        <span className="ml-1.5 text-xs font-normal text-panel-mut">{unit}</span>
+      </p>
+    </div>
+  );
+}
+
+/* ── one band gain-reduction row ────────────────────────────────────────── */
+
+function GrCell({ index, value }: { index: number; value: number }) {
+  const pct = Math.min(100, Math.max(0, (value / 12) * 100));
+  return (
+    <div className="panel-well flex items-center gap-2 rounded px-2.5 py-2">
+      <span className="text-readout text-[10px] text-panel-mut">[{index}]</span>
+      <span className="block h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-input">
         <span
-          className={cn(
-            "text-readout text-[11px] font-medium",
-            ok === false ? "text-meter-hot" : "text-panel-fg",
-          )}
-        >
-          {value}
-        </span>
+          className="block h-full rounded-full bg-meter-warn transition-[width] duration-150"
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+      <span className="text-readout w-14 text-right text-[11px] text-white">
+        −{value.toFixed(2)}
       </span>
     </div>
   );
 }
 
+const statusCls = (kind: OutputStatusKind) =>
+  kind === "onair"
+    ? "font-bold text-[#ff3b30]"
+    : kind === "ok"
+      ? "text-meter-ok"
+      : kind === "error"
+        ? "text-meter-hot"
+        : kind === "ready"
+          ? "text-white"
+          : "text-panel-mut";
+
 /**
- * TELEMETRY — compliance readout, band gain reduction, stream status and the
+ * TELEMETRY — compliance monitoring, band reduction, stream status and the
  * station's event log.
  */
 export function TelemetryTab() {
   const snap = useMeterSnapshot();
-  const mount = useQuery(api.stations.getMount);
+  const { slots } = useOutputs();
 
   const [rt, setRt] = useState(() => ({
     onAir: getRuntime().onAir,
     stats: getRuntime().stats,
-    takes: getRuntime().takes.length,
   }));
   useEffect(
     () =>
       subscribeRuntime(() => {
         const r = getRuntime();
-        setRt({ onAir: r.onAir, stats: r.stats, takes: r.takes.length });
+        setRt({ onAir: r.onAir, stats: r.stats });
       }),
     [],
   );
@@ -130,199 +153,151 @@ export function TelemetryTab() {
   const lufsS = snap?.lufsS ?? -70;
   const loudnessDelta = lufsS - LUFS_TARGET;
   const loudnessOk = powered ? Math.abs(loudnessDelta) <= 1 : null;
-  const truePeakOk = powered ? (snap?.truePeak ?? -70) <= TRUE_PEAK_TARGET + 0.05 : null;
+  const truePeak = snap?.truePeak ?? -70;
+  const peakLimitOk = powered ? truePeak <= TRUE_PEAK_TARGET + 0.05 : null;
   const clipOk = powered ? !(snap?.clipOut ?? false) : null;
   const corr = snap?.correlation ?? 1;
   const corrOk = powered ? corr > 0.1 : null;
-
-  const codec = mount ? codecById(mount.codec) : null;
+  const cpu = powered
+    ? Math.min(100, Math.round(((snap?.perf.frameMs ?? 0) / 16.7) * 100))
+    : null;
   const uptime = rt.onAir ? liveUptimeMs : rt.stats.elapsedMs;
-
-  const stages: { name: string; on: boolean }[] = [
-    { name: "Source", on: powered },
-    { name: "HPF", on: powered },
-    { name: "EQ", on: powered },
-    { name: "Dyn EQ", on: powered },
-    { name: "6-band", on: powered },
-    { name: "AGC", on: powered },
-    { name: "Limiter", on: powered },
-    { name: "Guard", on: powered },
-    { name: "Encoder", on: rt.onAir },
-  ];
 
   return (
     <div className="grid gap-4 xl:grid-cols-12">
-      {/* ── compliance ── */}
+      {/* ── compliance monitoring ── */}
       <ModuleCard
-        className="xl:col-span-7"
-        title="Loudness compliance"
+        className="xl:col-span-12"
+        title="Compliance monitoring"
         subtitle="EBU R128 · ITU-R BS.1770-4 metering on the composite bus"
         right={
           <span className="text-readout hidden text-[10px] text-muted-foreground sm:inline">
-            Target {LUFS_TARGET} LUFS · ceiling {TRUE_PEAK_TARGET} dBTP
+            Target {LUFS_TARGET.toFixed(2)} LUFS · ceiling{" "}
+            {TRUE_PEAK_TARGET.toFixed(2)} dBTP
           </span>
         }
       >
-        <LoudnessMeter target={LUFS_TARGET} />
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          <StatusChip
-            label="Loudness (short-term)"
-            value={
-              powered
-                ? `${loudnessDelta >= 0 ? "+" : "−"}${Math.abs(loudnessDelta).toFixed(1)} LU`
-                : "—"
-            }
+        <div className="grid gap-3 sm:grid-cols-3">
+          <MetricCard
+            label="Input LUFS"
+            value={powered ? fmt2(snap?.lufsIn ?? -70) : "―"}
+            unit="LUFS"
+            ok={powered}
+          />
+          <MetricCard
+            label="Output LUFS"
+            value={powered ? fmt2(lufsS) : "―"}
+            unit="LUFS"
             ok={loudnessOk}
           />
-          <StatusChip
-            label="True peak"
-            value={powered ? `${(snap?.truePeak ?? -70).toFixed(1)} dBTP` : "—"}
-            ok={truePeakOk}
-          />
-          <StatusChip
-            label="Stereo correlation"
-            value={powered ? corr.toFixed(2) : "—"}
-            ok={corrOk}
-          />
-          <StatusChip
-            label="Output clipping"
-            value={powered ? (clipOk ? "clean" : "OVER") : "—"}
-            ok={clipOk}
+          <MetricCard
+            label="Peak limit"
+            value={powered ? fmt2(truePeak) : "―"}
+            unit="dBTP"
+            ok={peakLimitOk}
           />
         </div>
+
         <div className="mt-3">
-          <p className="mb-1.5 text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
-            Phase display
-          </p>
+          <LoudnessMeter target={LUFS_TARGET} />
+        </div>
+
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="panel-well flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5">
+            <span className="text-[9px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Loudness vs target
+            </span>
+            <span className="text-readout text-[11px] text-white">
+              {powered
+                ? `${loudnessDelta >= 0 ? "+" : "−"}${Math.abs(loudnessDelta).toFixed(2)} LU`
+                : "—"}
+            </span>
+          </div>
+          <div className="panel-well flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5">
+            <span className="text-[9px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Correlation
+            </span>
+            <span
+              className={cn(
+                "text-readout text-[11px]",
+                corrOk === false ? "text-meter-hot" : "text-white",
+              )}
+            >
+              {powered ? corr.toFixed(2) : "—"}
+            </span>
+          </div>
+          <div className="panel-well flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5">
+            <span className="text-[9px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Output clipping
+            </span>
+            <span
+              className={cn(
+                "text-readout text-[11px]",
+                clipOk === false ? "text-meter-hot" : "text-white",
+              )}
+            >
+              {powered ? (clipOk ? "clean" : "OVER") : "—"}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-3">
           <CorrelationMeter />
         </div>
       </ModuleCard>
 
-      {/* ── band gain reduction ── */}
+      {/* ── band reduction ── */}
       <ModuleCard
         className="xl:col-span-5"
-        title="Gain reduction"
-        subtitle="Live GR across the chain, deepest first"
+        title="Band reduction"
+        subtitle="Gain reduction in dB · deepest first"
         right={
           <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            <Activity className="size-3.5" />
+            <span className={cn("led size-1.5", powered && "led-on")} />
             {powered ? "live" : "idle"}
           </span>
         }
       >
-        <div>
-          <p className="mb-2 text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
-            6-band compressor
-          </p>
-          <div className="panel-well flex flex-wrap items-center justify-around gap-2 rounded-md px-2 py-2.5">
-            {MB_LABELS.map((label, i) => (
-              <GainReductionMeter
-                key={label}
-                get={() => snap?.gr.bands[i] ?? 0}
-                height={104}
-                width={7}
-                label={label}
-              />
-            ))}
-          </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {(snap?.gr.bands ?? [0, 0, 0, 0, 0, 0]).map((gr, i) => (
+            <GrCell key={i} index={i + 1} value={gr} />
+          ))}
         </div>
 
-        <div className="mt-3">
-          <p className="mb-2 text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
-            Dynamic EQ cut
-          </p>
-          <div className="panel-well flex items-center justify-around gap-2 rounded-md px-2 py-2.5">
-            {DEQ_LABELS.map((label, i) => (
-              <GainReductionMeter
-                key={label}
-                get={() => snap?.gr.deq[i] ?? 0}
-                height={72}
-                width={7}
-                label={label}
-              />
-            ))}
-            <GainReductionMeter
-              get={() => snap?.gr.agc ?? 0}
-              height={72}
-              width={7}
-              label="AGC"
-            />
-            <GainReductionMeter
-              get={() => snap?.gr.limiter ?? 0}
-              height={72}
-              width={7}
-              label="Limit"
-            />
-          </div>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {[
+            { label: "Dyn EQ", value: Math.max(0, ...(snap?.gr.deq ?? [0])) },
+            { label: "AGC", value: snap?.gr.agc ?? 0 },
+            { label: "Limit", value: snap?.gr.limiter ?? 0 },
+          ].map((s) => (
+            <div key={s.label} className="panel-well rounded px-2.5 py-2">
+              <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+                {s.label}
+              </p>
+              <p className="text-readout mt-0.5 text-[13px] font-medium text-white">
+                −{s.value.toFixed(2)}
+                <span className="ml-0.5 text-[8px] text-panel-mut">dB</span>
+              </p>
+            </div>
+          ))}
         </div>
-
         <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
           Sustained GR over 6 dB on one band means its threshold or makeup is
           working too hard — pull makeup before raising thresholds.
         </p>
       </ModuleCard>
 
-      {/* ── signal path ── */}
-      <ModuleCard
-        className="xl:col-span-7"
-        title="Signal path"
-        subtitle="Stage-by-stage chain state"
-      >
-        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
-          {stages.map((stage, i) => (
-            <span key={stage.name} className="flex items-center gap-1.5">
-              {i > 0 && <span className="text-panel-mut">→</span>}
-              <span
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] font-semibold tracking-wider uppercase",
-                  stage.name === "Encoder"
-                    ? stage.on
-                      ? "bg-signal/20 text-signal"
-                      : "bg-white/6 text-panel-mut"
-                    : "bg-white/6 text-panel-fg",
-                )}
-              >
-                <span className={cn("led size-1.5", stage.on ? "led-on" : undefined)} />
-                {stage.name}
-              </span>
-            </span>
-          ))}
-        </div>
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {[
-            {
-              label: "Deepest band GR",
-              value: `−${Math.max(0, ...(snap?.gr.bands ?? [0])).toFixed(1)} dB`,
-            },
-            { label: "AGC GR", value: `−${(snap?.gr.agc ?? 0).toFixed(1)} dB` },
-            {
-              label: "Limiter GR",
-              value: `−${(snap?.gr.limiter ?? 0).toFixed(1)} dB`,
-            },
-          ].map((s) => (
-            <div key={s.label} className="panel-well rounded-md px-2 py-1.5">
-              <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-                {s.label}
-              </p>
-              <p className="text-readout mt-0.5 text-xs font-medium text-panel-fg">
-                {s.value}
-              </p>
-            </div>
-          ))}
-        </div>
-      </ModuleCard>
-
       {/* ── stream status ── */}
       <ModuleCard
-        className="xl:col-span-5"
+        className="xl:col-span-7"
         title="Stream status"
-        subtitle="Encoder telemetry from the broadcast runtime"
+        subtitle="All eight outputs · engine load"
         right={
           <span
             className={cn(
               "rounded-full px-2.5 py-1 text-[10px] font-bold tracking-[0.16em] uppercase",
               rt.onAir
-                ? "bg-signal text-signal-fg animate-pulse-live"
+                ? "bg-[#ff3b30] text-white animate-pulse-live"
                 : "bg-white/10 text-muted-foreground",
             )}
           >
@@ -330,72 +305,65 @@ export function TelemetryTab() {
           </span>
         }
       >
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          {[
-            { label: "Uptime", value: formatUptime(uptime) },
-            {
-              label: "Measured",
-              value: rt.onAir ? rt.stats.kbps.toFixed(0) : "—",
-              sub: "kbps",
-            },
-            {
-              label: "Target",
-              value: mount ? String(mount.bitrateKbps) : "—",
-              sub: mount ? "kbps" : undefined,
-            },
-            { label: "Sent", value: formatBytes(rt.stats.bytes) },
-            { label: "Codec", value: codec?.label ?? "—" },
-            { label: "Takes", value: String(rt.takes) },
-          ].map((s) => (
-            <div key={s.label} className="panel-well rounded-md px-2 py-2">
-              <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-                {s.label}
-              </p>
-              <p className="text-readout mt-1 truncate text-sm font-medium text-panel-fg">
-                {s.value}
-                {s.sub && (
-                  <span className="ml-0.5 text-[8px] text-panel-mut">{s.sub}</span>
-                )}
-              </p>
-            </div>
-          ))}
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {Array.from({ length: 8 }, (_, i) => {
+            const st = outputStatus(i);
+            return (
+              <div
+                key={i}
+                className="panel-well flex items-center justify-between gap-3 rounded px-2.5 py-2"
+              >
+                <span className="text-readout text-[10px] text-panel-mut">
+                  {i + 1}
+                  <span className="text-panel-mut">:</span>
+                </span>
+                <span
+                  className={cn(
+                    "text-[11px] font-semibold tracking-wide uppercase",
+                    statusCls(st.kind),
+                  )}
+                >
+                  {st.label}
+                </span>
+              </div>
+            );
+          })}
         </div>
 
-        <div className="mt-3 rounded-lg border border-border/60 bg-muted/40 p-3">
-          <div className="flex items-center gap-2">
-            {rt.onAir ? (
-              <CheckCircle2 className="size-3.5 text-meter-ok" />
-            ) : (
-              <RadioTower className="size-3.5 text-muted-foreground" />
-            )}
-            <p className="text-xs font-medium">
-              {rt.onAir
-                ? `Encoding to ${mount ? `${mount.protocol === "shoutcast" ? "Shoutcast" : "Icecast2"} · ${mount.server}:${mount.port}${mount.mount}` : "configured mount"}`
-                : "Encoder idle — start a broadcast from the Encoder tab."}
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="panel-well rounded px-2.5 py-2">
+            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              CPU
+            </p>
+            <p className="text-readout mt-0.5 text-[15px] font-medium text-white">
+              {cpu === null ? "―" : `${cpu}`}
+              <span className="ml-0.5 text-[9px] text-panel-mut">%</span>
             </p>
           </div>
-          {mount?.nowPlayingTitle && (
-            <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <TriangleAlert className="size-3 text-signal" />
-              Now playing:{" "}
-              <span className="text-foreground/80">
-                {mount.nowPlayingArtist
-                  ? `${mount.nowPlayingArtist} — ${mount.nowPlayingTitle}`
-                  : mount.nowPlayingTitle}
-              </span>
+          <div className="panel-well rounded px-2.5 py-2">
+            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Uptime
             </p>
-          )}
+            <p className="text-readout mt-0.5 text-[15px] font-medium text-white">
+              {formatUptime(uptime)}
+            </p>
+          </div>
         </div>
+        <p className="mt-2 text-[10px] text-muted-foreground">
+          {slots.filter((s) => s.server || s.name).length}/8 outputs configured
+          · {rt.onAir ? `sending ${rt.stats.kbps.toFixed(2)} kbps` : "encoder idle"}
+          {" · "}
+          {formatBytes(rt.stats.bytes)} sent this session
+        </p>
       </ModuleCard>
 
-      {/* ── latency & stability ── */}
+      {/* ── system health ── */}
       <ModuleCard
         className="xl:col-span-12"
-        title="Latency & stability"
-        subtitle="Real-time health of the audio thread and this page"
+        title="System health"
+        subtitle="Audio-thread latency & stability"
         right={
           <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-            <Gauge className="size-3.5" />
             {snap?.perf.throttled ? "adaptive throttle ON" : "full rate"}
           </span>
         }
@@ -404,23 +372,23 @@ export function TelemetryTab() {
           {[
             {
               label: "Base latency",
-              value: powered ? `${snap?.perf.baseLatencyMs.toFixed(1) ?? "—"} ms` : "—",
+              value: powered ? `${snap?.perf.baseLatencyMs.toFixed(2)} ms` : "—",
               sub: "graph → device",
             },
             {
               label: "Output latency",
-              value: powered ? `${snap?.perf.outputLatencyMs.toFixed(1) ?? "—"} ms` : "—",
+              value: powered ? `${snap?.perf.outputLatencyMs.toFixed(2)} ms` : "—",
               sub: "to speaker/DAC",
             },
             {
               label: "Main-thread frame",
-              value: powered ? `${snap?.perf.frameMs.toFixed(2) ?? "—"} ms` : "—",
+              value: powered ? `${snap?.perf.frameMs.toFixed(2)} ms` : "—",
               sub: "meter loop cost",
             },
             {
               label: "Clock drift",
               value: powered
-                ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(1)} ms/s`
+                ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(2)} ms/s`
                 : "—",
               sub: "negative = glitches",
             },
@@ -439,7 +407,7 @@ export function TelemetryTab() {
               <p className="text-[9px] font-semibold tracking-[0.1em] text-panel-mut uppercase">
                 {s.label}
               </p>
-              <p className="text-readout mt-1 truncate text-[13px] font-medium text-panel-fg">
+              <p className="text-readout mt-1 truncate text-[13px] font-medium text-white">
                 {s.value}
               </p>
               <p className="mt-0.5 text-[8px] text-panel-mut">{s.sub}</p>
@@ -447,17 +415,12 @@ export function TelemetryTab() {
           ))}
         </div>
 
-        <div className="mt-3 flex flex-col gap-3 rounded-lg border border-border/60 bg-muted/40 p-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="max-w-2xl">
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/40 px-3 py-2.5">
+          <div className="min-w-0">
             <p className="text-xs font-medium">Low-latency profile</p>
-            <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+            <p className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
               Drops the ceiling guard from 4× to 2× oversampling — a touch less
-              true-peak margin for the smallest possible graph delay. The DSP
-              chain itself renders on the browser's dedicated audio threads
-              (spread across CPU cores by the browser); this page's main thread
-              only draws meters, and the meter loop automatically halves its
-              rate if a frame ever costs more than 4 ms — no bufferbloat, no
-              runaway work.
+              true-peak margin for the smallest possible graph delay.
             </p>
           </div>
           <label className="flex shrink-0 cursor-pointer items-center gap-2.5">
@@ -480,3 +443,4 @@ export function TelemetryTab() {
     </div>
   );
 }
+

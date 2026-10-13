@@ -34,6 +34,8 @@ export interface MeterSnapshot {
   truePeak: number;
   lufsM: number;
   lufsS: number;
+  /** K-weighted input-stage loudness (BS.1770, pre-chain) */
+  lufsIn: number;
   correlation: number;
   /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
   gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
@@ -61,6 +63,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   truePeak: -120,
   lufsM: -70,
   lufsS: -70,
+  lufsIn: -70,
   correlation: 1,
   gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
   riderDb: 0,
@@ -119,6 +122,12 @@ export class AudioEngine {
   private sourceBus!: GainNode;
   private inputGain!: GainNode;
   private hpf!: BiquadFilterNode;
+  private phaseRot!: BiquadFilterNode;
+  private gateGain!: GainNode;
+  private gateAnalyser!: AnalyserNode;
+  private gateBuf!: Float32Array<ArrayBuffer>;
+  private gateOpen = true;
+  private gateCloseAt = 0;
   private eqFilters: BiquadFilterNode[] = [];
   private eqWetPre!: GainNode;
   private eqDry!: GainNode;
@@ -179,11 +188,15 @@ export class AudioEngine {
   private outAnalyserR!: AnalyserNode;
   private ksAnalyserL!: AnalyserNode;
   private ksAnalyserR!: AnalyserNode;
+  private inKsAnalyserL!: AnalyserNode;
+  private inKsAnalyserR!: AnalyserNode;
 
   // buffers
   private timeBuf!: Float32Array<ArrayBuffer>;
   private ksBufL!: Float32Array<ArrayBuffer>;
   private ksBufR!: Float32Array<ArrayBuffer>;
+  private ksBufInL!: Float32Array<ArrayBuffer>;
+  private ksBufInR!: Float32Array<ArrayBuffer>;
   private specBufPre!: Uint8Array<ArrayBuffer>;
   private specBufPost!: Uint8Array<ArrayBuffer>;
 
@@ -252,13 +265,20 @@ export class AudioEngine {
 
     this.sourceBus = g(1);
 
-    // input stage
+    // input stage: silence gate → trim → HPF → phase rotation
+    this.gateGain = g(1);
     this.inputGain = g(1);
     this.hpf = ctx.createBiquadFilter();
     this.hpf.type = "highpass";
     this.hpf.frequency.value = 80;
     this.hpf.Q.value = 0.707;
-    this.sourceBus.connect(this.inputGain);
+    this.sourceBus.connect(this.gateGain);
+    this.gateGain.connect(this.inputGain);
+    // pre-gate detector so a closed gate still hears program return
+    this.gateAnalyser = ctx.createAnalyser();
+    this.gateAnalyser.fftSize = 2048;
+    this.gateBuf = new Float32Array(this.gateAnalyser.fftSize);
+    this.sourceBus.connect(this.gateAnalyser);
 
     const inSplit = ctx.createChannelSplitter(2);
     this.inAnalyserL = ctx.createAnalyser();
@@ -276,11 +296,18 @@ export class AudioEngine {
 
     this.inputGain.connect(this.hpf);
 
+    // phase rotation — first-order allpass (voice asymmetry correction)
+    this.phaseRot = ctx.createBiquadFilter();
+    this.phaseRot.type = "allpass";
+    this.phaseRot.frequency.value = 300;
+    this.phaseRot.Q.value = 0.5;
+    this.hpf.connect(this.phaseRot);
+
     // ── 6-band EQ (wet/dry crossfade) ──
     this.eqWetPre = g(1);
     this.eqDry = g(0);
-    this.hpf.connect(this.eqWetPre);
-    this.hpf.connect(this.eqDry);
+    this.phaseRot.connect(this.eqWetPre);
+    this.phaseRot.connect(this.eqDry);
     let eqNode: AudioNode = this.eqWetPre;
     for (const band of [
       { freq: 60, type: "lowshelf" as BiquadFilterType, q: 0.7 },
@@ -309,9 +336,11 @@ export class AudioEngine {
     eqOut.connect(deqIn);
     deqIn.connect(deqSum); // dry pass-through
     const DEQ_META = [
-      { freq: 120, q: 1.0 },
-      { freq: 3200, q: 1.2 },
-      { freq: 8000, q: 1.3 },
+      { freq: 80, q: 0.9 },
+      { freq: 250, q: 1.0 },
+      { freq: 1600, q: 1.1 },
+      { freq: 5000, q: 1.2 },
+      { freq: 10000, q: 1.1 },
     ];
     for (const meta of DEQ_META) {
       const mkBp = () => {
@@ -555,9 +584,31 @@ export class AudioEngine {
     ksSplit.connect(this.ksAnalyserL, 0);
     ksSplit.connect(this.ksAnalyserR, 1);
 
+    // input-stage loudness tap (same K-weighting, ahead of the chain)
+    const inKsShelf = ctx.createBiquadFilter();
+    inKsShelf.type = "highshelf";
+    inKsShelf.frequency.value = 1681.97;
+    inKsShelf.gain.value = 3.99984;
+    const inKsHp = ctx.createBiquadFilter();
+    inKsHp.type = "highpass";
+    inKsHp.frequency.value = 38.135;
+    inKsHp.Q.value = 0.5003271;
+    this.inKsAnalyserL = ctx.createAnalyser();
+    this.inKsAnalyserR = ctx.createAnalyser();
+    this.inKsAnalyserL.fftSize = 2048;
+    this.inKsAnalyserR.fftSize = 2048;
+    const inKsSplit = ctx.createChannelSplitter(2);
+    this.inputGain.connect(inKsShelf);
+    inKsShelf.connect(inKsHp);
+    inKsHp.connect(inKsSplit);
+    inKsSplit.connect(this.inKsAnalyserL, 0);
+    inKsSplit.connect(this.inKsAnalyserR, 1);
+
     this.timeBuf = new Float32Array(this.outAnalyserL.fftSize);
     this.ksBufL = new Float32Array(this.ksAnalyserL.fftSize);
     this.ksBufR = new Float32Array(this.ksAnalyserR.fftSize);
+    this.ksBufInL = new Float32Array(this.inKsAnalyserL.fftSize);
+    this.ksBufInR = new Float32Array(this.inKsAnalyserR.fftSize);
     this.specBufPre = new Uint8Array(this.preSpec.frequencyBinCount);
     this.specBufPost = new Uint8Array(this.postSpec.frequencyBinCount);
   }
@@ -573,6 +624,20 @@ export class AudioEngine {
 
     this.ramp(this.hpf.frequency, params.hpf.freqHz);
     this.hpf.type = params.hpf.on ? "highpass" : "allpass";
+
+    // phase rotation: auto = fixed voice window, manual = user frequency
+    this.ramp(
+      this.phaseRot.frequency,
+      params.phase.mode === "auto" ? 300 : params.phase.freqHz,
+    );
+    // silence-gate bypass
+    if (!params.gate.on) {
+      this.gateCloseAt = 0;
+      if (!this.gateOpen) {
+        this.gateOpen = true;
+        this.ramp(this.gateGain.gain, 1, 0.02);
+      }
+    }
 
     params.eq.bands.forEach((band, i) => {
       const f = this.eqFilters[i];
@@ -605,6 +670,8 @@ export class AudioEngine {
       if (!det || !sub) return;
       this.ramp(this.deqBpAudio[i]?.frequency, band.freqHz);
       this.ramp(this.deqBpDet[i]?.frequency, band.freqHz);
+      this.ramp(this.deqBpAudio[i]?.Q, Math.max(band.q, 0.05));
+      this.ramp(this.deqBpDet[i]?.Q, Math.max(band.q, 0.05));
       this.ramp(det.threshold, band.thresholdDb);
       this.ramp(det.attack, Math.max(band.attackMs, 1) / 1000);
       this.ramp(det.release, Math.max(band.releaseMs, 20) / 1000);
@@ -694,16 +761,19 @@ export class AudioEngine {
     this.duckGain.gain.setTargetAtTime(1, now + 0.45, 0.08);
   }
 
-  /* ── sources ──────────────────────────────────────────────────────────── */
-
-  setSource(kind: SourceKind) {
+  /* ── sources ──────────────────────────────────────────────────────────── */  setSource(kind: SourceKind) {
     this.sourceKind = kind;
-    if (!this.ctx) return;
+
+    if (!this.ctx) {
+      this.notify();
+      return;
+    }
     this.stopSignal();
     this.pauseFile();
     if (kind === "signal") void this.startSignal();
     if (kind === "mic") void this.armMic();
     if (kind === "file" && this.fileBuffer) this.playFile();
+    this.notify();
   }
 
   private async startSignal() {
@@ -773,6 +843,18 @@ export class AudioEngine {
   async setSignalMode(mode: SignalMode) {
     this.signalMode = mode;
     if (this.ctx && this.sourceKind === "signal") await this.startSignal();
+    this.notify();
+  }
+
+  /** Silence the built-in program stream (test generator) without leaving it. */
+  stopSignalSource() {
+    this.stopSignal();
+    this.notify();
+  }
+
+  /** Whether the built-in program stream is currently sounding. */
+  get generatorOn(): boolean {
+    return this.signalOsc !== null;
   }
 
   async armMic(): Promise<void> {
@@ -1005,6 +1087,35 @@ export class AudioEngine {
     const inPeakR = toDb(inR);
     if (Math.max(inPeakL, inPeakR) > -0.2) this.clipInUntil = now + 600;
 
+    // input-stage silence gate — detected pre-gate on the raw source bus so
+    // a closed gate still hears the program come back
+    const gate = this.params?.gate;
+    let gateWantOpen = true;
+    if (gate?.on) {
+      this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
+      let gv = 0;
+      for (let i = 0; i < this.gateBuf.length; i++) {
+        const v = Math.abs(this.gateBuf[i]);
+        if (v > gv) gv = v;
+      }
+      if (toDb(gv) >= gate.thresholdDb) {
+        this.gateCloseAt = 0;
+      } else {
+        if (this.gateCloseAt === 0) this.gateCloseAt = now + gate.holdMs;
+        else gateWantOpen = now < this.gateCloseAt;
+      }
+    } else {
+      this.gateCloseAt = 0;
+    }
+    if (gateWantOpen !== this.gateOpen) {
+      this.gateOpen = gateWantOpen;
+      this.ramp(
+        this.gateGain.gain,
+        gateWantOpen ? 1 : 0,
+        gateWantOpen ? 0.03 : 0.05,
+      );
+    }
+
     // output peaks + true peak + correlation
     this.outAnalyserL.getFloatTimeDomainData(this.ksBufL);
     this.outAnalyserR.getFloatTimeDomainData(this.ksBufR);
@@ -1039,6 +1150,10 @@ export class AudioEngine {
     const msR = this.meanSquare(this.ksAnalyserR, this.ksBufR);
     const sum = msL + msR;
     const loudness = sum > 1e-12 ? -0.691 + 10 * Math.log10(sum) : -70;
+    const msInL = this.meanSquare(this.inKsAnalyserL, this.ksBufInL);
+    const msInR = this.meanSquare(this.inKsAnalyserR, this.ksBufInR);
+    const sumIn = msInL + msInR;
+    const lufsIn = sumIn > 1e-12 ? -0.691 + 10 * Math.log10(sumIn) : -70;
     this.lufsPoints.push({ t: now, ms: sum });
     while (this.lufsPoints.length > 2 && now - this.lufsPoints[0].t > 3200) {
       this.lufsPoints.shift();
@@ -1059,7 +1174,7 @@ export class AudioEngine {
     // ── loudness rider (Compellor leveler / AERO long-term controller) ──
     if (this.params?.rider.on) {
       // silence gate (Compellor DVG style): never ride noise up in pauses
-      if (windowLufs(300) > -55) {
+      if (windowLufs(300) > this.params.rider.gateDb) {
         const err = this.params.rider.targetLufs - windowLufs(1000);
         const cap = Math.abs(this.params.rider.maxRideDb);
         const ride = Math.max(-cap, Math.min(cap, err));
@@ -1084,6 +1199,7 @@ export class AudioEngine {
       truePeak: tp,
       lufsM: loudness > -70 ? loudness : -70,
       lufsS: windowLufs(3000),
+      lufsIn: Math.max(-70, lufsIn),
       correlation,
       gr: {
         bands: this.mbComps.map(grOf),

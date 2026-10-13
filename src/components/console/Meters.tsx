@@ -3,12 +3,13 @@ import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState } from "react";
 
 const COLORS = {
-  ok: "#3ec48a",
-  warn: "#f0a53c",
-  hot: "#f2562f",
+  ok: "#4cd964",
+  warn: "#ffcc00",
+  hot: "#ff3b30",
+  slate: "#59616e",
   unlit: "rgba(255,255,255,0.07)",
   hold: "rgba(255,255,255,0.85)",
-};
+};;
 
 /* ── shared canvas segment bar ──────────────────────────────────────────── */
 
@@ -101,8 +102,9 @@ function SegmentBar({
   return <canvas ref={canvasRef} className={cn("block h-full w-full", className)} style={{ height }} />;
 }
 
+/* Broadcast PPM colouring: < −20 slate · −20…−6 green · −6…−3 amber · −3…0 red */
 const levelZone = (db: number) =>
-  db >= -3 ? COLORS.hot : db >= -12 ? COLORS.warn : COLORS.ok;
+  db >= -3 ? COLORS.hot : db >= -6 ? COLORS.warn : db >= -20 ? COLORS.ok : COLORS.slate;
 const grZone = () => COLORS.warn;
 
 /* ── numeric readouts driven by rAF (no re-renders) ─────────────────────── */
@@ -127,7 +129,7 @@ function Readout({
       const el = spanRef.current;
       if (el) {
         const v = getRef.current();
-        const text = v <= -99 ? "−∞" : v.toFixed(1).replace("-", "−");
+        const text = v <= -99 ? "−∞" : v.toFixed(2).replace("-", "−");
         el.textContent = `${text}${suffix}`;
       }
       raf = requestAnimationFrame(tick);
@@ -159,7 +161,7 @@ export function StereoLevelMeter({
   return (
     <div className="flex items-stretch gap-2">
       <div className="flex flex-col justify-between py-0.5 text-[8px] leading-none text-panel-mut">
-        {["0", "−12", "−24", "−48", "−60"].map((t) => (
+        {["0", "−6", "−20", "−40", "−60"].map((t) => (
           <span key={t} className="text-right">
             {t}
           </span>
@@ -343,7 +345,7 @@ export function LoudnessMeter({ target = -23 }: { target?: number }) {
         ctx.stroke();
       }
       // target line
-      ctx.strokeStyle = "rgba(239,91,43,0.55)";
+      ctx.strokeStyle = "rgba(74,144,226,0.6)";
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.moveTo(0, yOf(target));
@@ -375,7 +377,7 @@ export function LoudnessMeter({ target = -23 }: { target?: number }) {
     return unsub;
   }, [target]);
 
-  const fmt = (v: number) => (v <= -69.5 ? "−∞" : v.toFixed(1).replace("-", "−"));
+  const fmt = (v: number) => (v <= -69.5 ? "−∞" : v.toFixed(2).replace("-", "−"));
   const delta = snap.powered ? snap.lufsM - target : null;
 
   return (
@@ -435,7 +437,7 @@ export function LoudnessMeter({ target = -23 }: { target?: number }) {
               )}
             >
               {delta >= 0 ? "+" : "−"}
-              {Math.abs(delta).toFixed(1)} LU vs target
+              {Math.abs(delta).toFixed(2)} LU vs target
             </span>
           )}
         </div>

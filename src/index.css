@@ -80,37 +80,38 @@
 }
 
 .dark {
-  --background: oklch(0.165 0.01 262);
-  --foreground: oklch(0.96 0.004 95);
-  --card: oklch(0.205 0.012 262);
-  --card-foreground: oklch(0.96 0.004 95);
-  --popover: oklch(0.205 0.012 262);
-  --popover-foreground: oklch(0.96 0.004 95);
-  --primary: oklch(0.96 0.004 95);
-  --primary-foreground: oklch(0.205 0.012 262);
-  --secondary: oklch(0.26 0.012 262);
-  --secondary-foreground: oklch(0.96 0.004 95);
-  --muted: oklch(0.26 0.012 262);
-  --muted-foreground: oklch(0.72 0.01 262);
-  --accent: oklch(0.27 0.012 262);
-  --accent-foreground: oklch(0.96 0.004 95);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0.02 262);
-  --chart-1: oklch(0.66 0.19 32);
-  --chart-2: oklch(0.7 0.11 180);
-  --chart-3: oklch(0.65 0.09 250);
-  --chart-4: oklch(0.8 0.15 85);
-  --chart-5: oklch(0.7 0.15 150);
-  --sidebar: oklch(0.185 0.012 262);
-  --sidebar-foreground: oklch(0.96 0.004 95);
-  --sidebar-primary: oklch(0.66 0.19 32);
-  --sidebar-primary-foreground: oklch(0.99 0 0);
-  --sidebar-accent: oklch(0.26 0.012 262);
-  --sidebar-accent-foreground: oklch(0.96 0.004 95);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0.02 262);
+  /* broadcast dark theme — deep charcoal / cool grey panels */
+  --background: #121417;
+  --foreground: #e8eaef;
+  --card: #1c1f24;
+  --card-foreground: #e8eaef;
+  --popover: #1c1f24;
+  --popover-foreground: #e8eaef;
+  --primary: #4a90e2;
+  --primary-foreground: #ffffff;
+  --secondary: #2a2e36;
+  --secondary-foreground: #e8eaef;
+  --muted: #23262c;
+  --muted-foreground: #b0b6c0;
+  --accent: #2a2e36;
+  --accent-foreground: #e8eaef;
+  --destructive: #ff3b30;
+  --border: #2a2e36;
+  --input: #2a2e36;
+  --ring: #4a90e2;
+  --chart-1: #4a90e2;
+  --chart-2: #4cd964;
+  --chart-3: #ffcc00;
+  --chart-4: #ff3b30;
+  --chart-5: #b0b6c0;
+  --sidebar: #17191d;
+  --sidebar-foreground: #e8eaef;
+  --sidebar-primary: #4a90e2;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2a2e36;
+  --sidebar-accent-foreground: #e8eaef;
+  --sidebar-border: #2a2e36;
+  --sidebar-ring: #4a90e2;
 }
 
 /* ── Signalpath design tokens & console surfaces ────────────────────────── */
@@ -120,33 +121,34 @@
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo,
     monospace;
 
-  /* broadcast accent */
-  --color-signal: oklch(0.645 0.19 32);
-  --color-signal-strong: oklch(0.575 0.2 32);
-  --color-signal-soft: oklch(0.965 0.02 40);
-  --color-signal-fg: oklch(0.99 0 0);
+  /* broadcast accent — primary control blue */
+  --color-signal: #4a90e2;
+  --color-signal-strong: #3b7cc4;
+  --color-signal-soft: #dcebfb;
+  --color-signal-fg: #ffffff;
 
   /* dark instrument panels (used in both themes for metering surfaces) */
-  --color-panel: oklch(0.188 0.014 265);
-  --color-panel-2: oklch(0.225 0.014 265);
-  --color-panel-3: oklch(0.27 0.014 265);
-  --color-panel-fg: oklch(0.93 0.005 265);
-  --color-panel-mut: oklch(0.665 0.012 265);
-  --color-panel-line: oklch(1 0 0 / 9%);
+  --color-panel: #1c1f24;
+  --color-panel-2: #23262c;
+  --color-panel-3: #2a2e36;
+  --color-panel-fg: #ffffff;
+  --color-panel-mut: #b0b6c0;
+  --color-panel-line: #2a2e36;
 
-  /* meter zones */
-  --color-meter-ok: oklch(0.74 0.17 152);
-  --color-meter-warn: oklch(0.8 0.152 85);
-  --color-meter-hot: oklch(0.66 0.21 25);
+  /* meter zones — broadcast PPM colour coding */
+  --color-meter-ok: #4cd964;
+  --color-meter-warn: #ffcc00;
+  --color-meter-hot: #ff3b30;
+  --color-meter-slate: #59616e;
 
-  /* broadcast rack (console shell — deep anodized aluminium) */
-  --color-rack: oklch(0.132 0.011 265);
-  --color-rack-2: oklch(0.162 0.012 265);
-  --color-rack-3: oklch(0.196 0.013 265);
-  --color-rack-line: oklch(1 0 0 / 8%);
-  --color-rack-fg: oklch(0.925 0.005 265);
-  --color-rack-mut: oklch(0.64 0.012 265);
-  --color-amber-led: oklch(0.79 0.145 78);
+  /* broadcast rack (console shell — deep charcoal) */
+  --color-rack: #121417;
+  --color-rack-2: #1c1f24;
+  --color-rack-3: #23262c;
+  --color-rack-line: #2a2e36;
+  --color-rack-fg: #e8eaef;
+  --color-rack-mut: #b0b6c0;
+  --color-amber-led: #ffcc00;
 }
 
 @layer base {
@@ -165,7 +167,7 @@
     cursor: pointer;
   }
   ::selection {
-    background: oklch(0.645 0.19 32 / 22%);
+    background: rgb(74 144 226 / 30%);
   }
   input[type="number"]::-webkit-outer-spin-button,
   input[type="number"]::-webkit-inner-spin-button {
@@ -186,58 +188,58 @@
   .panel {
     background: linear-gradient(
       180deg,
-      oklch(0.214 0.014 265) 0%,
-      oklch(0.176 0.014 265) 100%
+      #1f2329 0%,
+      #1a1d22 100%
     );
-    border: 1px solid oklch(1 0 0 / 8%);
+    border: 1px solid #2a2e36;
     box-shadow:
-      inset 0 1px 0 oklch(1 0 0 / 6%),
-      0 16px 40px -24px oklch(0.12 0.02 265 / 70%);
+      inset 0 1px 0 rgb(255 255 255 / 5%),
+      0 16px 40px -24px rgb(0 0 0 / 70%);
   }
 
   /* recessed well inside a panel (meters, spectra) */
   .panel-well {
-    background: oklch(0.138 0.014 265);
-    border: 1px solid oklch(1 0 0 / 6%);
+    background: #121417;
+    border: 1px solid #2a2e36;
     box-shadow:
-      inset 0 2px 6px oklch(0.08 0.02 265 / 60%),
-      inset 0 -1px 0 oklch(1 0 0 / 4%);
+      inset 0 2px 6px rgb(0 0 0 / 55%),
+      inset 0 -1px 0 rgb(255 255 255 / 4%);
   }
 
   /* brushed-metal control face */
   .panel-face {
     background: linear-gradient(
       180deg,
-      oklch(0.262 0.014 265) 0%,
-      oklch(0.228 0.014 265) 100%
+      #272b32 0%,
+      #22262c 100%
     );
-    border: 1px solid oklch(1 0 0 / 7%);
+    border: 1px solid #2a2e36;
   }
 
   .hairline-top {
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 5%);
   }
 
-  /* deep rack surface with a soft top light falloff (console shell) */
+  /* deep rack surface — deep charcoal with a faint top falloff */
   .rack-surface {
     background:
       radial-gradient(
         130% 90% at 50% -10%,
-        oklch(0.19 0.013 265 / 55%) 0%,
+        rgb(255 255 255 / 4%) 0%,
         transparent 62%
       ),
-      oklch(0.132 0.011 265);
+      #121417;
   }
 
   /* brushed rack strip (tab bar, header rails) */
   .rack-rail {
     background: linear-gradient(
       180deg,
-      oklch(0.185 0.013 265) 0%,
-      oklch(0.152 0.012 265) 100%
+      #1e2127 0%,
+      #191c21 100%
     );
-    border-bottom: 1px solid oklch(1 0 0 / 8%);
-    box-shadow: inset 0 1px 0 oklch(1 0 0 / 5%);
+    border-bottom: 1px solid #2a2e36;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
   }
 
   /* status LED */
@@ -245,16 +247,20 @@
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 9999px;
-    background: oklch(0.55 0.015 265 / 40%);
-    box-shadow: inset 0 0 2px oklch(0 0 0 / 50%);
+    background: rgb(176 182 192 / 35%);
+    box-shadow: inset 0 0 2px rgb(0 0 0 / 50%);
   }
   .led-on {
-    background: oklch(0.74 0.17 152);
-    box-shadow: 0 0 8px oklch(0.74 0.17 152 / 80%);
+    background: #4cd964;
+    box-shadow: 0 0 8px rgb(76 217 100 / 80%);
   }
   .led-hot {
-    background: oklch(0.645 0.19 32);
-    box-shadow: 0 0 10px oklch(0.645 0.19 32 / 85%);
+    background: #ff3b30;
+    box-shadow: 0 0 10px rgb(255 59 48 / 85%);
+  }
+  .led-warn {
+    background: #ffcc00;
+    box-shadow: 0 0 8px rgb(255 204 0 / 75%);
   }
 
   .text-readout {
@@ -268,16 +274,20 @@
   .animate-pulse-live {
     animation: pulse-live 2.4s ease-in-out infinite;
   }
+  /* ON AIR over-limit alarm — fast flash while the peak exceeds the ceiling */
+  .animate-alarm {
+    animation: alarm-flash 0.55s steps(2, end) infinite;
+  }
   .scrollbar-slim {
     scrollbar-width: thin;
-    scrollbar-color: oklch(0.8 0.01 265) transparent;
+    scrollbar-color: #b0b6c0 transparent;
   }
   .scrollbar-slim::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-slim::-webkit-scrollbar-thumb {
-    background: oklch(0.85 0.01 265 / 70%);
+    background: rgb(176 182 192 / 60%);
     border-radius: 9999px;
   }
 }
@@ -289,5 +299,17 @@
   }
   50% {
     opacity: 0.45;
+  }
+}
+
+@keyframes alarm-flash {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 12px rgb(255 59 48 / 65%);
+  }
+  50% {
+    opacity: 0.35;
+    box-shadow: 0 0 0 rgb(255 59 48 / 0%);
   }
 }

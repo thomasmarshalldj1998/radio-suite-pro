@@ -22,6 +22,18 @@ import {
 } from "@/lib/audio/encoder";
 import { JsStreamEncoder } from "@/lib/audio/js-encoder";
 import {
+  EMPTY_SLOT,
+  OUTPUT_COUNT,
+  isConfigured,
+  outputStatus,
+  seedOutputIfEmpty,
+  setLiveOutput,
+  setProbes,
+  updateOutput,
+  useOutputs,
+  type MountForm,
+} from "@/lib/audio/outputs";
+import {
   addTake,
   getRuntime,
   nextTakeId,
@@ -44,42 +56,13 @@ import {
   CheckCircle2,
   Download,
   Radio,
+  RotateCw,
   Send,
   Server,
   Square,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-
-interface MountForm {
-  name: string;
-  protocol: string;
-  server: string;
-  port: number;
-  mount: string;
-  username: string;
-  password: string;
-  codec: string;
-  bitrateKbps: number;
-  sampleRateKhz: number;
-  channels: string;
-  targetFormat: string;
-}
-
-const DEFAULT_FORM: MountForm = {
-  name: "My Station",
-  protocol: "icecast2",
-  server: "stream.example.com",
-  port: 8000,
-  mount: "/live",
-  username: "source",
-  password: "",
-  codec: "opus",
-  bitrateKbps: 128,
-  sampleRateKhz: 48,
-  channels: "stereo",
-  targetFormat: "",
-};
 
 const BITRATES = [48, 64, 96, 128, 160, 192, 256, 320];
 
@@ -110,7 +93,12 @@ export function EncoderPanel() {
   const setNowPlaying = useMutation(api.stations.setNowPlaying);
   const pushLog = useMutation(api.stations.pushLog);
 
-  const [form, setForm] = useState<MountForm>(DEFAULT_FORM);
+  const { slots, liveSlot } = useOutputs();
+  const [sel, setSel] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  const form = slots[sel] ?? EMPTY_SLOT;
+  const setForm = (updater: (prev: MountForm) => MountForm) =>
+    updateOutput(sel, updater);
   const [npTitle, setNpTitle] = useState("");
   const [npArtist, setNpArtist] = useState("");
   const [probe, setProbe] = useState<ProbeResult | null>(null);
@@ -152,7 +140,7 @@ export function EncoderPanel() {
   useEffect(() => {
     if (mountDoc && !loadedRef.current) {
       loadedRef.current = true;
-      setForm({
+      const seeded: MountForm = {
         name: mountDoc.name,
         protocol: mountDoc.protocol,
         server: mountDoc.server,
@@ -165,7 +153,8 @@ export function EncoderPanel() {
         sampleRateKhz: mountDoc.sampleRateKhz,
         channels: mountDoc.channels,
         targetFormat: mountDoc.targetFormat ?? "",
-      });
+      };
+      seedOutputIfEmpty(seeded);
       setNpTitle(mountDoc.nowPlayingTitle ?? "");
       setNpArtist(mountDoc.nowPlayingArtist ?? "");
     }
@@ -173,7 +162,7 @@ export function EncoderPanel() {
 
   const supported = supportedCodecs();
   const currentCodec = codecById(form.codec);
-  const url = mountUrl(form);
+  const url = isConfigured(form) ? mountUrl(form) : "";
   const uptime = rt.onAir ? liveUptimeMs : rt.stats.elapsedMs;
 
   const persistConfig = async (log = false) => {
@@ -197,6 +186,10 @@ export function EncoderPanel() {
 
   const connect = async () => {
     if (rt.onAir) return;
+    if (!isConfigured(form)) {
+      toast.error("Select and configure an output first");
+      return;
+    }
     const targetFmt = FORMATS.find((f) => formatProfile(f) === form.targetFormat);
     const jsFmt = targetFmt ? jsFormatFor(targetFmt.id) : null;
     if (!jsFmt && !isCodecSupported(currentCodec.mimeType)) {
@@ -205,6 +198,7 @@ export function EncoderPanel() {
     }
     try {
       if (!engine.powered) await engine.powerOn();
+      setLiveOutput(sel);
 
       // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / HE-AAC v2) encode in a
       // worker straight off the program bus — no MediaRecorder involved
@@ -292,6 +286,10 @@ export function EncoderPanel() {
   };
 
   const runProbe = async () => {
+    if (!isConfigured(form)) {
+      toast.error("Select and configure an output first");
+      return;
+    }
     setProbing(true);
     const result = await probeEndpoint(url);
     setProbe(result);
@@ -301,6 +299,59 @@ export function EncoderPanel() {
     } else {
       toast.error("Endpoint unreachable", { description: result.note });
     }
+  };
+
+  /** RETRY ALL — probe every configured output endpoint in the matrix. */
+  const retryAll = async () => {
+    const targets = slots
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => s.server);
+    if (targets.length === 0) {
+      toast.error("No configured outputs to retry");
+      return;
+    }
+    setRetrying(true);
+    const next: Record<number, ProbeResult> = {};
+    for (const { s, i } of targets) next[i] = await probeEndpoint(mountUrl(s));
+    setProbes(next);
+    setRetrying(false);
+    const ok = targets.filter(({ i }) => next[i].ok).length;
+    if (ok === targets.length) {
+      toast.success(`${ok}/${targets.length} endpoints reachable`);
+    } else {
+      toast.error(`${targets.length - ok}/${targets.length} endpoints unreachable`);
+    }
+  };
+
+  /** EXPORT CONFIG — download the full 8-output matrix as JSON. */
+  const exportConfig = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      outputs: slots.map((s, i) => ({
+        output: i + 1,
+        name: s.name || null,
+        configured: isConfigured(s),
+        protocol: s.protocol || null,
+        endpoint: s.server
+          ? `${s.protocol || "icecast2"}://${s.server}:${s.port}${s.mount}`
+          : null,
+        codec: s.codec,
+        bitrateKbps: s.bitrateKbps || null,
+        sampleRateKhz: s.sampleRateKhz,
+        channels: s.channels,
+        targetFormat: s.targetFormat || null,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = `signalpath-outputs-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(u);
+    toast.success("Output configuration exported");
   };
 
   /** Punch up a delivery-matrix format (WASM-backed ones record in-browser). */
@@ -374,6 +425,58 @@ export function EncoderPanel() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
+      {/* ── output matrix: 8 broadcast outputs ── */}
+      <ModuleCard
+        className="lg:col-span-6"
+        title="Outputs 1–4"
+        subtitle="Click a row to edit it in the mount configuration below"
+        bodyClassName="p-0"
+      >
+        <OutputTable slots={slots} from={0} sel={sel} onSelect={setSel} />
+      </ModuleCard>
+      <ModuleCard
+        className="lg:col-span-6"
+        title="Outputs 5–8"
+        subtitle="Per-output status: ready · on air · reachable"
+        bodyClassName="p-0"
+      >
+        <OutputTable slots={slots} from={4} sel={sel} onSelect={setSel} />
+      </ModuleCard>
+      <div className="flex flex-wrap items-center gap-2 lg:col-span-12">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={() => void retryAll()}
+          disabled={retrying}
+        >
+          <RotateCw className="size-3.5" />
+          {retrying ? "Retrying…" : "Retry all"}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={() => void disconnect()}
+        >
+          <Square className="size-3.5" />
+          Stop all
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={exportConfig}
+        >
+          <Download className="size-3.5" />
+          Export config
+        </Button>
+        <span className="ml-auto hidden text-[10px] text-muted-foreground sm:inline">
+          {slots.filter(isConfigured).length}/{OUTPUT_COUNT} outputs configured
+          {rt.onAir ? ` · broadcasting output ${liveSlot + 1}` : ""}
+        </span>
+      </div>
+
       {/* ── delivery matrix: twelve broadcast formats ── */}
       <ModuleCard
         className="lg:col-span-12"
@@ -658,8 +761,9 @@ export function EncoderPanel() {
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/50 p-3">
           <p className="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
             Endpoint
-          </p>
-          <p className="text-readout mt-1 text-xs break-all text-foreground/90">{url}</p>
+          </p>            <p className="text-readout mt-1 text-xs break-all text-foreground/90">
+              {url || "— select a configured output —"}
+            </p>
           {form.targetFormat && (
             <p className="mt-2 text-[10px] text-muted-foreground">
               Target profile:{" "}
@@ -718,10 +822,14 @@ export function EncoderPanel() {
               { label: "Uptime", value: formatUptime(uptime) },
               {
                 label: "Measured",
-                value: rt.onAir ? `${rt.stats.kbps.toFixed(0)}` : "—",
+                value: rt.onAir ? `${rt.stats.kbps.toFixed(2)}` : "—",
                 sub: "kbps",
               },
-              { label: "Target", value: String(form.bitrateKbps), sub: "kbps" },
+              {
+                label: "Target",
+                value: form.bitrateKbps ? String(form.bitrateKbps) : "—",
+                sub: form.bitrateKbps ? "kbps" : undefined,
+              },
               { label: "Sent", value: formatBytes(rt.stats.bytes) },
             ].map((s) => (
               <div key={s.label} className="panel-well rounded-md px-2 py-2">
@@ -853,6 +961,111 @@ export function EncoderPanel() {
           </ul>
         )}
       </ModuleCard>
+    </div>
+  );
+}
+
+/* ── 8-output status matrix ─────────────────────────────────────────────── */
+
+function OutputTable({
+  slots,
+  from,
+  sel,
+  onSelect,
+}: {
+  slots: MountForm[];
+  from: number;
+  sel: number;
+  onSelect: (i: number) => void;
+}) {
+  return (
+    <div className="px-4 pb-4">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-border/60 text-left text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+            <th className="w-8 py-2 pr-2 font-semibold">#</th>
+            <th className="py-2 pr-3 font-semibold">Name</th>
+            <th className="py-2 pr-3 font-semibold">Proto</th>
+            <th className="py-2 pr-3 font-semibold">Bitrate</th>
+            <th className="py-2 font-semibold">Status</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/50">
+          {slots.slice(from, from + 4).map((s, k) => {
+            const i = from + k;
+            const configured = isConfigured(s);
+            const st = outputStatus(i);
+            return (
+              <tr
+                key={i}
+                onClick={() => onSelect(i)}
+                className={cn(
+                  "cursor-pointer transition-colors",
+                  sel === i ? "bg-signal/10" : "hover:bg-muted/40",
+                )}
+              >
+                <td className="py-2.5 pr-2">
+                  <span
+                    className={cn(
+                      "text-readout text-[11px] font-medium",
+                      sel === i ? "text-signal" : "text-muted-foreground",
+                    )}
+                  >
+                    {i + 1}
+                  </span>
+                </td>
+                <td className="min-w-0 py-2 pr-3">
+                  <p className="truncate text-[13px] font-medium text-white">
+                    {configured ? s.name || "Untitled output" : "―"}
+                  </p>
+                  {configured && (
+                    <p className="truncate text-[9px] text-muted-foreground">
+                      {s.server}
+                      {s.port ? `:${s.port}` : ""}
+                      {s.mount}
+                    </p>
+                  )}
+                </td>
+                <td className="py-2 pr-3 text-xs whitespace-nowrap">
+                  {!configured ? (
+                    "―"
+                  ) : s.protocol === "shoutcast" ? (
+                    "Shoutcast"
+                  ) : (
+                    "Icecast 2"
+                  )}
+                </td>
+                <td className="text-readout py-2 pr-3 text-xs whitespace-nowrap">
+                  {configured && s.bitrateKbps > 0
+                    ? `${s.bitrateKbps} kbps`
+                    : "―"}
+                </td>
+                <td className="py-2">
+                  {st.kind === "empty" ? (
+                    <span className="text-muted-foreground">―</span>
+                  ) : st.kind === "onair" ? (
+                    <span className="rounded bg-[#ff3b30] px-1.5 py-0.5 text-[9px] font-bold tracking-[0.12em] text-white uppercase">
+                      On air
+                    </span>
+                  ) : st.kind === "ok" ? (
+                    <span className="rounded border border-meter-ok/30 bg-meter-ok/10 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.12em] text-meter-ok uppercase">
+                      {st.label}
+                    </span>
+                  ) : st.kind === "error" ? (
+                    <span className="rounded border border-meter-hot/30 bg-meter-hot/10 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.12em] text-meter-hot uppercase">
+                      Error
+                    </span>
+                  ) : (
+                    <span className="rounded border border-border/70 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                      Ready
+                    </span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -118,7 +118,7 @@ export function Knob({
   const r = size / 2;
   const stroke = 4;
   const arcR = r - stroke / 2 - 1;
-  const display = format ? format(value) : value.toFixed(1);
+  const display = format ? format(value) : value.toFixed(2);
 
   return (
     <div className={cn("flex flex-col items-center gap-1.5 select-none", className)}>
