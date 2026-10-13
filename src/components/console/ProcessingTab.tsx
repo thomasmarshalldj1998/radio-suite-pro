@@ -78,19 +78,36 @@ function ChainBlock({
   wide?: boolean;
   children: ReactNode;
 }) {
+  const bypassed = enabled === false;
   return (
     <section
       className={cn(
-        "card-layer flex min-w-[300px] flex-1 flex-col rounded-xl border border-border/70 bg-card",
+        "card-layer flex min-w-[300px] flex-1 flex-col rounded-xl border bg-card transition-colors",
+        bypassed ? "border-border/50" : "border-border/70",
         wide && "min-w-[460px]",
       )}
     >
-      <header className="flex items-center gap-2.5 border-b border-border/60 px-3 py-2.5">
-        <span className="text-readout flex size-6 shrink-0 items-center justify-center rounded border border-rack-line bg-[#121417] text-[11px] font-bold text-signal">
+      <header
+        className={cn(
+          "flex items-center gap-2.5 border-b px-3 py-2.5 transition-colors",
+          bypassed ? "border-border/40 bg-muted/30" : "border-border/60",
+        )}
+      >
+        <span
+          className={cn(
+            "text-readout flex size-6 shrink-0 items-center justify-center rounded border border-rack-line bg-[#121417] text-[11px] font-bold transition-colors",
+            bypassed ? "text-panel-mut" : "text-signal",
+          )}
+        >
           {String(index).padStart(2, "0")}
         </span>
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[11px] font-semibold tracking-[0.12em] text-foreground/90 uppercase">
+          <h3
+            className={cn(
+              "truncate text-[11px] font-semibold tracking-[0.12em] uppercase",
+              bypassed ? "text-muted-foreground" : "text-foreground/90",
+            )}
+          >
             {title}
           </h3>
           {subtitle && (
@@ -99,6 +116,11 @@ function ChainBlock({
             </p>
           )}
         </div>
+        {bypassed && (
+          <span className="rounded border border-amber-led/40 bg-amber-led/10 px-1.5 py-0.5 text-[8px] font-bold tracking-[0.14em] text-amber-led uppercase">
+            Bypass
+          </span>
+        )}
         {right}
         {enabled !== undefined && onToggle && (
           <Switch
@@ -109,7 +131,14 @@ function ChainBlock({
           />
         )}
       </header>
-      <div className="flex-1 p-3">{children}</div>
+      <div
+        className={cn(
+          "flex-1 p-3 transition-opacity",
+          bypassed && "opacity-55",
+        )}
+      >
+        {children}
+      </div>
     </section>
   );
 }
@@ -183,6 +212,7 @@ export function ProcessingTab({
 
   const ceilingPct = (Math.pow(10, params.limiter.ceilingDb / 20) * 100).toFixed(2);
   const truePeak = snap?.truePeak ?? -70;
+  const riderDb = snap?.riderDb ?? 0;
   const peakOver =
     (snap?.powered ?? false) && truePeak > params.limiter.ceilingDb + 0.05;
   const preUs = Math.round(params.limiter.attackMs * 1000);
@@ -211,6 +241,119 @@ export function ProcessingTab({
 
       {/* ── the chain ── */}
       <div className="flex flex-wrap items-stretch gap-3">
+        {/* 00 — input stage */}
+        <ChainBlock
+          index={0}
+          title="Input stage"
+          subtitle="Trim · HPF · phase · gate"
+        >
+          <div className="divide-y divide-border/60 rounded border border-border/60">
+            <CtrlRow label="Trim">
+              <SliderRow
+                min={-24}
+                max={24}
+                step={0.5}
+                value={params.inputGainDb}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, inputGainDb: v }))
+                }
+                label="Input trim"
+              />
+              <Val>{formatDb(params.inputGainDb)}</Val>
+            </CtrlRow>
+            <CtrlRow label="HPF">
+              <Seg
+                ariaLabel="High-pass filter"
+                value={params.hpf.on ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, hpf: { ...p.hpf, on: v === "on" } }))
+                }
+              />
+              <SliderRow
+                min={20}
+                max={300}
+                step={5}
+                value={params.hpf.freqHz}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, hpf: { ...p.hpf, freqHz: v } }))
+                }
+                label="HPF frequency"
+              />
+              <Val>{formatHz(params.hpf.freqHz)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Phase rot">
+              <Seg
+                ariaLabel="Phase rotation"
+                value={params.phase.mode}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "manual", label: "Manual" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    phase: { ...p.phase, mode: v as "auto" | "manual" },
+                  }))
+                }
+              />
+              <Val>
+                {params.phase.mode === "auto"
+                  ? "300 Hz voice"
+                  : formatHz(params.phase.freqHz)}
+              </Val>
+            </CtrlRow>
+            <CtrlRow label="Gate">
+              <Seg
+                ariaLabel="Silence gate"
+                value={params.gate.on ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    gate: { ...p.gate, on: v === "on" },
+                  }))
+                }
+              />
+              <SliderRow
+                min={-70}
+                max={-30}
+                step={0.5}
+                value={params.gate.thresholdDb}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    gate: { ...p.gate, thresholdDb: v },
+                  }))
+                }
+                label="Gate threshold"
+              />
+              <Val>{sgn(params.gate.thresholdDb)} dB</Val>
+            </CtrlRow>
+            <CtrlRow label="Hold">
+              <SliderRow
+                min={100}
+                max={2000}
+                step={50}
+                value={params.gate.holdMs}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, gate: { ...p.gate, holdMs: v } }))
+                }
+                label="Gate hold"
+              />
+              <Val>{secs(params.gate.holdMs)}</Val>
+            </CtrlRow>
+          </div>
+        </ChainBlock>
+
+        <ChainArrow />
+
         {/* 01 — equalizer */}
         <ChainBlock
           index={1}
@@ -233,28 +376,33 @@ export function ProcessingTab({
         >
           <div className="flex justify-between gap-1.5 overflow-x-auto pb-1">
             {params.eq.bands.map((band, i) => (
-              <Fader
-                key={band.freq}
-                label={formatHz(band.freq)}
-                value={band.gainDb}
-                min={-15}
-                max={15}
-                step={0.5}
-                height={116}
-                accent={Math.abs(band.gainDb) > 0.05}
-                format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
-                onChange={(v) =>
-                  setParams((p) => ({
-                    ...p,
-                    eq: {
-                      ...p.eq,
-                      bands: p.eq.bands.map((b, j) =>
-                        j === i ? { ...b, gainDb: v } : b,
-                      ),
-                    },
-                  }))
-                }
-              />
+              <div key={band.freq} className="flex w-10 shrink-0 flex-col items-center">
+                <Fader
+                  label={formatHz(band.freq)}
+                  value={band.gainDb}
+                  min={-15}
+                  max={15}
+                  step={0.5}
+                  height={112}
+                  accent={Math.abs(band.gainDb) > 0.05}
+                  format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      eq: {
+                        ...p.eq,
+                        bands: p.eq.bands.map((b, j) =>
+                          j === i ? { ...b, gainDb: v } : b,
+                        ),
+                      },
+                    }))
+                  }
+                />
+                <span className="text-[8px] font-semibold tracking-wider text-panel-mut uppercase">
+                  {band.type === "peaking" ? "PK" : band.type === "lowshelf" ? "LS" : "HS"}{' '}
+                  Q{band.q.toFixed(2)}
+                </span>
+              </div>
             ))}
           </div>
         </ChainBlock>
@@ -381,6 +529,12 @@ export function ProcessingTab({
                   <span className="text-readout text-[8px] text-panel-mut">
                     {bandRange(i, params.multiband.splitsHz)}
                   </span>
+                  <span className="text-readout text-[8px] text-panel-mut">
+                    AT {band.attackMs.toFixed(2)} · RL {band.releaseMs.toFixed(2)}
+                  </span>
+                  <span className="text-readout text-[8px] text-signal/80">
+                    R{band.ratio.toFixed(2)} · MK {band.makeupDb.toFixed(2)}
+                  </span>
                 </div>
               );
             })}
@@ -502,6 +656,24 @@ export function ProcessingTab({
                 }
               />
               <Val>{params.rider.on ? `${sgn(snap?.riderDb ?? 0)} dB` : "off"}</Val>
+            </CtrlRow>
+            <CtrlRow label="Ride bar">
+              <div className="panel-well relative h-2 w-32 overflow-hidden rounded-full">
+                <span className="absolute inset-y-0 left-1/2 w-px bg-white/20" />
+                <span
+                  className="absolute inset-y-0 bg-signal transition-all duration-150"
+                  style={
+                    params.rider.on
+                      ? riderDb <= 0
+                        ? { left: `${50 + (riderDb / Math.max(params.rider.maxRideDb, 1)) * 50}%`, width: `${Math.min(50, (-riderDb / Math.max(params.rider.maxRideDb, 1)) * 50)}%` }
+                        : { left: "50%", width: `${Math.min(50, (riderDb / Math.max(params.rider.maxRideDb, 1)) * 50)}%`, background: "#4cd964" }
+                      : { left: "50%", width: "0%" }
+                  }
+                />
+              </div>
+              <Val className="min-w-0">
+                ±{params.rider.maxRideDb.toFixed(2)} dB
+              </Val>
             </CtrlRow>
             <CtrlRow label="GR">
               <GainReductionMeter

@@ -3,12 +3,10 @@ import { ModuleCard } from "@/components/console/ModuleCard";
 import { api } from "@/convex/_generated/api";
 import { getEngine } from "@/lib/audio/engine";
 import {
-  CODECS,
   codecById,
   formatBytes,
   FORMATS,
   formatProfile,
-  formatSupport,
   formatUptime,
   isCodecSupported,
   jsFormatFor,
@@ -45,9 +43,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -60,12 +56,66 @@ import {
   RotateCw,
   Send,
   Server,
+  SkipForward,
   Square,
+  Trash2,
+  Upload,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const BITRATES = [48, 64, 96, 128, 160, 192, 256, 320];
+
+/** localStorage key for the TXT metadata rotation. */
+const STORAGE_ROT_KEY = "signalpath.rotation.v1";
+
+/**
+ * Codec families for the TX deck — the three broadcast staples (MP3, AAC,
+ * OGG/Vorbis) plus lossless and the adaptive relay, each owning a set of
+ * delivery-matrix profiles.
+ */
+interface CodecFamily {
+  id: string;
+  label: string;
+  hint: string;
+  formats: string[];
+}
+
+const CODEC_FAMILIES: CodecFamily[] = [
+  {
+    id: "mp3",
+    label: "MP3",
+    hint: "LAME · internet-radio staple",
+    formats: ["mp3-320", "mp3-192", "mp3-128", "mp3-64"],
+  },
+  {
+    id: "aac",
+    label: "AAC",
+    hint: "AAC-LC & HE-AAC v2",
+    formats: ["aac-lc-192", "aac-lc-128", "heaac2-64", "heaac2-48"],
+  },
+  {
+    id: "ogg",
+    label: "OGG / Vorbis",
+    hint: "Xiph containers · Opus",
+    formats: ["vorbis-128", "opus-96"],
+  },
+  {
+    id: "flac",
+    label: "FLAC",
+    hint: "Lossless archive master",
+    formats: ["flac-16"],
+  },
+  {
+    id: "hls",
+    label: "HLS",
+    hint: "Adaptive relay ladder",
+    formats: ["hls-abr"],
+  },
+];
+
+const familyOfFormat = (formatId: string): CodecFamily | undefined =>
+  CODEC_FAMILIES.find((fam) => fam.formats.includes(formatId));
 
 function Field({
   label,
@@ -102,6 +152,20 @@ export function EncoderPanel() {
     updateOutput(sel, updater);
   const [npTitle, setNpTitle] = useState("");
   const [npArtist, setNpArtist] = useState("");
+  // TXT metadata rotation: “Artist - Title” per line, pushed as ICY metadata
+  const [rotation, setRotation] = useState<{ artist: string; title: string }[]>(
+    () => {
+      try {
+        const raw = localStorage.getItem(STORAGE_ROT_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [rotIdx, setRotIdx] = useState(0);
+  const [rotAuto, setRotAuto] = useState(false);
+  const txtInputRef = useRef<HTMLInputElement>(null);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -169,8 +233,16 @@ export function EncoderPanel() {
   // codec picker: delivery-matrix formats (WASM + relay) and MediaRecorder
   // fallbacks share one select — `fmt:<id>` vs `rec:<id>` keeps them apart
   const activeFmt = FORMATS.find((f) => formatProfile(f) === form.targetFormat);
-  const codecValue = activeFmt ? `fmt:${activeFmt.id}` : `rec:${form.codec}`;
+  const activeFamily = activeFmt ? familyOfFormat(activeFmt.id) : undefined;
   const codecLabel = activeFmt ? activeFmt.label : currentCodec.label;
+
+  const pickFamily = (fam: CodecFamily) => {
+    const current =
+      activeFmt && fam.formats.includes(activeFmt.id)
+        ? activeFmt.id
+        : fam.formats[0];
+    setCodecChoice(`fmt:${current}`);
+  };
 
   const setCodecChoice = (v: string) => {
     if (v.startsWith("fmt:")) {
@@ -404,26 +476,301 @@ export function EncoderPanel() {
     }
   };
 
+  /** Parse a TXT playlist: one track per line, “Artist - Title” when split. */
+  const loadTxt = async (file: File) => {
+    const text = await file.text();
+    const entries = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const m = line.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+        return m
+          ? { artist: m[1].trim(), title: m[2].trim() }
+          : { artist: "", title: line };
+      });
+    if (entries.length === 0) {
+      toast.error("No metadata lines found in that TXT file");
+      return;
+    }
+    setRotation(entries);
+    setRotIdx(0);
+    try {
+      localStorage.setItem(STORAGE_ROT_KEY, JSON.stringify(entries));
+    } catch {
+      /* storage may be unavailable */
+    }
+    toast.success(`${entries.length} metadata lines loaded`, {
+      description: file.name,
+    });
+  };
+
+  /** Push one rotation line as ICY metadata, then advance. */
+  const sendEntry = async (i: number) => {
+    const entry = rotation[i];
+    if (!entry) return;
+    try {
+      await setNowPlaying({
+        title: entry.title,
+        artist: entry.artist || undefined,
+      });
+      toast.success(
+        `Metadata sent — ${entry.artist ? `${entry.artist} · ` : ""}${entry.title}`,
+      );
+      setRotIdx((i + 1) % rotation.length);
+    } catch {
+      toast.error("Could not send metadata");
+    }
+  };
+  const sendRotation = () => void sendEntry(rotIdx);
+
+  // auto-rotation every 30 s (ref indirection keeps the interval stable)
+  const sendRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    sendRef.current = sendRotation;
+  });
+  useEffect(() => {
+    if (!rotAuto || rotation.length === 0) return;
+    const id = window.setInterval(() => sendRef.current(), 30_000);
+    return () => window.clearInterval(id);
+  }, [rotAuto, rotation]);
+
   const lastMetadata = logEntries?.find((e) => e.kind === "metadata");
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
-      {/* ── output matrix: 8 broadcast outputs ── */}
+      {/* ── STREAM TX deck ── */}
+      <div className="panel rounded-xl p-5 lg:col-span-12">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
+          {/* ON AIR lamp cluster */}
+          <div className="flex items-center gap-3">
+            <span
+              aria-hidden
+              className={cn(
+                "size-3 shrink-0 rounded-full",
+                rt.onAir
+                  ? "animate-pulse-live bg-[#ff3b30] shadow-[0_0_14px_rgba(255,59,48,0.9)]"
+                  : "bg-white/15",
+              )}
+            />
+            <div>
+              <p className="text-[9px] font-semibold tracking-[0.22em] text-panel-mut uppercase">
+                Stream TX
+              </p>
+              <p
+                className={cn(
+                  "text-xl leading-6 font-bold tracking-[0.08em] uppercase",
+                  rt.onAir ? "text-[#ff3b30]" : "text-panel-mut",
+                )}
+              >
+                {rt.onAir ? "On air" : "Off air"}
+              </p>
+            </div>
+          </div>
+
+          <div className="hidden h-12 w-px bg-rack-line sm:block" />
+
+          {/* station identity */}
+          <div className="min-w-[220px] flex-1">
+            <p className="text-[9px] font-semibold tracking-[0.18em] text-panel-mut uppercase">
+              Transmitting
+            </p>
+            <p className="mt-0.5 truncate text-base font-semibold text-white">
+              {form.name || "— no output selected —"}
+            </p>
+            <p className="text-readout mt-0.5 truncate text-[10px] text-panel-mut">
+              {url || "—"}
+              {rt.onAir ? ` · ${codecLabel} · ${form.channels}` : ""}
+            </p>
+          </div>
+
+          {/* transmission stats */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              { label: "Uptime", value: formatUptime(uptime) },
+              {
+                label: "Measured",
+                value: rt.onAir ? `${rt.stats.kbps.toFixed(2)}` : "—",
+                sub: "kbps",
+              },
+              {
+                label: "Target",
+                value: form.bitrateKbps ? String(form.bitrateKbps) : "—",
+                sub: form.bitrateKbps ? "kbps" : undefined,
+              },
+              { label: "Sent", value: formatBytes(rt.stats.bytes) },
+            ].map((s) => (
+              <div key={s.label} className="panel-well rounded-md px-2.5 py-2">
+                <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+                  {s.label}
+                </p>
+                <p className="text-readout mt-1 text-sm font-medium text-panel-fg">
+                  {s.value}
+                  {s.sub && (
+                    <span className="ml-0.5 text-[8px] text-panel-mut">
+                      {s.sub}
+                    </span>
+                  )}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {/* transport */}
+          <Button
+            className={cn(
+              "h-11 shrink-0 px-6 text-sm font-bold tracking-[0.14em] uppercase",
+              rt.onAir
+                ? "bg-white/10 text-panel-fg hover:bg-white/20"
+                : "bg-signal text-signal-fg hover:bg-signal-strong",
+            )}
+            onClick={() => (rt.onAir ? void disconnect() : void connect())}
+          >
+            {rt.onAir ? (
+              <>
+                <Square className="mr-2 size-3.5" /> Stop broadcast
+              </>
+            ) : (
+              <>
+                <Radio className="mr-2 size-4" /> Go on air
+              </>
+            )}
+          </Button>
+
+          <div className="hidden lg:block">
+            <StereoLevelMeter kind="out" height={72} />
+          </div>
+        </div>
+        <p className="mt-3 text-[10px] text-panel-mut">
+          {rt.onAir
+            ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
+            : "The encoder keeps running across tabs until you stop it."}
+        </p>
+      </div>
+
+      {/* ── TX codec: family → profile → bitrate ── */}
       <ModuleCard
-        className="lg:col-span-6"
-        title="Outputs 1–4"
-        subtitle="Click a row to edit it in the mount configuration below"
-        bodyClassName="p-0"
+        className="lg:col-span-5"
+        title="TX codec"
+        subtitle="Codec family → delivery profile → bitrate"
       >
-        <OutputTable slots={slots} from={0} sel={sel} onSelect={setSel} />
-      </ModuleCard>
-      <ModuleCard
-        className="lg:col-span-6"
-        title="Outputs 5–8"
-        subtitle="Per-output status: ready · on air · reachable"
-        bodyClassName="p-0"
-      >
-        <OutputTable slots={slots} from={4} sel={sel} onSelect={setSel} />
+        <div className="flex flex-wrap gap-1.5">
+          {CODEC_FAMILIES.map((fam) => {
+            const active = activeFamily?.id === fam.id;
+            const wasm = fam.formats.some((id) => jsFormatFor(id));
+            return (
+              <button
+                key={fam.id}
+                type="button"
+                onClick={() => pickFamily(fam)}
+                aria-pressed={active}
+                className={cn(
+                  "flex min-w-[8.5rem] flex-1 cursor-pointer flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
+                  active
+                    ? "border-signal/60 bg-signal/10"
+                    : "border-border/70 hover:bg-muted/40",
+                )}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "led size-1.5",
+                      active ? (wasm ? "led-on" : "led-warn") : undefined,
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      "text-[11px] font-semibold tracking-[0.1em] uppercase",
+                      active ? "text-signal" : "text-foreground/90",
+                    )}
+                  >
+                    {fam.label}
+                  </span>
+                </span>
+                <span className="text-[9px] leading-3.5 text-muted-foreground">
+                  {fam.hint}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <Field label="Profile" className="col-span-2 sm:col-span-3">
+            <Select value={activeFmt ? `fmt:${activeFmt.id}` : ""} onValueChange={setCodecChoice}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Pick a codec family above" />
+              </SelectTrigger>
+              <SelectContent>
+                {(activeFamily?.formats ?? []).map((id) => {
+                  const f = FORMATS.find((x) => x.id === id);
+                  if (!f) return null;
+                  return (
+                    <SelectItem key={id} value={`fmt:${id}`}>
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate">{f.label}</span>
+                        <span className="truncate text-[10px] text-muted-foreground">
+                          {jsFormatFor(id) ? f.use : `Relay — ${f.use}`}
+                        </span>
+                      </span>
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Bitrate">
+            <Select
+              value={String(form.bitrateKbps)}
+              onValueChange={(v) => setForm((f) => ({ ...f, bitrateKbps: Number(v) }))}
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {BITRATES.map((b) => (
+                  <SelectItem key={b} value={String(b)}>
+                    {b} kbps
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Sample rate">
+            <Select
+              value={String(form.sampleRateKhz)}
+              onValueChange={(v) => setForm((f) => ({ ...f, sampleRateKhz: Number(v) }))}
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="48">48 kHz</SelectItem>
+                <SelectItem value="44.1">44.1 kHz</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Channels">
+            <Select
+              value={form.channels}
+              onValueChange={(v) => setForm((f) => ({ ...f, channels: v }))}
+            >
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="stereo">Stereo</SelectItem>
+                <SelectItem value="mono">Mono</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          MP3, AAC and OGG encode locally in a WASM worker; HLS has no browser
+          packager and is stored as a relay target for your transcoder. The
+          browser recorder (MediaRecorder) stays available as a fallback via
+          the mount’s codec when no profile is selected.
+        </p>
       </ModuleCard>
       <div className="flex flex-wrap items-center gap-2 lg:col-span-12">
         <Button
@@ -537,116 +884,6 @@ export function EncoderPanel() {
             />
           </Field>
 
-          <div className="col-span-2 my-1 border-t border-border/60 sm:col-span-3" />
-
-          <Field label="Codec">
-            <Select value={codecValue} onValueChange={setCodecChoice}>
-              <SelectTrigger className="h-9">
-                <span className="truncate">{codecLabel}</span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel className="text-[9px] text-panel-mut">
-                    In-browser encoders
-                  </SelectLabel>
-                  {FORMATS.filter((f) => jsFormatFor(f.id)).map((f) => (
-                    <SelectItem key={f.id} value={`fmt:${f.id}`}>
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{f.label}</span>
-                        <span className="truncate text-[10px] text-muted-foreground">
-                          {f.use}
-                        </span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-                <SelectGroup>
-                  <SelectLabel className="text-[9px] text-panel-mut">
-                    Relay targets
-                  </SelectLabel>
-                  {FORMATS.filter((f) => !jsFormatFor(f.id)).map((f) => {
-                    const sup = formatSupport(f);
-                    return (
-                      <SelectItem key={f.id} value={`fmt:${f.id}`}>
-                        <span className="flex min-w-0 flex-col">
-                          <span className="truncate">{f.label}</span>
-                          <span className="truncate text-[10px] text-muted-foreground">
-                            {sup.ready ? f.use : `Relay — ${f.use}`}
-                          </span>
-                        </span>
-                      </SelectItem>
-                    );
-                  })}
-                </SelectGroup>
-                <SelectGroup>
-                  <SelectLabel className="text-[9px] text-panel-mut">
-                    Browser recorder (MediaRecorder)
-                  </SelectLabel>
-                  {CODECS.map((c) => {
-                    const ok = isCodecSupported(c.mimeType);
-                    return (
-                      <SelectItem key={c.id} value={`rec:${c.id}`} disabled={!ok}>
-                        <span className="flex min-w-0 flex-col">
-                          <span className="truncate">
-                            {c.label}
-                            {!ok && " — unsupported"}
-                          </span>
-                          <span className="truncate text-[10px] text-muted-foreground">
-                            {c.note}
-                          </span>
-                        </span>
-                      </SelectItem>
-                    );
-                  })}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Bitrate">
-            <Select
-              value={String(form.bitrateKbps)}
-              onValueChange={(v) => setForm((f) => ({ ...f, bitrateKbps: Number(v) }))}
-            >
-              <SelectTrigger className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {BITRATES.map((b) => (
-                  <SelectItem key={b} value={String(b)}>
-                    {b} kbps
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Sample rate">
-            <Select
-              value={String(form.sampleRateKhz)}
-              onValueChange={(v) => setForm((f) => ({ ...f, sampleRateKhz: Number(v) }))}
-            >
-              <SelectTrigger className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="48">48 kHz</SelectItem>
-                <SelectItem value="44.1">44.1 kHz</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Channels">
-            <Select
-              value={form.channels}
-              onValueChange={(v) => setForm((f) => ({ ...f, channels: v }))}
-            >
-              <SelectTrigger className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="stereo">Stereo</SelectItem>
-                <SelectItem value="mono">Mono</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
           <div className="col-span-2 flex items-end gap-2 sm:col-span-2">
             <Button
               className="h-9 flex-1"
@@ -680,7 +917,7 @@ export function EncoderPanel() {
           )}
           {supported.length > 0 && (
             <p className="mt-2 text-[10px] text-muted-foreground">
-              MediaRecorder fallbacks in this browser:{" "}
+              MediaRecorder fallbacks:{" "}
               {supported.map((c) => c.label).join(" · ")}
             </p>
           )}
@@ -698,146 +935,214 @@ export function EncoderPanel() {
         </div>
       </ModuleCard>
 
-      {/* ── stream TX transmitter ── */}
-      <div className="flex flex-col gap-4 lg:col-span-5">
-        <div className="panel rounded-xl p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <span
-                className={cn(
-                  "led",
-                  rt.onAir ? "led-hot animate-pulse-live" : undefined,
-                )}
+      {/* ── now playing + TXT rotation ── */}
+      <ModuleCard
+        className="lg:col-span-7"
+        title="Now playing"
+        subtitle="Manual ICY metadata or a rotating TXT playlist — one “Artist - Title” per line"
+        right={
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            {mountDoc?.nowPlayingTitle
+              ? `${mountDoc.nowPlayingArtist ?? ""}${mountDoc.nowPlayingArtist ? " · " : ""}${mountDoc.nowPlayingTitle}`
+              : "no metadata set"}
+          </span>
+        }
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <Field label="Title">
+              <Input
+                value={npTitle}
+                onChange={(e) => setNpTitle(e.target.value)}
+                placeholder="Midnight Drive"
+                className="h-9"
               />
-              <span className="text-[11px] font-semibold tracking-[0.18em] text-panel-mut uppercase">
-                Stream TX
-              </span>
-            </div>
-            <span
-              className={cn(
-                "rounded-full px-2.5 py-1 text-[10px] font-bold tracking-[0.16em] uppercase",
-                rt.onAir
-                  ? "bg-signal text-signal-fg animate-pulse-live"
-                  : "bg-white/10 text-panel-mut",
-              )}
-            >
-              {rt.onAir ? "On air" : "Off air"}
-            </span>
+            </Field>
           </div>
-
-          {/* transmitter identity: what this TX is broadcasting */}
-          <div className="panel-well mt-3 rounded-md px-2.5 py-2">
-            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-              Transmitting
-            </p>
-            <p className="mt-0.5 truncate text-sm font-semibold text-white">
-              {form.name || "— no output selected —"}
-            </p>
-            <p className="text-readout mt-0.5 truncate text-[10px] text-panel-mut">
-              {url || "—"}
-              {rt.onAir ? ` · ${currentCodec.label} · ${form.channels}` : ""}
-            </p>
+          <div className="flex-1">
+            <Field label="Artist">
+              <Input
+                value={npArtist}
+                onChange={(e) => setNpArtist(e.target.value)}
+                placeholder="Nova Waves"
+                className="h-9"
+              />
+            </Field>
           </div>
-
-          <div className="mt-3 grid grid-cols-4 gap-2">
-            {[
-              { label: "Uptime", value: formatUptime(uptime) },
-              {
-                label: "Measured",
-                value: rt.onAir ? `${rt.stats.kbps.toFixed(2)}` : "—",
-                sub: "kbps",
-              },
-              {
-                label: "Target",
-                value: form.bitrateKbps ? String(form.bitrateKbps) : "—",
-                sub: form.bitrateKbps ? "kbps" : undefined,
-              },
-              { label: "Sent", value: formatBytes(rt.stats.bytes) },
-            ].map((s) => (
-              <div key={s.label} className="panel-well rounded-md px-2 py-2">
-                <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-                  {s.label}
-                </p>
-                <p className="text-readout mt-1 text-sm font-medium text-panel-fg">
-                  {s.value}
-                  {s.sub && (
-                    <span className="ml-0.5 text-[8px] text-panel-mut">{s.sub}</span>
-                  )}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          <Button
-            className={cn(
-              "mt-4 h-11 w-full text-sm font-bold tracking-[0.14em] uppercase",
-              rt.onAir
-                ? "bg-white/10 text-panel-fg hover:bg-white/20"
-                : "bg-signal text-signal-fg hover:bg-signal-strong",
-            )}
-            onClick={() => (rt.onAir ? void disconnect() : void connect())}
-          >
-            {rt.onAir ? (
-              <>
-                <Square className="mr-2 size-3.5" /> Stop broadcast
-              </>
-            ) : (
-              <>
-                <Radio className="mr-2 size-4" /> Go on air
-              </>
-            )}
+          <Button className="h-9 shrink-0" onClick={() => void sendNowPlaying()}>
+            <Send className="mr-1.5 size-3.5" />
+            Send
           </Button>
-          <p className="mt-2 text-center text-[10px] text-panel-mut">
-            {rt.onAir
-              ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
-              : "The encoder keeps running across tabs until you stop it."}
+        </div>
+        {lastMetadata && (
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Last sent:{" "}
+            <span className="text-foreground/80">{lastMetadata.title}</span>
+          </p>
+        )}
+
+        <div className="mt-4 border-t border-border/60 pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+              TXT rotation
+              <span className="ml-2 font-normal normal-case tracking-normal">
+                {rotation.length > 0
+                  ? `${rotation.length} lines · next ${rotIdx + 1}/${rotation.length}`
+                  : "no playlist loaded"}
+              </span>
+            </p>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <input
+                ref={txtInputRef}
+                type="file"
+                accept=".txt,text/plain"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void loadTxt(f);
+                  e.target.value = "";
+                }}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 cursor-pointer text-[10px]"
+                onClick={() => txtInputRef.current?.click()}
+              >
+                <Upload className="mr-1 size-3" />
+                Load TXT
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 cursor-pointer text-[10px]"
+                disabled={rotation.length === 0}
+                onClick={sendRotation}
+              >
+                <SkipForward className="mr-1 size-3" />
+                Send next
+              </Button>
+              <Button
+                size="sm"
+                variant={rotAuto ? "default" : "outline"}
+                className="h-7 cursor-pointer text-[10px]"
+                disabled={rotation.length === 0}
+                onClick={() => setRotAuto((a) => !a)}
+              >
+                {rotAuto ? "Auto 30s: on" : "Auto 30s"}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 cursor-pointer text-[10px]"
+                disabled={rotation.length === 0}
+                onClick={() => {
+                  setRotation([]);
+                  setRotIdx(0);
+                  setRotAuto(false);
+                  try {
+                    localStorage.removeItem(STORAGE_ROT_KEY);
+                  } catch {
+                    /* storage may be unavailable */
+                  }
+                }}
+              >
+                <Trash2 className="size-3" />
+              </Button>
+            </div>
+          </div>
+
+          {rotation.length === 0 ? (
+            <p className="mt-2 rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-[11px] text-muted-foreground">
+              Load a .txt with one track per line — “Artist - Title” — and the
+              TX will rotate through it, pushing each line as ICY metadata.
+            </p>
+          ) : (
+            <ul className="scrollbar-slim mt-2 max-h-40 divide-y divide-border/50 overflow-y-auto rounded-md border border-border/60">
+              {rotation.map((entry, i) => (
+                <li key={`${entry.title}-${i}`}>
+                  <button
+                    type="button"
+                    onClick={() => void sendEntry(i)}
+                    className={cn(
+                      "flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-[11px] transition-colors hover:bg-muted/50",
+                      i === rotIdx && "bg-signal/10",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "text-readout w-5 shrink-0 text-[9px]",
+                        i === rotIdx ? "text-signal" : "text-panel-mut",
+                      )}
+                    >
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span className="truncate text-foreground/90">
+                      {entry.title}
+                    </span>
+                    {entry.artist && (
+                      <span className="ml-auto shrink-0 truncate pl-2 text-[9px] text-panel-mut">
+                        {entry.artist}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-1.5 text-[9px] text-panel-mut">
+            {rotation.length > 0
+              ? "Click any line to push it now; Auto advances every 30 s."
+              : "The playlist is kept in this browser between visits."}
           </p>
         </div>
+      </ModuleCard>
 
-        {/* ── now playing ── */}
-        <ModuleCard
-          title="Now playing"
-          subtitle="ICY metadata pushed to every listener"
-          right={
-            <span className="text-[10px] text-muted-foreground">
-              {mountDoc?.nowPlayingTitle
-                ? `${mountDoc.nowPlayingArtist ?? ""} ${mountDoc.nowPlayingArtist ? "·" : ""} ${mountDoc.nowPlayingTitle}`
-                : "no metadata set"}
-            </span>
-          }
+      {/* ── output matrix: 8 broadcast outputs ── */}
+      <ModuleCard
+        className="lg:col-span-5"
+        title="Broadcast outputs"
+        subtitle="Click a row to edit it in the mount configuration"
+        bodyClassName="p-0"
+      >
+        <OutputTable slots={slots} from={0} sel={sel} onSelect={setSel} />
+        <div className="border-t border-border/60">
+          <OutputTable slots={slots} from={4} sel={sel} onSelect={setSel} />
+        </div>
+      </ModuleCard>
+      <div className="flex flex-wrap items-center gap-2 lg:col-span-12">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={() => void retryAll()}
+          disabled={retrying}
         >
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <div className="flex-1">
-              <Field label="Title">
-                <Input
-                  value={npTitle}
-                  onChange={(e) => setNpTitle(e.target.value)}
-                  placeholder="Midnight Drive"
-                  className="h-9"
-                />
-              </Field>
-            </div>
-            <div className="flex-1">
-              <Field label="Artist">
-                <Input
-                  value={npArtist}
-                  onChange={(e) => setNpArtist(e.target.value)}
-                  placeholder="Nova Waves"
-                  className="h-9"
-                />
-              </Field>
-            </div>
-            <Button className="h-9 shrink-0" onClick={() => void sendNowPlaying()}>
-              <Send className="mr-1.5 size-3.5" />
-              Send
-            </Button>
-          </div>
-          {lastMetadata && (
-            <p className="mt-3 text-[11px] text-muted-foreground">
-              Last sent: <span className="text-foreground/80">{lastMetadata.title}</span>
-            </p>
-          )}
-        </ModuleCard>
+          <RotateCw className="size-3.5" />
+          {retrying ? "Retrying…" : "Retry all"}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={() => void disconnect()}
+        >
+          <Square className="size-3.5" />
+          Stop all
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
+          onClick={exportConfig}
+        >
+          <Download className="size-3.5" />
+          Export config
+        </Button>
+        <span className="ml-auto hidden text-[10px] text-muted-foreground sm:inline">
+          {slots.filter(isConfigured).length}/{OUTPUT_COUNT} outputs configured
+          {rt.onAir ? ` · broadcasting output ${liveSlot + 1}` : ""}
+        </span>
       </div>
 
       {/* ── takes ── */}
