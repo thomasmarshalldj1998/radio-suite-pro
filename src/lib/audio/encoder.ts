@@ -73,76 +73,183 @@ export interface OutputProfile {
 }
 
 /**
- * The house output matrix — eight renditions an operator can punch up
- * instantly. Each maps to a codec/bitrate/channels combination the browser
- * can encode (support is checked at render time).
+ * The station delivery matrix. Browsers can only *encode* a handful of
+ * formats with MediaRecorder (Opus, and AAC-LC where the platform ships an
+ * encoder); MP3, HE-AAC v2, Vorbis, FLAC and HLS have no browser encoders,
+ * so those profiles are relay targets: the mount config records the intent
+ * and a transcoder relay consumes the local proxy stream.
  */
-export const OUTPUTS: OutputProfile[] = [
+export interface BroadcastFormat {
+  id: string;
+  label: string;
+  bitrateKbps: number;
+  /** Optional upper bound for adaptive profiles (HLS). */
+  bitrateMaxKbps?: number;
+  sampleRateKhz: number;
+  channels: string;
+  /** Ordered candidate MIME types MediaRecorder may be able to record. */
+  mimes: string[];
+  ext: string;
+  use: string;
+}
+
+export const FORMATS: BroadcastFormat[] = [
   {
-    id: "main",
-    label: "Main web stream",
-    codecId: "opus",
-    bitrateKbps: 128,
-    channels: "stereo",
-    use: "Primary listener feed",
+    id: "mp3-320",
+    label: "MP3 @ 320 kbps",
+    bitrateKbps: 320,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "Highest-quality MP3 stream / archive",
   },
   {
-    id: "hq",
-    label: "HQ listen-live",
-    codecId: "opus",
+    id: "aac-lc-192",
+    label: "AAC-LC @ 192 kbps",
     bitrateKbps: 192,
-    channels: "stereo",
-    use: "Desktop hi-fi embed",
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/mp4;codecs=mp4a.40.2"],
+    ext: "m4a",
+    use: "Premium AAC feed",
   },
   {
-    id: "mobile",
-    label: "Mobile feed",
-    codecId: "aac",
-    bitrateKbps: 96,
-    channels: "stereo",
-    use: "iOS / Android apps",
-  },
-  {
-    id: "lowband",
-    label: "Low bandwidth",
-    codecId: "aac",
-    bitrateKbps: 48,
-    channels: "mono",
-    use: "Weak-network listeners",
-  },
-  {
-    id: "icecast",
-    label: "Icecast native",
-    codecId: "vorbis",
+    id: "aac-lc-128",
+    label: "AAC-LC @ 128 kbps",
     bitrateKbps: 128,
-    channels: "stereo",
-    use: "Icecast2 Ogg mount",
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/mp4;codecs=mp4a.40.2"],
+    ext: "m4a",
+    use: "Standard AAC stream",
   },
   {
-    id: "legacy",
-    label: "Legacy fallback",
-    codecId: "webm",
-    bitrateKbps: 96,
-    channels: "stereo",
-    use: "Older browser fallback",
-  },
-  {
-    id: "talk",
-    label: "Talk radio",
-    codecId: "opus",
+    id: "heaac2-64",
+    label: "HE-AAC v2 @ 64 kbps",
     bitrateKbps: 64,
-    channels: "mono",
-    use: "Speech-only programming",
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: [],
+    ext: "m4a",
+    use: "Low-bandwidth AAC+ (SBR+PS)",
   },
   {
-    id: "archive",
-    label: "Archive master",
-    codecId: "opus",
-    bitrateKbps: 256,
-    channels: "stereo",
-    use: "Take recording quality",
+    id: "heaac2-48",
+    label: "HE-AAC v2 @ 48 kbps",
+    bitrateKbps: 48,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: [],
+    ext: "m4a",
+    use: "Minimum-bandwidth AAC+ mobile feed",
+  },
+  {
+    id: "mp3-192",
+    label: "MP3 @ 192 kbps",
+    bitrateKbps: 192,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "Wide-compatibility MP3 stereo",
+  },
+  {
+    id: "mp3-128",
+    label: "MP3 @ 128 kbps",
+    bitrateKbps: 128,
+    sampleRateKhz: 44.1,
+    channels: "Joint Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "Classic 128 kbps internet-radio default",
+  },
+  {
+    id: "mp3-64",
+    label: "MP3 @ 64 kbps",
+    bitrateKbps: 64,
+    sampleRateKhz: 44.1,
+    channels: "Mono / Joint Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "Talk radio / weak-network fallback",
+  },
+  {
+    id: "opus-96",
+    label: "Ogg Opus @ 96 kbps",
+    bitrateKbps: 96,
+    sampleRateKhz: 48,
+    channels: "Stereo",
+    mimes: ["audio/ogg;codecs=opus", "audio/webm;codecs=opus"],
+    ext: "ogg",
+    use: "Icecast2 native Opus mount",
+  },
+  {
+    id: "vorbis-128",
+    label: "Ogg Vorbis @ 128 kbps",
+    bitrateKbps: 128,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/ogg;codecs=vorbis"],
+    ext: "ogg",
+    use: "Legacy Icecast2 Vorbis mount",
+  },
+  {
+    id: "flac-16",
+    label: "FLAC @ Lossless",
+    bitrateKbps: 0,
+    sampleRateKhz: 44.1,
+    channels: "16-bit Stereo",
+    mimes: ["audio/flac"],
+    ext: "flac",
+    use: "Lossless archive master",
+  },
+  {
+    id: "hls-abr",
+    label: "HLS Adaptive Multi-Bitrate",
+    bitrateKbps: 64,
+    bitrateMaxKbps: 192,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: [],
+    ext: "m3u8",
+    use: "AAC ladder manifest (64–192 kbps)",
   },
 ];
+
+export interface FormatSupport {
+  /** True when this browser can record the format directly. */
+  ready: boolean;
+  /** The MIME type that worked, when ready. */
+  mime: string | null;
+  note: string;
+}
+
+/** Probe whether the browser can record a delivery-matrix format. */
+export function formatSupport(f: BroadcastFormat): FormatSupport {
+  for (const mime of f.mimes) {
+    if (isCodecSupported(mime)) {
+      return { ready: true, mime, note: "Records in this browser" };
+    }
+  }
+  return f.mimes.length === 0
+    ? { ready: false, mime: null, note: "No browser encoder — relay target" }
+    : {
+        ready: false,
+        mime: null,
+        note: "This browser can't encode it — relay target",
+      };
+}
+
+/** Full profile string for the mount config, e.g. “MP3 @ 128 kbps (44.1 kHz, Joint Stereo)”. */
+export function formatProfile(f: BroadcastFormat): string {
+  const rate = f.bitrateMaxKbps
+    ? `${f.bitrateKbps}–${f.bitrateMaxKbps} kbps`
+    : f.bitrateKbps > 0
+      ? `${f.bitrateKbps} kbps`
+      : "Lossless";
+  return `${f.label.split(" @")[0]} @ ${rate} (${f.sampleRateKhz.toFixed(1)} kHz, ${f.channels})`;
+}
 
 export interface EncoderStats {
   bytes: number;

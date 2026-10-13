@@ -32,6 +32,10 @@ export const mountValidator = {
   bitrateKbps: v.number(),
   sampleRateKhz: v.number(), // 44.1 | 48
   channels: v.string(), // "stereo" | "mono"
+  // full delivery-matrix profile the mount targets, e.g.
+  // "MP3 @ 128 kbps (44.1 kHz, Joint Stereo)" — used when the target
+  // format needs a transcoder relay
+  targetFormat: v.optional(v.string()),
   nowPlayingTitle: v.optional(v.string()),
   nowPlayingArtist: v.optional(v.string()),
   updatedAt: v.number(),

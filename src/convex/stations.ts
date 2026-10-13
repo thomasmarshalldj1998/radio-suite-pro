@@ -14,6 +14,7 @@ const mountArgs = {
   bitrateKbps: v.number(),
   sampleRateKhz: v.number(),
   channels: v.string(),
+  targetFormat: v.optional(v.string()),
 };
 
 /** Load the signed-in user's stream mount configuration. */

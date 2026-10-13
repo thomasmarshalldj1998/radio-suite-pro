@@ -6,15 +6,17 @@ import {
   CODECS,
   codecById,
   formatBytes,
+  FORMATS,
+  formatProfile,
   formatUptime,
+  formatSupport,
   isCodecSupported,
   mountUrl,
-  OUTPUTS,
   probeEndpoint,
   supportedCodecs,
   StreamEncoder,
+  type BroadcastFormat,
   type EncoderStats,
-  type OutputProfile,
   type ProbeResult,
 } from "@/lib/audio/encoder";
 import {
@@ -59,6 +61,7 @@ interface MountForm {
   bitrateKbps: number;
   sampleRateKhz: number;
   channels: string;
+  targetFormat: string;
 }
 
 const DEFAULT_FORM: MountForm = {
@@ -73,9 +76,10 @@ const DEFAULT_FORM: MountForm = {
   bitrateKbps: 128,
   sampleRateKhz: 48,
   channels: "stereo",
+  targetFormat: "",
 };
 
-const BITRATES = [64, 96, 128, 160, 192, 256, 320];
+const BITRATES = [48, 64, 96, 128, 160, 192, 256, 320];
 
 function Field({
   label,
@@ -158,6 +162,7 @@ export function EncoderPanel() {
         bitrateKbps: mountDoc.bitrateKbps,
         sampleRateKhz: mountDoc.sampleRateKhz,
         channels: mountDoc.channels,
+        targetFormat: mountDoc.targetFormat ?? "",
       });
       setNpTitle(mountDoc.nowPlayingTitle ?? "");
       setNpArtist(mountDoc.nowPlayingArtist ?? "");
@@ -264,22 +269,39 @@ export function EncoderPanel() {
     }
   };
 
-  /** Punch up one of the eight house outputs. */
-  const selectOutput = (o: OutputProfile) => {
-    const codec = codecById(o.codecId);
-    if (!isCodecSupported(codec.mimeType)) {
-      toast.error(`${codec.label} is not supported in this browser`);
-      return;
+  /** Punch up a delivery-matrix format (or store it as the relay target). */
+  const selectFormat = (f: BroadcastFormat) => {
+    const sup = formatSupport(f);
+    const profile = formatProfile(f);
+    const channels = f.channels.toLowerCase().includes("mono") ? "mono" : "stereo";
+    const bitrate = f.bitrateKbps > 0 ? f.bitrateKbps : undefined;
+    if (sup.ready) {
+      // Ogg-container Opus when the browser offers it, else WebM/Opus; AAC-LC maps to the aac codec
+      const codecId = f.mimes.some((m) => m.startsWith("audio/ogg"))
+        ? isCodecSupported("audio/ogg;codecs=opus")
+          ? "vorbis"
+          : "opus"
+        : "aac";
+      setForm((prev) => ({
+        ...prev,
+        codec: codecId,
+        bitrateKbps: bitrate ?? prev.bitrateKbps,
+        sampleRateKhz: f.sampleRateKhz,
+        channels,
+        targetFormat: profile,
+      }));
+      toast.success(`${f.label} punched up`, { description: profile });
+    } else {
+      setForm((prev) => ({
+        ...prev,
+        bitrateKbps: bitrate ?? prev.bitrateKbps,
+        targetFormat: profile,
+      }));
+      toast(`${f.label} stored as relay target`, {
+        description:
+          "No browser encoder — a transcoder relay consumes the local proxy stream and emits this format.",
+      });
     }
-    setForm((f) => ({
-      ...f,
-      codec: o.codecId,
-      bitrateKbps: o.bitrateKbps,
-      channels: o.channels,
-    }));
-    toast.success(`${o.label} punched up`, {
-      description: `${codec.label} · ${o.bitrateKbps} kbps · ${o.channels}`,
-    });
   };
 
   const sendNowPlaying = async () => {
@@ -302,26 +324,26 @@ export function EncoderPanel() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
-      {/* ── output matrix: eight house renditions ── */}
+      {/* ── delivery matrix: twelve broadcast formats ── */}
       <ModuleCard
         className="lg:col-span-12"
-        title="Output renditions"
-        subtitle="Punch up any of the eight house outputs — sets codec, bitrate and channels"
+        title="Output formats"
+        subtitle="Station delivery matrix — browser-encodable formats record locally, the rest are stored as relay targets"
         bodyClassName="p-0"
         right={
           <span className="hidden text-[10px] text-muted-foreground sm:inline">
-            {OUTPUTS.filter((o) => isCodecSupported(codecById(o.codecId).mimeType)).length}
-            /{OUTPUTS.length} available in this browser
+            {FORMATS.filter((f) => formatSupport(f).ready).length}/{FORMATS.length}{" "}
+            recordable in this browser
           </span>
         }
       >
         <div className="overflow-x-auto px-4 pb-4">
-          <table className="w-full min-w-[46rem] text-sm">
+          <table className="w-full min-w-[52rem] text-sm">
             <thead>
               <tr className="border-b border-border/60 text-left text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-                <th className="py-2.5 pr-3 font-semibold">Output</th>
-                <th className="py-2.5 pr-3 font-semibold">Codec</th>
+                <th className="py-2.5 pr-3 font-semibold">Format</th>
                 <th className="py-2.5 pr-3 font-semibold">Bitrate</th>
+                <th className="py-2.5 pr-3 font-semibold">Sample rate</th>
                 <th className="py-2.5 pr-3 font-semibold">Channels</th>
                 <th className="py-2.5 pr-3 font-semibold">Support</th>
                 <th className="py-2.5 pr-3 font-semibold">Use</th>
@@ -329,16 +351,13 @@ export function EncoderPanel() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
-              {OUTPUTS.map((o) => {
-                const codec = codecById(o.codecId);
-                const ok = isCodecSupported(codec.mimeType);
-                const active =
-                  form.codec === o.codecId &&
-                  form.bitrateKbps === o.bitrateKbps &&
-                  form.channels === o.channels;
+              {FORMATS.map((f) => {
+                const sup = formatSupport(f);
+                const profile = formatProfile(f);
+                const active = form.targetFormat === profile;
                 return (
                   <tr
-                    key={o.id}
+                    key={f.id}
                     className={cn(
                       "transition-colors hover:bg-muted/40",
                       active && "bg-signal/5",
@@ -347,42 +366,59 @@ export function EncoderPanel() {
                     <td className="py-2.5 pr-3 text-[13px] font-medium whitespace-nowrap">
                       <span className="flex items-center gap-2">
                         <span
-                          className={cn("led size-1.5", active ? "led-hot" : undefined)}
+                          className={cn(
+                            "led size-1.5",
+                            active ? "led-hot" : undefined,
+                          )}
                         />
-                        {o.label}
+                        {f.label}
                       </span>
                     </td>
-                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap">{codec.label}</td>
                     <td className="text-readout py-2.5 pr-3 text-xs whitespace-nowrap">
-                      {o.bitrateKbps} kbps
+                      {f.bitrateMaxKbps
+                        ? `${f.bitrateKbps}–${f.bitrateMaxKbps}`
+                        : f.bitrateKbps > 0
+                          ? f.bitrateKbps
+                          : "—"}
+                      {(f.bitrateKbps > 0 || f.bitrateMaxKbps) && (
+                        <span className="ml-0.5 text-[9px] text-muted-foreground">
+                          kbps
+                        </span>
+                      )}
                     </td>
-                    <td className="py-2.5 pr-3 text-xs capitalize whitespace-nowrap">
-                      {o.channels}
+                    <td className="text-readout py-2.5 pr-3 text-xs whitespace-nowrap">
+                      {f.sampleRateKhz.toFixed(1)} kHz
+                    </td>
+                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap">
+                      {f.channels}
                     </td>
                     <td className="py-2.5 pr-3">
                       <span
                         className={cn(
                           "inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase",
-                          ok
+                          sup.ready
                             ? "border-meter-ok/30 bg-meter-ok/10 text-meter-ok"
-                            : "border-border/70 text-muted-foreground",
+                            : "border-amber-led/30 bg-amber-led/10 text-amber-led",
                         )}
                       >
-                        {ok ? "Ready" : "Unsupported"}
+                        {sup.ready ? "Ready" : "Relay"}
+                      </span>
+                      <span className="ml-2 hidden text-[10px] text-muted-foreground lg:inline">
+                        {sup.note}
                       </span>
                     </td>
                     <td className="py-2.5 pr-3 text-xs whitespace-nowrap text-muted-foreground">
-                      {o.use}
+                      {f.use}
                     </td>
                     <td className="py-2.5 text-right">
                       <Button
                         size="sm"
                         variant={active ? "default" : "outline"}
                         className="h-7 cursor-pointer text-[11px]"
-                        disabled={!ok || rt.onAir}
-                        onClick={() => selectOutput(o)}
+                        disabled={rt.onAir}
+                        onClick={() => selectFormat(f)}
                       >
-                        {active ? "Active" : "Select"}
+                        {active ? "Active" : sup.ready ? "Select" : "Set target"}
                       </Button>
                     </td>
                   </tr>
@@ -391,6 +427,15 @@ export function EncoderPanel() {
             </tbody>
           </table>
         </div>
+        <p className="border-t border-border/60 px-4 py-3 text-[11px] leading-4 text-muted-foreground">
+          Browsers can only record Opus — and, where the platform ships an
+          encoder, AAC-LC — directly. MP3, HE-AAC v2, Vorbis, FLAC and HLS
+          have no browser encoders: selecting one stores the full profile as
+          this mount’s{" "}
+          <span className="text-foreground/80">relay target</span>, and your
+          transcoder relay consumes the local proxy stream to emit the target
+          format to the endpoint.
+        </p>
       </ModuleCard>
 
       {/* ── mount configuration ── */}
@@ -562,6 +607,12 @@ export function EncoderPanel() {
             Endpoint
           </p>
           <p className="text-readout mt-1 text-xs break-all text-foreground/90">{url}</p>
+          {form.targetFormat && (
+            <p className="mt-2 text-[10px] text-muted-foreground">
+              Target profile:{" "}
+              <span className="text-foreground/80">{form.targetFormat}</span>
+            </p>
+          )}
           {supported.length > 0 && (
             <p className="mt-2 text-[10px] text-muted-foreground">
               Browser encoders available here:{" "}
