@@ -9,10 +9,12 @@ import {
   formatUptime,
   isCodecSupported,
   mountUrl,
+  OUTPUTS,
   probeEndpoint,
   supportedCodecs,
   StreamEncoder,
   type EncoderStats,
+  type OutputProfile,
   type ProbeResult,
 } from "@/lib/audio/encoder";
 import {
@@ -262,6 +264,24 @@ export function EncoderPanel() {
     }
   };
 
+  /** Punch up one of the eight house outputs. */
+  const selectOutput = (o: OutputProfile) => {
+    const codec = codecById(o.codecId);
+    if (!isCodecSupported(codec.mimeType)) {
+      toast.error(`${codec.label} is not supported in this browser`);
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      codec: o.codecId,
+      bitrateKbps: o.bitrateKbps,
+      channels: o.channels,
+    }));
+    toast.success(`${o.label} punched up`, {
+      description: `${codec.label} · ${o.bitrateKbps} kbps · ${o.channels}`,
+    });
+  };
+
   const sendNowPlaying = async () => {
     if (!npTitle.trim()) {
       toast.error("Enter a title first");
@@ -282,6 +302,97 @@ export function EncoderPanel() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
+      {/* ── output matrix: eight house renditions ── */}
+      <ModuleCard
+        className="lg:col-span-12"
+        title="Output renditions"
+        subtitle="Punch up any of the eight house outputs — sets codec, bitrate and channels"
+        bodyClassName="p-0"
+        right={
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            {OUTPUTS.filter((o) => isCodecSupported(codecById(o.codecId).mimeType)).length}
+            /{OUTPUTS.length} available in this browser
+          </span>
+        }
+      >
+        <div className="overflow-x-auto px-4 pb-4">
+          <table className="w-full min-w-[46rem] text-sm">
+            <thead>
+              <tr className="border-b border-border/60 text-left text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+                <th className="py-2.5 pr-3 font-semibold">Output</th>
+                <th className="py-2.5 pr-3 font-semibold">Codec</th>
+                <th className="py-2.5 pr-3 font-semibold">Bitrate</th>
+                <th className="py-2.5 pr-3 font-semibold">Channels</th>
+                <th className="py-2.5 pr-3 font-semibold">Support</th>
+                <th className="py-2.5 pr-3 font-semibold">Use</th>
+                <th className="py-2.5 font-semibold" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/50">
+              {OUTPUTS.map((o) => {
+                const codec = codecById(o.codecId);
+                const ok = isCodecSupported(codec.mimeType);
+                const active =
+                  form.codec === o.codecId &&
+                  form.bitrateKbps === o.bitrateKbps &&
+                  form.channels === o.channels;
+                return (
+                  <tr
+                    key={o.id}
+                    className={cn(
+                      "transition-colors hover:bg-muted/40",
+                      active && "bg-signal/5",
+                    )}
+                  >
+                    <td className="py-2.5 pr-3 text-[13px] font-medium whitespace-nowrap">
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={cn("led size-1.5", active ? "led-hot" : undefined)}
+                        />
+                        {o.label}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap">{codec.label}</td>
+                    <td className="text-readout py-2.5 pr-3 text-xs whitespace-nowrap">
+                      {o.bitrateKbps} kbps
+                    </td>
+                    <td className="py-2.5 pr-3 text-xs capitalize whitespace-nowrap">
+                      {o.channels}
+                    </td>
+                    <td className="py-2.5 pr-3">
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase",
+                          ok
+                            ? "border-meter-ok/30 bg-meter-ok/10 text-meter-ok"
+                            : "border-border/70 text-muted-foreground",
+                        )}
+                      >
+                        {ok ? "Ready" : "Unsupported"}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-xs whitespace-nowrap text-muted-foreground">
+                      {o.use}
+                    </td>
+                    <td className="py-2.5 text-right">
+                      <Button
+                        size="sm"
+                        variant={active ? "default" : "outline"}
+                        className="h-7 cursor-pointer text-[11px]"
+                        disabled={!ok || rt.onAir}
+                        onClick={() => selectOutput(o)}
+                      >
+                        {active ? "Active" : "Select"}
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </ModuleCard>
+
       {/* ── mount configuration ── */}
       <ModuleCard
         className="lg:col-span-7"

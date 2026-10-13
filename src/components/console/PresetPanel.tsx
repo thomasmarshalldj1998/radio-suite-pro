@@ -13,15 +13,29 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { useMutation, useQuery } from "convex/react";
 import { format } from "date-fns";
-import { Bookmark, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { Bookmark, Layers, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 const summaryOf = (p: ProcessorParams): string[] => [
   p.hpf.on ? `HPF ${formatHz(p.hpf.freqHz)}` : "HPF off",
   `AGC ${p.agc.ratio.toFixed(1)}:1`,
+  `6-band · ${p.deq.on ? "Dyn-EQ on" : "Dyn-EQ off"}`,
   `Ceiling ${p.limiter.ceilingDb.toFixed(1)} dB`,
 ];
+
+/**
+ * Preset families are derived from the chain itself rather than hardcoded:
+ * two aggressive stages → High impact, slow levelling → Smooth, presence
+ * lift or deep HPF → Speech, everything else → General.
+ */
+function familyOf(p: ProcessorParams): string {
+  const presence = p.eq.bands.find((b) => b.freq === 2500)?.gainDb ?? 0;
+  if (p.agc.ratio >= 5) return "High impact";
+  if (p.agc.releaseMs >= 500) return "Smooth";
+  if (presence >= 2 || p.hpf.freqHz >= 100) return "Speech";
+  return "General";
+}
 
 function PresetCard({
   name,
@@ -151,6 +165,49 @@ export function PresetPanel({
     _creationTime: number;
   }[];
 
+  // dynamic families: derived from every preset currently in the library
+  const entries = [
+    ...BUILTIN_PRESETS.map((p: BuiltinPreset) => ({
+      key: p.id,
+      name: p.name,
+      description: p.description,
+      chips: [...p.tags, ...summaryOf(p.params).slice(0, 1)],
+      meta: "Factory",
+      accent: p.name === "Broadcast Standard FM",
+      family: familyOf(p.params),
+      onApply: () => apply(p.params, p.name),
+      onDelete: undefined as undefined | (() => void),
+    })),
+    ...custom.map((p) => {
+      const cp = coerceParams(p.params);
+      return {
+        key: p._id,
+        name: p.name,
+        description: p.description ?? "Custom chain snapshot.",
+        chips: summaryOf(cp),
+        meta: `Saved ${format(new Date(p._creationTime), "MMM d, yyyy")}`,
+        accent: false,
+        family: familyOf(cp),
+        onApply: () => apply(cp, p.name),
+        onDelete: () => void remove(p._id, p.name),
+      };
+    }),
+  ];
+
+  const families = (() => {
+    const counts = new Map<string, number>();
+    for (const e of entries) counts.set(e.family, (counts.get(e.family) ?? 0) + 1);
+    return [...counts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    );
+  })();
+
+  const [familyFilter, setFamilyFilter] = useState<string>("All");
+  const visible =
+    familyFilter === "All"
+      ? entries
+      : entries.filter((e) => e.family === familyFilter);
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -204,30 +261,47 @@ export function PresetPanel({
         </div>
       )}
 
+      {/* dynamic family filter */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+          <Layers className="size-3.5" />
+          Families
+        </span>
+        {[
+          { name: "All", count: entries.length },
+          ...families.map(([name, count]) => ({ name, count })),
+        ].map((f) => (
+          <button
+            key={f.name}
+            type="button"
+            onClick={() => setFamilyFilter(f.name)}
+            className={cn(
+              "cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
+              familyFilter === f.name
+                ? "border-signal/40 bg-signal/10 text-signal"
+                : "border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+          >
+            {f.name}
+            <span className="text-readout ml-1.5 text-[10px] opacity-70">{f.count}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {BUILTIN_PRESETS.map((p: BuiltinPreset) => (
+        {visible.map((e) => (
           <PresetCard
-            key={p.id}
-            name={p.name}
-            description={p.description}
-            chips={[...p.tags, ...summaryOf(p.params).slice(0, 1)]}
-            meta="Factory"
-            accent={p.name === "Broadcast Standard FM"}
-            onApply={() => apply(p.params, p.name)}
+            key={e.key}
+            name={e.name}
+            description={e.description}
+            chips={[e.family, ...e.chips]}
+            meta={e.meta}
+            accent={e.accent}
+            onApply={e.onApply}
+            onDelete={e.onDelete}
           />
         ))}
-        {custom.map((p) => (
-          <PresetCard
-            key={p._id}
-            name={p.name}
-            description={p.description ?? "Custom chain snapshot."}
-            chips={summaryOf(coerceParams(p.params))}
-            meta={`Saved ${format(new Date(p._creationTime), "MMM d, yyyy")}`}
-            onApply={() => apply(coerceParams(p.params), p.name)}
-            onDelete={() => void remove(p._id, p.name)}
-          />
-        ))}
-        {saved !== undefined && custom.length === 0 && (
+        {saved !== undefined && custom.length === 0 && familyFilter === "All" && (
           <button
             type="button"
             onClick={() => setShowForm(true)}

@@ -4,9 +4,10 @@
  * Signal flow:
  *   source → inputGain → HPF ─┬─ input meters (L/R)
  *                              ├─ spectrum (pre)
- *                              └─ 6-band EQ → 3-band multiband compressor
- *                                 → program AGC → brickwall limiter
- *                                 → output gain → duck
+ *                              └─ 6-band EQ → dynamic EQ (3 subtractive bands)
+ *                                 → 6-band multiband compressor (LR4)
+ *                                 → program AGC → composite limiter
+ *                                 → output gain → ceiling guard → duck
  *                                  ├─ monitor out (speakers)
  *                                  ├─ encoder send (MediaStream for Icecast)
  *                                  ├─ spectrum (post)
@@ -15,7 +16,7 @@
  */
 
 import type { ProcessorParams } from "./params";
-import { dbToGain } from "./params";
+import { DEFAULT_PARAMS, DEFAULT_SPLITS, dbToGain } from "./params";
 
 export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
@@ -32,7 +33,8 @@ export interface MeterSnapshot {
   lufsM: number;
   lufsS: number;
   correlation: number;
-  gr: { low: number; mid: number; high: number; agc: number; limiter: number };
+  /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
+  gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
   clipIn: boolean;
   clipOut: boolean;
 }
@@ -48,7 +50,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   lufsM: -70,
   lufsS: -70,
   correlation: 1,
-  gr: { low: 0, mid: 0, high: 0, agc: 0, limiter: 0 },
+  gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
   clipIn: false,
   clipOut: false,
 };
@@ -104,7 +106,19 @@ export class AudioEngine {
   private mbDry!: GainNode;
   private mbComps: DynamicsCompressorNode[] = [];
   private mbMakeups: GainNode[] = [];
-  private mbFilters: BiquadFilterNode[] = [];
+  /** LR4 filter pairs per crossover split index */
+  private mbSplitFilters: BiquadFilterNode[][] = [];
+  // dynamic EQ: band-pass detectors + subtractive parallel bands
+  private deqBpDet: BiquadFilterNode[] = [];
+  private deqBpAudio: BiquadFilterNode[] = [];
+  private deqDets: DynamicsCompressorNode[] = [];
+  private deqSubs: GainNode[] = [];
+  private deqCutDb: number[] = [0, 0, 0];
+  // composite ceiling guard (per-sample soft clip after output trim)
+  private guardWet!: GainNode;
+  private guardDry!: GainNode;
+  private guardShaper!: WaveShaperNode;
+  private guardCeilingDb = Number.NaN;
   private agcWetPre!: GainNode;
   private agcComp!: DynamicsCompressorNode;
   private agcMakeup!: GainNode;
@@ -251,104 +265,102 @@ export class AudioEngine {
     eqNode.connect(eqOut);
     this.eqDry.connect(eqOut);
 
-    // ── 3-band multiband compressor ──
+    // ── dynamic EQ: subtractive parallel bands driven by level detectors ──
+    const deqIn = g(1);
+    const deqSum = g(1);
+    eqOut.connect(deqIn);
+    deqIn.connect(deqSum); // dry pass-through
+    const DEQ_META = [
+      { freq: 120, q: 1.0 },
+      { freq: 3200, q: 1.2 },
+      { freq: 8000, q: 1.3 },
+    ];
+    for (const meta of DEQ_META) {
+      const mkBp = () => {
+        const bp = ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = meta.freq;
+        bp.Q.value = meta.q;
+        return bp;
+      };
+      // audio path: band → subtractor (α) → inverter (−1) → sum
+      const bpAudio = mkBp();
+      const sub = g(0);
+      const inv = g(-1);
+      deqIn.connect(bpAudio);
+      bpAudio.connect(sub);
+      sub.connect(inv);
+      inv.connect(deqSum);
+      // detector path: band → envelope compressor → silent sink
+      const bpDet = mkBp();
+      const det = ctx.createDynamicsCompressor();
+      det.threshold.value = -20;
+      det.ratio.value = 20;
+      det.knee.value = 3;
+      det.attack.value = 0.006;
+      det.release.value = 0.18;
+      deqIn.connect(bpDet);
+      bpDet.connect(det);
+      const sink = g(0);
+      det.connect(sink);
+      sink.connect(ctx.destination);
+      this.deqBpAudio.push(bpAudio);
+      this.deqBpDet.push(bpDet);
+      this.deqDets.push(det);
+      this.deqSubs.push(sub);
+    }
+
+    // ── 6-band multiband compressor (LR4 crossovers) ──
     this.mbWetPre = g(1);
     this.mbDry = g(0);
-    eqOut.connect(this.mbWetPre);
-    eqOut.connect(this.mbDry);
+    deqSum.connect(this.mbWetPre);
+    deqSum.connect(this.mbDry);
     const mbSum = g(1);
     this.mbDry.connect(mbSum);
 
-    const mkBand = (
-      build: (input: AudioNode) => AudioNode,
-      thresholdDb: number,
-      ratio: number,
-      attackMs: number,
-      releaseMs: number,
-    ) => {
+    const mkSplitFilter = (split: number, type: BiquadFilterType) => {
+      const f = ctx.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = DEFAULT_SPLITS[split];
+      f.Q.value = 0.707;
+      (this.mbSplitFilters[split] ??= []).push(f);
+      return f;
+    };
+    // LR4 = two cascaded biquads of the same type at one split point
+    const lr4 = (split: number, type: BiquadFilterType, input: AudioNode) => {
+      const a = mkSplitFilter(split, type);
+      const b = mkSplitFilter(split, type);
+      input.connect(a);
+      a.connect(b);
+      return b;
+    };
+
+    const mbDefaults = DEFAULT_PARAMS.multiband.bands;
+    const mbStarts: GainNode[] = [];
+    mbDefaults.forEach((band, i) => {
       const start = g(1);
-      const filters = build(start);
+      mbStarts.push(start);
+      // band i spans split(i−1)…split(i): ends use one LR4 pair, middle
+      // bands cascade a highpass pair into a lowpass pair
+      let node: AudioNode = start;
+      if (i > 0) node = lr4(i - 1, "highpass", node);
+      if (i < mbDefaults.length - 1) node = lr4(i, "lowpass", node);
+      const tail = node;
+
       const comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = thresholdDb;
-      comp.ratio.value = ratio;
-      comp.attack.value = attackMs / 1000;
-      comp.release.value = releaseMs / 1000;
+      comp.threshold.value = band.thresholdDb;
+      comp.ratio.value = band.ratio;
+      comp.attack.value = band.attackMs / 1000;
+      comp.release.value = band.releaseMs / 1000;
       comp.knee.value = 3;
-      const makeup = g(1);
-      filters.connect(comp);
+      const makeup = g(dbToGain(band.makeupDb));
+      tail.connect(comp);
       comp.connect(makeup);
       makeup.connect(mbSum);
       this.mbComps.push(comp);
       this.mbMakeups.push(makeup);
-      return start;
-    };
-
-    // low band: LR4 lowpass @ xoverLow
-    const lowStart = mkBand(
-      (input) => {
-        const a = ctx.createBiquadFilter();
-        a.type = "lowpass";
-        a.frequency.value = 120;
-        a.Q.value = 0.707;
-        const b = ctx.createBiquadFilter();
-        b.type = "lowpass";
-        b.frequency.value = 120;
-        b.Q.value = 0.707;
-        input.connect(a);
-        a.connect(b);
-        this.mbFilters.push(a, b);
-        return b;
-      },
-      -12,
-      4,
-      10,
-      250,
-    );
-    // mid band: band-pass between the crossovers
-    const midStart = mkBand(
-      (input) => {
-        const a = ctx.createBiquadFilter();
-        a.type = "highpass";
-        a.frequency.value = 120;
-        a.Q.value = 0.707;
-        const b = ctx.createBiquadFilter();
-        b.type = "lowpass";
-        b.frequency.value = 5500;
-        b.Q.value = 0.707;
-        input.connect(a);
-        a.connect(b);
-        this.mbFilters.push(a, b);
-        return b;
-      },
-      -14,
-      3,
-      5,
-      200,
-    );
-    // high band: LR4 highpass @ xoverHigh
-    const highStart = mkBand(
-      (input) => {
-        const a = ctx.createBiquadFilter();
-        a.type = "highpass";
-        a.frequency.value = 5500;
-        a.Q.value = 0.707;
-        const b = ctx.createBiquadFilter();
-        b.type = "highpass";
-        b.frequency.value = 5500;
-        b.Q.value = 0.707;
-        input.connect(a);
-        a.connect(b);
-        this.mbFilters.push(a, b);
-        return b;
-      },
-      -16,
-      3,
-      2,
-      150,
-    );
-    this.mbWetPre.connect(lowStart);
-    this.mbWetPre.connect(midStart);
-    this.mbWetPre.connect(highStart);
+    });
+    for (const start of mbStarts) this.mbWetPre.connect(start);
 
     // ── program AGC ──
     this.agcWetPre = g(1);
@@ -384,11 +396,22 @@ export class AudioEngine {
     this.limComp.connect(limOut);
     this.limDry.connect(limOut);
 
-    // ── output / duck / monitor / encoder send ──
+    // ── output / ceiling guard / duck / monitor / encoder send ──
     this.outputGain = g(1);
     this.duckGain = g(1);
     limOut.connect(this.outputGain);
-    this.outputGain.connect(this.duckGain);
+
+    // composite ceiling guard: per-sample soft clip after the output trim so
+    // the composite bus can never exceed the limiter ceiling
+    this.guardWet = g(1);
+    this.guardDry = g(0);
+    this.guardShaper = ctx.createWaveShaper();
+    this.guardShaper.oversample = "4x";
+    this.outputGain.connect(this.guardWet);
+    this.outputGain.connect(this.guardDry);
+    this.guardWet.connect(this.guardShaper);
+    this.guardShaper.connect(this.duckGain);
+    this.guardDry.connect(this.duckGain);
 
     this.monitorGain = g(dbToGain(-6));
     this.duckGain.connect(this.monitorGain);
@@ -462,10 +485,9 @@ export class AudioEngine {
     });
     this.crossfade(this.eqWetPre, this.eqDry, params.eq.on);
 
-    this.ramp(this.mbFilters[0]?.frequency, params.multiband.xoverLowHz);
-    this.ramp(this.mbFilters[1]?.frequency, params.multiband.xoverLowHz);
-    this.ramp(this.mbFilters[2]?.frequency, params.multiband.xoverHighHz);
-    this.ramp(this.mbFilters[3]?.frequency, params.multiband.xoverHighHz);
+    params.multiband.splitsHz.forEach((hz, split) => {
+      for (const f of this.mbSplitFilters[split] ?? []) this.ramp(f.frequency, hz);
+    });
     params.multiband.bands.forEach((band, i) => {
       const comp = this.mbComps[i];
       const makeup = this.mbMakeups[i];
@@ -477,6 +499,22 @@ export class AudioEngine {
       this.ramp(makeup.gain, dbToGain(band.makeupDb));
     });
     this.crossfade(this.mbWetPre, this.mbDry, params.multiband.on);
+
+    // dynamic EQ: ramp band + detector filters; force α → 0 when bypassed
+    params.deq.bands.forEach((band, i) => {
+      const det = this.deqDets[i];
+      const sub = this.deqSubs[i];
+      if (!det || !sub) return;
+      this.ramp(this.deqBpAudio[i]?.frequency, band.freqHz);
+      this.ramp(this.deqBpDet[i]?.frequency, band.freqHz);
+      this.ramp(det.threshold, band.thresholdDb);
+      this.ramp(det.attack, Math.max(band.attackMs, 1) / 1000);
+      this.ramp(det.release, Math.max(band.releaseMs, 20) / 1000);
+      if (!params.deq.on) {
+        this.ramp(sub.gain, 0, 0.01);
+        this.deqCutDb[i] = 0;
+      }
+    });
 
     this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
     this.ramp(this.agcComp.ratio, params.agc.ratio);
@@ -491,6 +529,12 @@ export class AudioEngine {
     this.ramp(this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
     this.crossfade(this.limWetPre, this.limDry, params.limiter.on);
 
+    // composite ceiling guard follows the limiter ceiling
+    if (params.limiter.ceilingDb !== this.guardCeilingDb) {
+      this.rebuildGuardCurve(params.limiter.ceilingDb);
+    }
+    this.crossfade(this.guardWet, this.guardDry, params.limiter.on);
+
     this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
     this.ramp(this.monitorGain.gain, dbToGain(params.monitorDb));
   }
@@ -498,6 +542,20 @@ export class AudioEngine {
   private crossfade(wet: GainNode, dry: GainNode, on: boolean) {
     this.ramp(wet.gain, on ? 1 : 0, 0.015);
     this.ramp(dry.gain, on ? 0 : 1, 0.015);
+  }
+
+  /** Per-sample soft-clip curve that enforces the composite ceiling. */
+  private rebuildGuardCurve(ceilingDb: number) {
+    if (!this.guardShaper) return;
+    const ceil = Math.min(1, dbToGain(ceilingDb));
+    const n = 8193;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = -1 + (2 * i) / (n - 1);
+      curve[i] = ceil * Math.tanh(x / ceil);
+    }
+    this.guardShaper.curve = curve;
+    this.guardCeilingDb = ceilingDb;
   }
 
   setMonitorDb(db: number) {
@@ -767,6 +825,21 @@ export class AudioEngine {
     const grOf = (comp: DynamicsCompressorNode | undefined): number =>
       Math.max(0, -(comp?.reduction ?? 0));
 
+    // dynamic-EQ cut follows the detector envelopes (control rate ≈ rAF)
+    if (this.params?.deq.on) {
+      this.params.deq.bands.forEach((band, i) => {
+        const det = this.deqDets[i];
+        const sub = this.deqSubs[i];
+        if (!det || !sub) return;
+        const over = Math.max(0, -(det.reduction || 0));
+        const cut = Math.min(band.maxCutDb, over);
+        this.deqCutDb[i] = cut;
+        // subtracting α of the band ≈ a cut of −20·log10(1−α) at its centre
+        const alpha = 1 - Math.pow(10, -cut / 20);
+        this.ramp(sub.gain, alpha, 0.008);
+      });
+    }
+
     // input peaks
     this.inAnalyserL.getFloatTimeDomainData(this.timeBuf);
     let inL = 0;
@@ -847,9 +920,8 @@ export class AudioEngine {
       lufsS: windowLufs(3000),
       correlation,
       gr: {
-        low: grOf(this.mbComps[0]),
-        mid: grOf(this.mbComps[1]),
-        high: grOf(this.mbComps[2]),
+        bands: this.mbComps.map(grOf),
+        deq: this.deqCutDb.slice(),
         agc: grOf(this.agcComp),
         limiter: grOf(this.limComp),
       },

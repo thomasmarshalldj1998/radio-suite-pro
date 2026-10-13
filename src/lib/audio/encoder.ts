@@ -63,6 +63,87 @@ export function codecById(id: string): CodecOption {
   return CODECS.find((c) => c.id === id) ?? CODECS[0];
 }
 
+export interface OutputProfile {
+  id: string;
+  label: string;
+  codecId: string;
+  bitrateKbps: number;
+  channels: string;
+  use: string;
+}
+
+/**
+ * The house output matrix — eight renditions an operator can punch up
+ * instantly. Each maps to a codec/bitrate/channels combination the browser
+ * can encode (support is checked at render time).
+ */
+export const OUTPUTS: OutputProfile[] = [
+  {
+    id: "main",
+    label: "Main web stream",
+    codecId: "opus",
+    bitrateKbps: 128,
+    channels: "stereo",
+    use: "Primary listener feed",
+  },
+  {
+    id: "hq",
+    label: "HQ listen-live",
+    codecId: "opus",
+    bitrateKbps: 192,
+    channels: "stereo",
+    use: "Desktop hi-fi embed",
+  },
+  {
+    id: "mobile",
+    label: "Mobile feed",
+    codecId: "aac",
+    bitrateKbps: 96,
+    channels: "stereo",
+    use: "iOS / Android apps",
+  },
+  {
+    id: "lowband",
+    label: "Low bandwidth",
+    codecId: "aac",
+    bitrateKbps: 48,
+    channels: "mono",
+    use: "Weak-network listeners",
+  },
+  {
+    id: "icecast",
+    label: "Icecast native",
+    codecId: "vorbis",
+    bitrateKbps: 128,
+    channels: "stereo",
+    use: "Icecast2 Ogg mount",
+  },
+  {
+    id: "legacy",
+    label: "Legacy fallback",
+    codecId: "webm",
+    bitrateKbps: 96,
+    channels: "stereo",
+    use: "Older browser fallback",
+  },
+  {
+    id: "talk",
+    label: "Talk radio",
+    codecId: "opus",
+    bitrateKbps: 64,
+    channels: "mono",
+    use: "Speech-only programming",
+  },
+  {
+    id: "archive",
+    label: "Archive master",
+    codecId: "opus",
+    bitrateKbps: 256,
+    channels: "stereo",
+    use: "Take recording quality",
+  },
+];
+
 export interface EncoderStats {
   bytes: number;
   elapsedMs: number;

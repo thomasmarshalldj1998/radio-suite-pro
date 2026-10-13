@@ -1,8 +1,10 @@
 /**
  * Processor parameter model for the Signalpath broadcast chain:
  *
- *   input gain → HPF →6-band EQ → 3-band multiband compressor →
- *   program AGC → brickwall limiter → output gain → (monitor + encoder send)
+ *   input gain → HPF → 6-band EQ → dynamic EQ (3 subtractive bands) →
+ *   6-band multiband compressor (LR4 crossovers) → program AGC →
+ *   composite limiter (fast peak stage + per-sample ceiling guard) →
+ *   output gain → (monitor + encoder send)
  */
 
 export interface EqBand {
@@ -20,15 +22,35 @@ export interface BandCompParams {
   makeupDb: number;
 }
 
+/** One dynamic-EQ band: cut the band (up to maxCutDb) when it exceeds threshold. */
+export interface DeqBand {
+  freqHz: number;
+  thresholdDb: number;
+  maxCutDb: number;
+  attackMs: number;
+  releaseMs: number;
+}
+
+export type MultibandSplits = [number, number, number, number, number];
+export type MultibandBands = [
+  BandCompParams,
+  BandCompParams,
+  BandCompParams,
+  BandCompParams,
+  BandCompParams,
+  BandCompParams,
+];
+export type DeqBands = [DeqBand, DeqBand, DeqBand];
+
 export interface ProcessorParams {
   inputGainDb: number;
   hpf: { on: boolean; freqHz: number };
   eq: { on: boolean; bands: EqBand[] };
+  deq: { on: boolean; bands: DeqBands };
   multiband: {
     on: boolean;
-    xoverLowHz: number;
-    xoverHighHz: number;
-    bands: [BandCompParams, BandCompParams, BandCompParams];
+    splitsHz: MultibandSplits;
+    bands: MultibandBands;
   };
   agc: {
     on: boolean;
@@ -51,8 +73,13 @@ export interface ProcessorParams {
 }
 
 export const EQ_FREQS = [60, 200, 700, 2500, 6000, 12000] as const;
-export const BAND_LABELS = ["Low", "Mid", "High"] as const;
+export const MB_LABELS = ["Low", "Lo-mid", "Mid", "Hi-mid", "High", "Air"] as const;
+export const DEQ_LABELS = ["Mud", "Presence", "De-ess"] as const;
 export const LUFS_TARGET = -23;
+export const TRUE_PEAK_TARGET = -1;
+
+/** Default crossover split points for the 6-band matrix (Hz). */
+export const DEFAULT_SPLITS: MultibandSplits = [140, 450, 1800, 4500, 9000];
 
 export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
@@ -68,14 +95,24 @@ export const DEFAULT_PARAMS: ProcessorParams = {
       { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
     ],
   },
+  deq: {
+    on: true,
+    bands: [
+      { freqHz: 120, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+      { freqHz: 3200, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+      { freqHz: 8000, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+    ],
+  },
   multiband: {
     on: true,
-    xoverLowHz: 120,
-    xoverHighHz: 5500,
+    splitsHz: [...DEFAULT_SPLITS] as MultibandSplits,
     bands: [
-      { thresholdDb: -12, ratio: 4, attackMs: 10, releaseMs: 250, makeupDb: 2 },
-      { thresholdDb: -14, ratio: 3, attackMs: 5, releaseMs: 200, makeupDb: 1.5 },
-      { thresholdDb: -16, ratio: 3, attackMs: 2, releaseMs: 150, makeupDb: 1.5 },
+      { thresholdDb: -12, ratio: 4, attackMs: 15, releaseMs: 300, makeupDb: 2 },
+      { thresholdDb: -13, ratio: 4, attackMs: 10, releaseMs: 280, makeupDb: 2 },
+      { thresholdDb: -14, ratio: 3.5, attackMs: 8, releaseMs: 250, makeupDb: 1.5 },
+      { thresholdDb: -15, ratio: 3, attackMs: 5, releaseMs: 220, makeupDb: 1.5 },
+      { thresholdDb: -16, ratio: 3, attackMs: 3, releaseMs: 180, makeupDb: 1.5 },
+      { thresholdDb: -17, ratio: 3, attackMs: 2, releaseMs: 150, makeupDb: 1 },
     ],
   },
   agc: {
@@ -104,13 +141,53 @@ export interface BuiltinPreset {
 const merge = (patch: Partial<ProcessorParams>): ProcessorParams =>
   coerceParams({ ...structuredClone(DEFAULT_PARAMS), ...patch });
 
+/**
+ * Expand a 3-way broadcast tuning (low / mid / high specs) into the 6-band
+ * matrix. The upper half of each legacy lane gets slightly faster timing and
+ * a 1 dB lower threshold so the matrix behaves like a finer version of the
+ * 3-band chain it replaces.
+ */
+function mb6(
+  low: BandCompParams,
+  mid: BandCompParams,
+  high: BandCompParams,
+  splitsHz: MultibandSplits = DEFAULT_SPLITS,
+): ProcessorParams["multiband"] {
+  const b = (
+    base: BandCompParams,
+    patch: Partial<BandCompParams>,
+  ): BandCompParams => ({ ...base, ...patch });
+  return {
+    on: true,
+    splitsHz: [...splitsHz] as MultibandSplits,
+    bands: [
+      b(low, {}),
+      b(low, {
+        thresholdDb: low.thresholdDb - 1,
+        attackMs: Math.max(0.5, +(low.attackMs * 0.6).toFixed(1)),
+        releaseMs: Math.round(low.releaseMs * 0.85),
+      }),
+      b(mid, {}),
+      b(mid, {
+        thresholdDb: mid.thresholdDb - 1,
+        attackMs: Math.max(0.5, +(mid.attackMs * 0.6).toFixed(1)),
+      }),
+      b(high, { attackMs: Math.max(0.5, +(high.attackMs * 0.8).toFixed(1)) }),
+      b(high, {
+        thresholdDb: high.thresholdDb - 1,
+        attackMs: Math.max(0.5, +(high.attackMs * 0.5).toFixed(1)),
+      }),
+    ],
+  };
+}
+
 /** Built-in broadcast presets — full parameter snapshots of the chain. */
 export const BUILTIN_PRESETS: BuiltinPreset[] = [
   {
     id: "broadcast-fm",
     name: "Broadcast Standard FM",
     description:
-      "Balanced on-air chain: gentle levelling, musical 3-band dynamics, −1 dBTP ceiling.",
+      "Balanced on-air chain: gentle levelling, musical 6-band dynamics, dynamic-EQ hygiene, −1 dBTP ceiling.",
     tags: ["General", "Stereo", "−23 LUFS"],
     params: structuredClone(DEFAULT_PARAMS),
   },
@@ -118,7 +195,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     id: "talk-radio",
     name: "Talk Radio Voice",
     description:
-      "Fast program levelling with presence lift and de-esser band for speech-heavy formats.",
+      "Fast program levelling with presence lift and an assertive de-esser for speech-heavy formats.",
     tags: ["Speech", "Fast AGC", "De-ess"],
     params: merge({
       hpf: { on: true, freqHz: 120 },
@@ -133,16 +210,20 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           { freq: 12000, gainDb: 1, q: 0.7, type: "highshelf" },
         ],
       },
-      multiband: {
+      deq: {
         on: true,
-        xoverLowHz: 150,
-        xoverHighHz: 5000,
         bands: [
-          { thresholdDb: -14, ratio: 4, attackMs: 8, releaseMs: 200, makeupDb: 2 },
-          { thresholdDb: -16, ratio: 4, attackMs: 3, releaseMs: 150, makeupDb: 2.5 },
-          { thresholdDb: -18, ratio: 5, attackMs: 1.5, releaseMs: 120, makeupDb: 2 },
+          { freqHz: 130, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+          { freqHz: 3000, thresholdDb: -18, maxCutDb: 6, attackMs: 6, releaseMs: 170 },
+          { freqHz: 6500, thresholdDb: -24, maxCutDb: 10, attackMs: 4, releaseMs: 110 },
         ],
       },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 4, attackMs: 8, releaseMs: 200, makeupDb: 2 },
+        { thresholdDb: -16, ratio: 4, attackMs: 3, releaseMs: 150, makeupDb: 2.5 },
+        { thresholdDb: -18, ratio: 5, attackMs: 1.5, releaseMs: 120, makeupDb: 2 },
+        [150, 520, 2100, 5200, 10000],
+      ),
       agc: {
         on: true,
         thresholdDb: -22,
@@ -159,7 +240,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     id: "late-night",
     name: "Late Night Smooth",
     description:
-      "Slow, transparent dynamics with a warm shelf — built for overnight music rotation.",
+      "Slow, transparent dynamics with a warm shelf and barely-there dynamic EQ — overnight music rotation.",
     tags: ["Music", "Transparent", "Slow"],
     params: merge({
       hpf: { on: true, freqHz: 60 },
@@ -174,16 +255,20 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           { freq: 12000, gainDb: 2, q: 0.7, type: "highshelf" },
         ],
       },
-      multiband: {
+      deq: {
         on: true,
-        xoverLowHz: 110,
-        xoverHighHz: 6000,
         bands: [
-          { thresholdDb: -14, ratio: 2.5, attackMs: 20, releaseMs: 500, makeupDb: 1.5 },
-          { thresholdDb: -16, ratio: 2, attackMs: 15, releaseMs: 450, makeupDb: 1 },
-          { thresholdDb: -18, ratio: 2.5, attackMs: 8, releaseMs: 400, makeupDb: 1 },
+          { freqHz: 100, thresholdDb: -24, maxCutDb: 4, attackMs: 25, releaseMs: 450 },
+          { freqHz: 3500, thresholdDb: -26, maxCutDb: 3, attackMs: 20, releaseMs: 400 },
+          { freqHz: 9000, thresholdDb: -28, maxCutDb: 4, attackMs: 15, releaseMs: 350 },
         ],
       },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 2.5, attackMs: 20, releaseMs: 500, makeupDb: 1.5 },
+        { thresholdDb: -16, ratio: 2, attackMs: 15, releaseMs: 450, makeupDb: 1 },
+        { thresholdDb: -18, ratio: 2.5, attackMs: 8, releaseMs: 400, makeupDb: 1 },
+        [120, 420, 1700, 4600, 9500],
+      ),
       agc: {
         on: true,
         thresholdDb: -20,
@@ -200,7 +285,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     id: "chr-impact",
     name: "High-Impact CHR",
     description:
-      "Dense, competitive Top-40 chain — hard multiband, deep AGC, loud but legal ceiling.",
+      "Dense, competitive Top-40 chain — hard 6-band multiband, deep AGC, loud but legal ceiling.",
     tags: ["Loud", "Music", "Competitive"],
     params: merge({
       hpf: { on: true, freqHz: 70 },
@@ -215,16 +300,20 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           { freq: 12000, gainDb: 2.5, q: 0.7, type: "highshelf" },
         ],
       },
-      multiband: {
+      deq: {
         on: true,
-        xoverLowHz: 130,
-        xoverHighHz: 5200,
         bands: [
-          { thresholdDb: -18, ratio: 6, attackMs: 5, releaseMs: 180, makeupDb: 4 },
-          { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 150, makeupDb: 4 },
-          { thresholdDb: -20, ratio: 4, attackMs: 1.5, releaseMs: 120, makeupDb: 3 },
+          { freqHz: 90, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
+          { freqHz: 3200, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
+          { freqHz: 7500, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
         ],
       },
+      multiband: mb6(
+        { thresholdDb: -18, ratio: 6, attackMs: 5, releaseMs: 180, makeupDb: 4 },
+        { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 150, makeupDb: 4 },
+        { thresholdDb: -20, ratio: 4, attackMs: 1.5, releaseMs: 120, makeupDb: 3 },
+        [130, 480, 1900, 4800, 9500],
+      ),
       agc: {
         on: true,
         thresholdDb: -24,
@@ -242,7 +331,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     id: "sports",
     name: "Sports Play-by-Play",
     description:
-      "Cuts crowd rumble, lifts commentary intelligibility, survives crowd-surge peaks.",
+      "Cuts crowd rumble and horn glare, lifts commentary intelligibility, survives crowd-surge peaks.",
     tags: ["Speech", "Live", "Fast"],
     params: merge({
       hpf: { on: true, freqHz: 100 },
@@ -257,16 +346,20 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
         ],
       },
-      multiband: {
+      deq: {
         on: true,
-        xoverLowHz: 140,
-        xoverHighHz: 4800,
         bands: [
-          { thresholdDb: -16, ratio: 6, attackMs: 3, releaseMs: 120, makeupDb: 3 },
-          { thresholdDb: -16, ratio: 4, attackMs: 2, releaseMs: 120, makeupDb: 3 },
-          { thresholdDb: -18, ratio: 4, attackMs: 1.2, releaseMs: 100, makeupDb: 2 },
+          { freqHz: 110, thresholdDb: -20, maxCutDb: 8, attackMs: 8, releaseMs: 200 },
+          { freqHz: 2800, thresholdDb: -16, maxCutDb: 8, attackMs: 5, releaseMs: 150 },
+          { freqHz: 8000, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 120 },
         ],
       },
+      multiband: mb6(
+        { thresholdDb: -16, ratio: 6, attackMs: 3, releaseMs: 120, makeupDb: 3 },
+        { thresholdDb: -16, ratio: 4, attackMs: 2, releaseMs: 120, makeupDb: 3 },
+        { thresholdDb: -18, ratio: 4, attackMs: 1.2, releaseMs: 100, makeupDb: 2 },
+        [140, 500, 1900, 4600, 9000],
+      ),
       agc: {
         on: true,
         thresholdDb: -20,
@@ -283,7 +376,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     id: "podcast",
     name: "Podcast Master",
     description:
-      "Clean voice master targeting −16 LUFS with soft limiting for platforms and web.",
+      "Clean voice master targeting −16 LUFS with soft limiting and a dedicated de-esser for platforms.",
     tags: ["Speech", "−16 LUFS", "Web"],
     params: merge({
       hpf: { on: true, freqHz: 70 },
@@ -298,16 +391,20 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           { freq: 12000, gainDb: 0.5, q: 0.7, type: "highshelf" },
         ],
       },
-      multiband: {
+      deq: {
         on: true,
-        xoverLowHz: 120,
-        xoverHighHz: 5000,
         bands: [
-          { thresholdDb: -14, ratio: 3, attackMs: 8, releaseMs: 250, makeupDb: 2 },
-          { thresholdDb: -16, ratio: 3, attackMs: 4, releaseMs: 200, makeupDb: 2 },
-          { thresholdDb: -18, ratio: 4, attackMs: 2, releaseMs: 150, makeupDb: 1.5 },
+          { freqHz: 100, thresholdDb: -22, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+          { freqHz: 3000, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 6800, thresholdDb: -22, maxCutDb: 9, attackMs: 4, releaseMs: 120 },
         ],
       },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 3, attackMs: 8, releaseMs: 250, makeupDb: 2 },
+        { thresholdDb: -16, ratio: 3, attackMs: 4, releaseMs: 200, makeupDb: 2 },
+        { thresholdDb: -18, ratio: 4, attackMs: 2, releaseMs: 150, makeupDb: 1.5 },
+        [120, 460, 1800, 5000, 10000],
+      ),
       agc: {
         on: true,
         thresholdDb: -18,
@@ -337,15 +434,15 @@ export function cloneParams(p: ProcessorParams): ProcessorParams {
   return structuredClone(p);
 }
 
-/** Format dB with a typographic minus, e.g. "−3.5 dB". */
+/** Format dB with a typographic minus, e.g. \"−3.5 dB\". */
 export function formatDb(db: number, digits = 1): string {
   const v = Math.abs(db) < Math.pow(10, -digits) / 2 ? 0 : db;
   return `${v.toFixed(digits).replace("-", "−")} dB`;
 }
 
-/** Format Hz for humans: "80 Hz" / "5.5 kHz". */
+/** Format Hz for humans: \"80 Hz\" / \"5.5 kHz\". */
 export function formatHz(hz: number): string {
-  return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 1)} kHz` : `${Math.round(hz)} Hz`;
+  return hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`;
 }
 
 /** Format mm:ss for transport displays. */
@@ -384,7 +481,8 @@ function mergeDeep<T>(base: T, patch: unknown): T {
 
 /**
  * Coerce arbitrary (possibly stale) saved params onto the current shape so
- * old presets always load safely.
+ * old presets and localStorage snapshots always load safely — legacy 3-band
+ * multiband configs fall back to the 6-band defaults.
  */
 export function coerceParams(saved: unknown): ProcessorParams {
   const base = structuredClone(DEFAULT_PARAMS);
