@@ -174,7 +174,7 @@ export function PresetPanel({
       chips: [...p.tags, ...summaryOf(p.params).slice(0, 1)],
       meta: "Factory",
       accent: p.name === "Broadcast Standard FM",
-      family: familyOf(p.params),
+      family: p.family ?? familyOf(p.params),
       onApply: () => apply(p.params, p.name),
       onDelete: undefined as undefined | (() => void),
     })),

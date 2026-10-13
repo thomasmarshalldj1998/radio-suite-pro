@@ -534,6 +534,192 @@ export function ProcessingTab({
         </p>
       </ModuleCard>
 
+      {/* ── loudness rider ── */}
+      <ModuleCard
+        className="xl:col-span-5"
+        title="Loudness rider"
+        subtitle="Compellor-style leveler · AERO long-term controller"
+        enabled={params.rider.on}
+        onToggle={() =>
+          setParams((p) => ({ ...p, rider: { ...p.rider, on: !p.rider.on } }))
+        }
+        right={
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            K-weighted · silence-gated
+          </span>
+        }
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="grid flex-1 grid-cols-2 gap-x-2 gap-y-3">
+            <Knob
+              label="Target"
+              size={46}
+              accent
+              value={params.rider.targetLufs}
+              min={-32}
+              max={-16}
+              step={0.5}
+              format={(v) => `${v.toFixed(1).replace("-", "−")} L`}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: v } }))
+              }
+              onReset={() =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: -23 } }))
+              }
+            />
+            <Knob
+              label="Max ride"
+              size={46}
+              bipolar
+              value={params.rider.maxRideDb}
+              min={0}
+              max={12}
+              step={0.5}
+              format={formatDb}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, maxRideDb: v } }))
+              }
+              onReset={() =>
+                setParams((p) => ({ ...p, rider: { ...p.rider, maxRideDb: 8 } }))
+              }
+            />
+            <div className="col-span-2 flex gap-2">
+              {(["fast", "slow"] as const).map((speed) => (
+                <button
+                  key={speed}
+                  type="button"
+                  onClick={() =>
+                    setParams((p) => ({ ...p, rider: { ...p.rider, speed } }))
+                  }
+                  className={cn(
+                    "flex-1 cursor-pointer rounded-md border px-2 py-1 text-[10px] font-semibold tracking-wider uppercase transition-colors",
+                    params.rider.speed === speed
+                      ? "border-signal/40 bg-signal/10 text-signal"
+                      : "border-border/70 text-muted-foreground hover:bg-background",
+                  )}
+                >
+                  {speed === "fast" ? "Fast · 1.5 s/3 s" : "Slow · 5 s/10 s"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="panel-well flex flex-col items-center justify-center rounded-md px-3 py-4">
+            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Ride
+            </p>
+            <p className="text-readout mt-1 text-lg font-medium text-panel-fg">
+              {params.rider.on
+                ? `${(snap?.riderDb ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.riderDb ?? 0).toFixed(1)}`
+                : "off"}
+            </p>
+            <p className="text-[8px] text-panel-mut">dB</p>
+          </div>
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          Slow average-power ride toward {params.rider.targetLufs.toFixed(1).replace("-", "−")} LUFS.
+          Pauses freeze the ride (DVG-style silence gate), so background noise
+          never swells between segments.
+        </p>
+      </ModuleCard>
+
+      {/* ── harmonic exciter ── */}
+      <ModuleCard
+        className="xl:col-span-3"
+        title="Exciter"
+        subtitle="Parallel harmonic sweetening"
+        enabled={params.exciter.on}
+        onToggle={() =>
+          setParams((p) => ({ ...p, exciter: { ...p.exciter, on: !p.exciter.on } }))
+        }
+      >
+        <div className="flex items-start justify-around gap-2">
+          <Knob
+            label="Mix"
+            size={46}
+            value={params.exciter.mix}
+            min={0}
+            max={12}
+            step={0.5}
+            format={(v) => `${v.toFixed(1)} %`}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: v } }))
+            }
+            onReset={() => setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: 3 } }))}
+          />
+          <Knob
+            label="Freq"
+            size={46}
+            value={params.exciter.freqHz}
+            min={2000}
+            max={12000}
+            step={100}
+            format={formatHz}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, exciter: { ...p.exciter, freqHz: v } }))
+            }
+            onReset={() =>
+              setParams((p) => ({ ...p, exciter: { ...p.exciter, freqHz: 3200 } }))
+            }
+          />
+        </div>
+        <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
+          Odd-order harmonics generated from a band around {formatHz(params.exciter.freqHz)}
+          and blended back — the Aphex/Prism “sweetening” trick for air and
+          presence without EQ boost.
+        </p>
+      </ModuleCard>
+
+      {/* ── stereo width ── */}
+      <ModuleCard
+        className="xl:col-span-4"
+        title="Stereo width"
+        subtitle="M/S side-channel gain · Stereo Tool boost"
+        right={
+          <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            Matrix is exact at ×1.0 — stereo sources only
+          </span>
+        }
+      >
+        <div className="flex items-start justify-between gap-4">
+          <Knob
+            label="Width"
+            size={56}
+            bipolar
+            value={params.stereo.width}
+            min={0.5}
+            max={2}
+            step={0.01}
+            format={(v) => `×${v.toFixed(2)}`}
+            onChange={(v) =>
+              setParams((p) => ({ ...p, stereo: { width: v } }))
+            }
+            onReset={() => setParams((p) => ({ ...p, stereo: { width: 1 } }))}
+          />
+          <div className="flex-1">
+            <div className="panel-well rounded-md px-2.5 py-2">
+              <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+                Correlation
+              </p>
+              <p className="text-readout mt-0.5 text-[11px] font-medium text-panel-fg">
+                {(snap?.correlation ?? 1).toFixed(2)}
+                <span className="ml-2 text-[9px] text-panel-mut">
+                  {params.stereo.width > 1.4
+                    ? "wide — watch multipath"
+                    : params.stereo.width < 0.8
+                      ? "collapsing toward mono"
+                      : "healthy"}
+                </span>
+              </p>
+            </div>
+            <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+              Scales only the side signal. ×1.00 bypasses the matrix entirely;
+              keep an eye on the correlation readout — below 0.3 collapses
+              mono compatibility.
+            </p>
+          </div>
+        </div>
+      </ModuleCard>
+
       {/* ── output & monitoring ── */}
       <ModuleCard
         className="xl:col-span-2"

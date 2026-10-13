@@ -20,8 +20,9 @@ import {
   TRUE_PEAK_TARGET,
 } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
 import { useQuery } from "convex/react";
-import { Activity, CheckCircle2, RadioTower, TriangleAlert } from "lucide-react";
+import { Activity, CheckCircle2, Gauge, RadioTower, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 
 function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
@@ -103,6 +104,27 @@ export function TelemetryTab() {
     );
     return () => window.clearInterval(id);
   }, [rt.onAir]);
+
+  // low-latency profile (persisted; applied to the engine's ceiling guard)
+  const [lowLatency, setLowLatencyState] = useState(() => {
+    try {
+      return localStorage.getItem("signalpath.lowlatency.v1") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    getEngine().setLowLatency(lowLatency);
+  }, [lowLatency]);
+  const setLowLatency = (v: boolean) => {
+    setLowLatencyState(v);
+    getEngine().setLowLatency(v);
+    try {
+      localStorage.setItem("signalpath.lowlatency.v1", v ? "1" : "0");
+    } catch {
+      /* storage may be unavailable */
+    }
+  };
 
   const powered = snap?.powered ?? false;
   const lufsS = snap?.lufsS ?? -70;
@@ -363,6 +385,91 @@ export function TelemetryTab() {
               </span>
             </p>
           )}
+        </div>
+      </ModuleCard>
+
+      {/* ── latency & stability ── */}
+      <ModuleCard
+        className="xl:col-span-12"
+        title="Latency & stability"
+        subtitle="Real-time health of the audio thread and this page"
+        right={
+          <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <Gauge className="size-3.5" />
+            {snap?.perf.throttled ? "adaptive throttle ON" : "full rate"}
+          </span>
+        }
+      >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {[
+            {
+              label: "Base latency",
+              value: powered ? `${snap?.perf.baseLatencyMs.toFixed(1) ?? "—"} ms` : "—",
+              sub: "graph → device",
+            },
+            {
+              label: "Output latency",
+              value: powered ? `${snap?.perf.outputLatencyMs.toFixed(1) ?? "—"} ms` : "—",
+              sub: "to speaker/DAC",
+            },
+            {
+              label: "Main-thread frame",
+              value: powered ? `${snap?.perf.frameMs.toFixed(2) ?? "—"} ms` : "—",
+              sub: "meter loop cost",
+            },
+            {
+              label: "Clock drift",
+              value: powered
+                ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(1)} ms/s`
+                : "—",
+              sub: "negative = glitches",
+            },
+            {
+              label: "Guard profile",
+              value: lowLatency ? "2× · low latency" : "4× · full quality",
+              sub: "oversampling",
+            },
+            {
+              label: "Meter loop",
+              value: snap?.perf.throttled ? "adaptive · ½ rate" : "adaptive · full",
+              sub: "self-tuning",
+            },
+          ].map((s) => (
+            <div key={s.label} className="panel-well rounded-md px-2.5 py-2">
+              <p className="text-[9px] font-semibold tracking-[0.1em] text-panel-mut uppercase">
+                {s.label}
+              </p>
+              <p className="text-readout mt-1 truncate text-[13px] font-medium text-panel-fg">
+                {s.value}
+              </p>
+              <p className="mt-0.5 text-[8px] text-panel-mut">{s.sub}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-3 flex flex-col gap-3 rounded-lg border border-border/60 bg-muted/40 p-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="max-w-2xl">
+            <p className="text-xs font-medium">Low-latency profile</p>
+            <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+              Drops the ceiling guard from 4× to 2× oversampling — a touch less
+              true-peak margin for the smallest possible graph delay. The DSP
+              chain itself renders on the browser's dedicated audio threads
+              (spread across CPU cores by the browser); this page's main thread
+              only draws meters, and the meter loop automatically halves its
+              rate if a frame ever costs more than 4 ms — no bufferbloat, no
+              runaway work.
+            </p>
+          </div>
+          <label className="flex shrink-0 cursor-pointer items-center gap-2.5">
+            <span className="text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+              {lowLatency ? "Low latency" : "Full quality"}
+            </span>
+            <Switch
+              checked={lowLatency}
+              onCheckedChange={(v) => setLowLatency(v)}
+              aria-label="Low-latency profile"
+            />
+          </label>
         </div>
       </ModuleCard>
 

@@ -4,10 +4,12 @@
  * Signal flow:
  *   source → inputGain → HPF ─┬─ input meters (L/R)
  *                              ├─ spectrum (pre)
- *                              └─ 6-band EQ → dynamic EQ (3 subtractive bands)
+ *                              └─ 6-band EQ → harmonic exciter (parallel)
+ *                                 → dynamic EQ (3 subtractive bands)
  *                                 → 6-band multiband compressor (LR4)
- *                                 → program AGC → composite limiter
- *                                 → output gain → ceiling guard → duck
+ *                                 → program AGC → loudness rider
+ *                                 → composite limiter → output gain
+ *                                 → ceiling guard → M/S stereo width → duck
  *                                  ├─ monitor out (speakers)
  *                                  ├─ encoder send (MediaStream for Icecast)
  *                                  ├─ spectrum (post)
@@ -35,6 +37,16 @@ export interface MeterSnapshot {
   correlation: number;
   /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
   gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
+  /** current loudness-rider gain in dB (negative = pulling down) */
+  riderDb: number;
+  /** latency & main-thread health */
+  perf: {
+    baseLatencyMs: number;
+    outputLatencyMs: number;
+    frameMs: number;
+    driftMs: number;
+    throttled: boolean;
+  };
   clipIn: boolean;
   clipOut: boolean;
 }
@@ -51,6 +63,14 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   lufsS: -70,
   correlation: 1,
   gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
+  riderDb: 0,
+  perf: {
+    baseLatencyMs: 0,
+    outputLatencyMs: 0,
+    frameMs: 0,
+    driftMs: 0,
+    throttled: false,
+  },
   clipIn: false,
   clipOut: false,
 };
@@ -119,6 +139,24 @@ export class AudioEngine {
   private guardDry!: GainNode;
   private guardShaper!: WaveShaperNode;
   private guardCeilingDb = Number.NaN;
+  // loudness rider (Compellor-style leveler / AERO long-term controller)
+  private riderGain!: GainNode;
+  private riderDb = 0;
+  // parallel harmonic exciter
+  private exBp1!: BiquadFilterNode;
+  private exBp2!: BiquadFilterNode;
+  private exMix!: GainNode;
+  // M/S stereo width (transparent when bypassed)
+  private widthDry!: GainNode;
+  private widthWet!: GainNode;
+  private widthGain!: GainNode;
+  // latency / stability telemetry
+  lowLatency = false;
+  private frameCostMs = 0;
+  private meterTick = 0;
+  private driftMs = 0;
+  private clockRefWall = 0;
+  private clockRefCtx = 0;
   private agcWetPre!: GainNode;
   private agcComp!: DynamicsCompressorNode;
   private agcMakeup!: GainNode;
@@ -310,6 +348,32 @@ export class AudioEngine {
       this.deqSubs.push(sub);
     }
 
+    // ── harmonic exciter: band-limited odd-order harmonics, blended subtly ──
+    this.exBp1 = ctx.createBiquadFilter();
+    this.exBp1.type = "bandpass";
+    this.exBp1.frequency.value = 3200;
+    this.exBp1.Q.value = 0.9;
+    const exDrive = g(4);
+    const exShaper = ctx.createWaveShaper();
+    const exCurve = new Float32Array(4097);
+    const exK = 2.5;
+    for (let i = 0; i < exCurve.length; i++) {
+      const x = -1 + (2 * i) / (exCurve.length - 1);
+      exCurve[i] = Math.tanh(exK * x) / Math.tanh(exK);
+    }
+    exShaper.curve = exCurve;
+    this.exBp2 = ctx.createBiquadFilter();
+    this.exBp2.type = "bandpass";
+    this.exBp2.frequency.value = 5400;
+    this.exBp2.Q.value = 0.7;
+    this.exMix = g(0);
+    eqOut.connect(this.exBp1);
+    this.exBp1.connect(exDrive);
+    exDrive.connect(exShaper);
+    exShaper.connect(this.exBp2);
+    this.exBp2.connect(this.exMix);
+    this.exMix.connect(deqSum); // harmonics join the program here
+
     // ── 6-band multiband compressor (LR4 crossovers) ──
     this.mbWetPre = g(1);
     this.mbDry = g(0);
@@ -380,6 +444,11 @@ export class AudioEngine {
     this.agcMakeup.connect(agcOut);
     this.agcDry.connect(agcOut);
 
+    // ── loudness rider: slow K-weighted gain ride (Compellor leveler /
+    //    AERO.lite long-term controller); driven from the meter loop ──
+    this.riderGain = g(1);
+    agcOut.connect(this.riderGain);
+
     // ── brickwall limiter ──
     this.limWetPre = g(1);
     this.limDry = g(0);
@@ -390,8 +459,8 @@ export class AudioEngine {
     this.limComp.attack.value = 0.0015;
     this.limComp.release.value = 0.1;
     const limOut = g(1);
-    agcOut.connect(this.limWetPre);
-    agcOut.connect(this.limDry);
+    this.riderGain.connect(this.limWetPre);
+    this.riderGain.connect(this.limDry);
     this.limWetPre.connect(this.limComp);
     this.limComp.connect(limOut);
     this.limDry.connect(limOut);
@@ -406,12 +475,41 @@ export class AudioEngine {
     this.guardWet = g(1);
     this.guardDry = g(0);
     this.guardShaper = ctx.createWaveShaper();
-    this.guardShaper.oversample = "4x";
+    this.guardShaper.oversample = this.lowLatency ? "2x" : "4x";
     this.outputGain.connect(this.guardWet);
     this.outputGain.connect(this.guardDry);
     this.guardWet.connect(this.guardShaper);
-    this.guardShaper.connect(this.duckGain);
-    this.guardDry.connect(this.duckGain);
+    const postGuard = g(1);
+    this.guardShaper.connect(postGuard);
+    this.guardDry.connect(postGuard);
+
+    // ── M/S stereo width (Stereo Tool “stereo boost” / Compellor enhance).
+    //    Dry path stays in circuit at width = 1 so mono sources are untouched.─
+    this.widthDry = g(1);
+    this.widthWet = g(0);
+    postGuard.connect(this.widthDry);
+    postGuard.connect(this.widthWet);
+    this.widthDry.connect(this.duckGain);
+    this.widthGain = g(1);
+    this.widthWet.connect(this.widthGain);
+    const wSplit = ctx.createChannelSplitter(2);
+    this.widthGain.connect(wSplit);
+    const mid = g(0.5);
+    const side = g(0.5);
+    const sideNeg = g(-1);
+    wSplit.connect(mid, 0);
+    wSplit.connect(mid, 1);
+    wSplit.connect(side, 0);
+    wSplit.connect(sideNeg, 1);
+    sideNeg.connect(side);
+    const wMerge = ctx.createChannelMerger(2);
+    mid.connect(wMerge, 0);
+    mid.connect(wMerge, 1);
+    side.connect(wMerge, 0);
+    const sideInv = g(-1);
+    side.connect(sideInv);
+    sideInv.connect(wMerge, 1);
+    wMerge.connect(this.duckGain);
 
     this.monitorGain = g(dbToGain(-6));
     this.duckGain.connect(this.monitorGain);
@@ -535,8 +633,28 @@ export class AudioEngine {
     }
     this.crossfade(this.guardWet, this.guardDry, params.limiter.on);
 
+    // harmonic exciter
+    this.ramp(this.exBp1?.frequency, params.exciter.freqHz);
+    this.ramp(this.exBp2?.frequency, params.exciter.freqHz * 1.7);
+    this.ramp(
+      this.exMix?.gain,
+      params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0,
+    );
+
+    // stereo width: engage the M/S matrix only away from unity so the dry
+    // path (exact for mono sources) stays in circuit at width = 1
+    const widen = Math.abs(params.stereo.width - 1) > 0.01;
+    this.ramp(this.widthGain?.gain, params.stereo.width);
+    this.crossfade(this.widthWet, this.widthDry, widen);
+
     this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
     this.ramp(this.monitorGain.gain, dbToGain(params.monitorDb));
+  }
+
+  /** Low-latency profile: lighter 2× oversampling on the ceiling guard. */
+  setLowLatency(low: boolean) {
+    this.lowLatency = low;
+    if (this.guardShaper) this.guardShaper.oversample = low ? "2x" : "4x";
   }
 
   private crossfade(wet: GainNode, dry: GainNode, on: boolean) {
@@ -821,6 +939,21 @@ export class AudioEngine {
   private computeMeters() {
     const ctx = this.ctx;
     if (!ctx || !this.powered) return;
+    const t0 = performance.now();
+    // adaptive stability: if metering starts costing real main-thread time,
+    // halve its rate instead of competing with the UI
+    this.meterTick += 1;
+    if (this.frameCostMs > 4 && this.meterTick % 2 === 1) {
+      this.snapshotValue = {
+        ...this.snapshotValue,
+        perf: {
+          ...this.snapshotValue.perf,
+          frameMs: this.frameCostMs,
+          throttled: true,
+        },
+      };
+      return;
+    }
     const now = performance.now();
     const grOf = (comp: DynamicsCompressorNode | undefined): number =>
       Math.max(0, -(comp?.reduction ?? 0));
@@ -838,6 +971,21 @@ export class AudioEngine {
         const alpha = 1 - Math.pow(10, -cut / 20);
         this.ramp(sub.gain, alpha, 0.008);
       });
+    }
+
+    // audio-clock health: ctx.currentTime vs wall time — sustained negative
+    // drift means the audio thread missed deadlines (glitches / bufferbloat)
+    if (this.clockRefWall === 0) {
+      this.clockRefWall = now;
+      this.clockRefCtx = ctx.currentTime;
+    } else if (now - this.clockRefWall >= 1000) {
+      const drift =
+        (ctx.currentTime - this.clockRefCtx - (now - this.clockRefWall) / 1000) *
+        1000;
+      this.driftMs =
+        this.driftMs === 0 ? drift : this.driftMs * 0.7 + drift * 0.3;
+      this.clockRefWall = now;
+      this.clockRefCtx = ctx.currentTime;
     }
 
     // input peaks
@@ -908,6 +1056,24 @@ export class AudioEngine {
       return v > 1e-12 ? -0.691 + 10 * Math.log10(v) : -70;
     };
 
+    // ── loudness rider (Compellor leveler / AERO long-term controller) ──
+    if (this.params?.rider.on) {
+      // silence gate (Compellor DVG style): never ride noise up in pauses
+      if (windowLufs(300) > -55) {
+        const err = this.params.rider.targetLufs - windowLufs(1000);
+        const cap = Math.abs(this.params.rider.maxRideDb);
+        const ride = Math.max(-cap, Math.min(cap, err));
+        const fast = this.params.rider.speed === "fast";
+        // Compellor fast leveler ≈ 1.5 s down / 3 s up (setTarget ≈ ×⅓)
+        const tc = ride < 0 ? (fast ? 0.5 : 1.7) : fast ? 1.0 : 3.3;
+        this.ramp(this.riderGain.gain, dbToGain(ride), tc);
+        this.riderDb = ride;
+      }
+    } else {
+      this.riderDb = 0;
+      this.ramp(this.riderGain.gain, 1, 0.05);
+    };
+
     this.snapshotValue = {
       t: now,
       powered: true,
@@ -925,11 +1091,22 @@ export class AudioEngine {
         agc: grOf(this.agcComp),
         limiter: grOf(this.limComp),
       },
+      riderDb: this.riderDb,
+      perf: {
+        baseLatencyMs: (ctx.baseLatency ?? 0) * 1000,
+        outputLatencyMs: (ctx.outputLatency ?? 0) * 1000,
+        frameMs: this.frameCostMs,
+        driftMs: this.driftMs,
+        throttled: this.frameCostMs > 4,
+      },
       clipIn: now < this.clipInUntil,
       clipOut: now < this.clipOutUntil,
     };
 
     if (++this.frame % 3 === 0) this.notify();
+    const cost = performance.now() - t0;
+    this.frameCostMs =
+      this.frameCostMs === 0 ? cost : this.frameCostMs * 0.85 + cost * 0.15;
   }
 
   snapshot(): MeterSnapshot {

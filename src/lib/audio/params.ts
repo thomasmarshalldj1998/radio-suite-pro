@@ -31,6 +31,19 @@ export interface DeqBand {
   releaseMs: number;
 }
 
+/**
+ * Loudness rider — the Compellor-style leveler / AERO.lite long-term
+ * controller. Slow K-weighted gain ride toward a target loudness, bounded
+ * by maxRideDb, with a silence gate so pauses never ride noise up.
+ */
+export interface RiderParams {
+  on: boolean;
+  targetLufs: number;
+  maxRideDb: number;
+  /** "fast" ≈ Compellor fast leveler (1.5 s down / 3 s up), "slow" ≈ 5 s / 10 s. */
+  speed: "fast" | "slow";
+}
+
 export type MultibandSplits = [number, number, number, number, number];
 export type MultibandBands = [
   BandCompParams,
@@ -67,6 +80,11 @@ export interface ProcessorParams {
     attackMs: number;
     releaseMs: number;
   };
+  /** M/S stereo width: 1 = neutral, >1 widens the side channel. */
+  stereo: { width: number };
+  /** Parallel harmonic exciter (Aphex-style sweetening). */
+  exciter: { on: boolean; mix: number; freqHz: number };
+  rider: RiderParams;
   outputGainDb: number;
   monitorDb: number;
   duckDb: number;
@@ -125,6 +143,9 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     makeupDb: 4,
   },
   limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
+  stereo: { width: 1 },
+  exciter: { on: false, mix: 3, freqHz: 3200 },
+  rider: { on: false, targetLufs: LUFS_TARGET, maxRideDb: 8, speed: "fast" },
   outputGainDb: 0,
   monitorDb: -6,
   duckDb: 12,
@@ -135,6 +156,8 @@ export interface BuiltinPreset {
   name: string;
   description: string;
   tags: string[];
+  /** Optional preset family override (e.g. "Reference" chains). */
+  family?: string;
   params: ProcessorParams;
 }
 
@@ -416,6 +439,205 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       },
       limiter: { on: true, ceilingDb: -1, attackMs: 1.2, releaseMs: 100 },
       outputGainDb: 0,
+    }),
+  },
+
+  /* ── reference chains modelled on classic broadcast processors ──────────
+     Time constants and ratios below follow the manufacturers' published
+     specifications (Aphex Compellor 320D manual, Texar/Gentner Prism II FM
+     manual, Linear Acoustic AERO.lite manual, Thimeo Stereo Tool docs). */
+
+  {
+    id: "compellor-320",
+    name: "Compellor 320 · Talk",
+    description:
+      "Aphex Compellor 320 topology: slow average-power leveler (1.5 s down / 3 s up, silence-gated) over a gentle 2.2:1 program compressor (25 ms / 700 ms) with a fast peak stage. Level consistency you hear as glue, not compression.",
+    tags: ["Reference", "Aphex", "Levelling"],
+    family: "Reference",
+    params: merge({
+      hpf: { on: true, freqHz: 110 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: -1, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -0.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: -1.5, q: 1.8, type: "peaking" },
+          { freq: 12000, gainDb: 0.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      multiband: {
+        on: true,
+        splitsHz: [...DEFAULT_SPLITS] as MultibandSplits,
+        bands: [
+          { thresholdDb: -12, ratio: 2, attackMs: 30, releaseMs: 600, makeupDb: 1 },
+          { thresholdDb: -13, ratio: 2, attackMs: 20, releaseMs: 550, makeupDb: 1 },
+          { thresholdDb: -14, ratio: 2, attackMs: 15, releaseMs: 500, makeupDb: 1 },
+          { thresholdDb: -15, ratio: 2, attackMs: 10, releaseMs: 450, makeupDb: 1 },
+          { thresholdDb: -16, ratio: 2.5, attackMs: 8, releaseMs: 400, makeupDb: 1 },
+          { thresholdDb: -17, ratio: 2.5, attackMs: 5, releaseMs: 350, makeupDb: 1 },
+        ],
+      },
+      agc: {
+        on: true,
+        thresholdDb: -18,
+        ratio: 2.2,
+        kneeDb: 12,
+        attackMs: 25,
+        releaseMs: 700,
+        makeupDb: 3,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, speed: "fast" },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.1, releaseMs: 200 },
+    }),
+  },
+  {
+    id: "prism-fm",
+    name: "Audio Prism · FM Program",
+    description:
+      "Texar/Gentner Audio Prism topology: four-band parallel dynamics at the original 153 / 850 / 4900 Hz crossovers (mapped onto the 6-band matrix), slow music levelling, subtle harmonic sweetening and a whisper of stereo enhance. Loudness without listener aggravation.",
+    tags: ["Reference", "Texar/Gentner", "FM"],
+    family: "Reference",
+    params: merge({
+      hpf: { on: true, freqHz: 70 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 1, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -0.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 0, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 1.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      multiband: {
+        on: true,
+        // Prism II FM crossovers: 153 / 850 / 4900 Hz, with the top band
+        // split in two for finer control of the “high” mix bus
+        splitsHz: [153, 850, 2200, 4900, 9500] as MultibandSplits,
+        bands: [
+          { thresholdDb: -12, ratio: 2.5, attackMs: 20, releaseMs: 400, makeupDb: 1.5 },
+          { thresholdDb: -14, ratio: 2.5, attackMs: 15, releaseMs: 350, makeupDb: 1.5 },
+          { thresholdDb: -15, ratio: 3, attackMs: 10, releaseMs: 300, makeupDb: 1 },
+          { thresholdDb: -15, ratio: 3, attackMs: 8, releaseMs: 300, makeupDb: 1 },
+          { thresholdDb: -17, ratio: 2.5, attackMs: 5, releaseMs: 250, makeupDb: 1 },
+          { thresholdDb: -18, ratio: 2.5, attackMs: 4, releaseMs: 250, makeupDb: 1 },
+        ],
+      },
+      agc: {
+        on: true,
+        thresholdDb: -16,
+        ratio: 2.5,
+        kneeDb: 9,
+        attackMs: 20,
+        releaseMs: 500,
+        makeupDb: 3,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 6, speed: "slow" },
+      exciter: { on: true, mix: 3, freqHz: 3200 },
+      stereo: { width: 1.06 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.3, releaseMs: 150 },
+    }),
+  },
+  {
+    id: "aero-loudness",
+    name: "AERO.lite · Loudness Compliance",
+    description:
+      "Linear Acoustic AERO.lite topology: integrating long-term loudness controller riding toward −23 LUFS (A/85 practice sits at −24 LKFS), gentle 5-band-style AGC with density in the timings, −2 dBTP final limiting. Compliance first, artifacts never.",
+    tags: ["Reference", "Linear Acoustic", "R128"],
+    family: "Reference",
+    params: merge({
+      hpf: { on: true, freqHz: 80 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 0, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: 0, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
+        ],
+      },
+      multiband: {
+        on: true,
+        splitsHz: [...DEFAULT_SPLITS] as MultibandSplits,
+        bands: [
+          { thresholdDb: -12, ratio: 2, attackMs: 30, releaseMs: 500, makeupDb: 1 },
+          { thresholdDb: -13, ratio: 2, attackMs: 25, releaseMs: 500, makeupDb: 1 },
+          { thresholdDb: -14, ratio: 2, attackMs: 20, releaseMs: 500, makeupDb: 1 },
+          { thresholdDb: -15, ratio: 2, attackMs: 18, releaseMs: 500, makeupDb: 1 },
+          { thresholdDb: -16, ratio: 2, attackMs: 15, releaseMs: 450, makeupDb: 1 },
+          { thresholdDb: -17, ratio: 2, attackMs: 12, releaseMs: 450, makeupDb: 1 },
+        ],
+      },
+      agc: {
+        on: true,
+        thresholdDb: -16,
+        ratio: 2,
+        kneeDb: 9,
+        attackMs: 30,
+        releaseMs: 600,
+        makeupDb: 2,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, speed: "slow" },
+      limiter: { on: true, ceilingDb: -2, attackMs: 0.5, releaseMs: 300 },
+    }),
+  },
+  {
+    id: "stereo-tool-fm",
+    name: "Stereo Tool · Loud & Clean",
+    description:
+      "Thimeo Stereo Tool character: deep 6:1 program AGC, hard 6-band multiband, M/S Stereo Boost (×1.22), high-band harmonic air and an aggressive clipper stage at −0.5 dBTP. Loud, wide, punchy — the classic ST streaming sound.",
+    tags: ["Reference", "Thimeo", "Loud"],
+    family: "Reference",
+    params: merge({
+      hpf: { on: true, freqHz: 65 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 2.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1, q: 1.1, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 2.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 90, thresholdDb: -18, maxCutDb: 8, attackMs: 8, releaseMs: 220 },
+          { freqHz: 3200, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
+          { freqHz: 7500, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+        ],
+      },
+      multiband: {
+        on: true,
+        splitsHz: [120, 400, 1500, 4000, 9000] as MultibandSplits,
+        bands: [
+          { thresholdDb: -16, ratio: 5, attackMs: 8, releaseMs: 180, makeupDb: 3.5 },
+          { thresholdDb: -17, ratio: 4.5, attackMs: 5, releaseMs: 170, makeupDb: 3.5 },
+          { thresholdDb: -18, ratio: 4, attackMs: 3, releaseMs: 160, makeupDb: 3 },
+          { thresholdDb: -19, ratio: 4, attackMs: 2, releaseMs: 150, makeupDb: 3 },
+          { thresholdDb: -20, ratio: 4, attackMs: 1.5, releaseMs: 130, makeupDb: 2.5 },
+          { thresholdDb: -21, ratio: 4, attackMs: 1, releaseMs: 120, makeupDb: 2.5 },
+        ],
+      },
+      agc: {
+        on: true,
+        thresholdDb: -24,
+        ratio: 6,
+        kneeDb: 3,
+        attackMs: 5,
+        releaseMs: 200,
+        makeupDb: 8,
+      },
+      exciter: { on: true, mix: 6, freqHz: 6500 },
+      stereo: { width: 1.22 },
+      limiter: { on: true, ceilingDb: -0.5, attackMs: 0.2, releaseMs: 80 },
     }),
   },
 ];
