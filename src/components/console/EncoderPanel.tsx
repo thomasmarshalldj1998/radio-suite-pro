@@ -8,6 +8,7 @@ import {
   formatBytes,
   FORMATS,
   formatProfile,
+  formatSupport,
   formatUptime,
   isCodecSupported,
   jsFormatFor,
@@ -44,7 +45,9 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -162,6 +165,39 @@ export function EncoderPanel() {
   const currentCodec = codecById(form.codec);
   const url = isConfigured(form) ? mountUrl(form) : "";
   const uptime = rt.onAir ? liveUptimeMs : rt.stats.elapsedMs;
+
+  // codec picker: delivery-matrix formats (WASM + relay) and MediaRecorder
+  // fallbacks share one select — `fmt:<id>` vs `rec:<id>` keeps them apart
+  const activeFmt = FORMATS.find((f) => formatProfile(f) === form.targetFormat);
+  const codecValue = activeFmt ? `fmt:${activeFmt.id}` : `rec:${form.codec}`;
+  const codecLabel = activeFmt ? activeFmt.label : currentCodec.label;
+
+  const setCodecChoice = (v: string) => {
+    if (v.startsWith("fmt:")) {
+      const f = FORMATS.find((x) => x.id === v.slice(4));
+      if (!f) return;
+      const channels = f.channels.toLowerCase().includes("mono") ? "mono" : "stereo";
+      setForm((prev) => ({
+        ...prev,
+        bitrateKbps: f.bitrateKbps > 0 ? f.bitrateKbps : prev.bitrateKbps,
+        sampleRateKhz: f.sampleRateKhz,
+        channels,
+        targetFormat: formatProfile(f),
+      }));
+      const wasm = jsFormatFor(f.id);
+      toast(
+        wasm ? `${f.label} selected` : `${f.label} set as relay target`,
+        {
+          description: wasm
+            ? "Encodes in-browser via the WASM worker."
+            : "No browser packager — a transcoder relay emits this format from the local proxy stream.",
+        },
+      );
+      return;
+    }
+    // MediaRecorder fallback: pick the recorder codec, clear the matrix profile
+    setForm((prev) => ({ ...prev, codec: v.slice(4), targetFormat: "" }));
+  };
 
   const persistConfig = async (log = false) => {
     setSaving(true);
@@ -504,23 +540,65 @@ export function EncoderPanel() {
           <div className="col-span-2 my-1 border-t border-border/60 sm:col-span-3" />
 
           <Field label="Codec">
-            <Select
-              value={form.codec}
-              onValueChange={(v) => setForm((f) => ({ ...f, codec: v }))}
-            >
+            <Select value={codecValue} onValueChange={setCodecChoice}>
               <SelectTrigger className="h-9">
-                <SelectValue />
+                <span className="truncate">{codecLabel}</span>
               </SelectTrigger>
               <SelectContent>
-                {CODECS.map((c) => {
-                  const ok = isCodecSupported(c.mimeType);
-                  return (
-                    <SelectItem key={c.id} value={c.id} disabled={!ok}>
-                      {c.label}
-                      {!ok && " — unsupported"}
+                <SelectGroup>
+                  <SelectLabel className="text-[9px] text-panel-mut">
+                    In-browser encoders
+                  </SelectLabel>
+                  {FORMATS.filter((f) => jsFormatFor(f.id)).map((f) => (
+                    <SelectItem key={f.id} value={`fmt:${f.id}`}>
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate">{f.label}</span>
+                        <span className="truncate text-[10px] text-muted-foreground">
+                          {f.use}
+                        </span>
+                      </span>
                     </SelectItem>
-                  );
-                })}
+                  ))}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel className="text-[9px] text-panel-mut">
+                    Relay targets
+                  </SelectLabel>
+                  {FORMATS.filter((f) => !jsFormatFor(f.id)).map((f) => {
+                    const sup = formatSupport(f);
+                    return (
+                      <SelectItem key={f.id} value={`fmt:${f.id}`}>
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">{f.label}</span>
+                          <span className="truncate text-[10px] text-muted-foreground">
+                            {sup.ready ? f.use : `Relay — ${f.use}`}
+                          </span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel className="text-[9px] text-panel-mut">
+                    Browser recorder (MediaRecorder)
+                  </SelectLabel>
+                  {CODECS.map((c) => {
+                    const ok = isCodecSupported(c.mimeType);
+                    return (
+                      <SelectItem key={c.id} value={`rec:${c.id}`} disabled={!ok}>
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">
+                            {c.label}
+                            {!ok && " — unsupported"}
+                          </span>
+                          <span className="truncate text-[10px] text-muted-foreground">
+                            {c.note}
+                          </span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectGroup>
               </SelectContent>
             </Select>
           </Field>
@@ -602,7 +680,7 @@ export function EncoderPanel() {
           )}
           {supported.length > 0 && (
             <p className="mt-2 text-[10px] text-muted-foreground">
-              Browser encoders available here:{" "}
+              MediaRecorder fallbacks in this browser:{" "}
               {supported.map((c) => c.label).join(" · ")}
             </p>
           )}
@@ -711,7 +789,7 @@ export function EncoderPanel() {
           </Button>
           <p className="mt-2 text-center text-[10px] text-panel-mut">
             {rt.onAir
-              ? `Encoding ${currentCodec.label} @ ${form.bitrateKbps} kbps → ${url}`
+              ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
               : "The encoder keeps running across tabs until you stop it."}
           </p>
         </div>
