@@ -5,6 +5,10 @@
  *   6-band multiband compressor (LR4 crossovers) → program AGC →
  *   composite limiter (fast peak stage + per-sample ceiling guard) →
  *   output gain → (monitor + encoder send)
+ *
+ * The FM branch taps the program bus after the chain and builds the
+ * composite (MPX) signal for an FM exciter: pre-emphasis → 15 kHz brickwall
+ * → stereo matrix → pilot / RDS / SCA subcarriers → composite clipper.
  */
 
 export interface EqBand {
@@ -46,6 +50,44 @@ export interface RiderParams {
   gateDb: number;
   /** "fast" ≈ Compellor fast leveler (1.5 s down / 3 s up), "slow" ≈ 5 s / 10 s. */
   speed: "fast" | "slow";
+}
+
+/** Pre-emphasis time constant: 50 µs (CEPT/Europe) or 75 µs (ITU Region 2). */
+export type FmEmphasis = "off" | "50" | "75";
+
+/**
+ * FM transmission branch — pre-emphasis and the composite (MPX) generator
+ * that feeds an exciter. All percentages are of the ±75 kHz total permitted
+ * deviation (100 % = 75 kHz), the convention FM monitors use.
+ *
+ *   L+R baseband 0–15 kHz  0.9 × mono   (single-channel drive → 45 %)
+ *   L−R DSB-SC @ 38 kHz    0.9 × side   (→ 45 %)
+ *   pilot @ 19 kHz         8–10 %       (FCC 73.322)
+ *   RDS  @ 57 kHz (3×pilot) 2–4 kHz dev  (IEC 62106 — ≈ 2.7–5.3 %)
+ *   SCA  @ 67 kHz          ≤ 10 % each, subcarriers ≤ 20 % (FCC 73.319)
+ *   composite ceiling      100 % frequent recurrence, 110 % absolute cap
+ */
+export interface FmParams {
+  /** FM branch engaged — pre-emphasis + composite generator in circuit. */
+  on: boolean;
+  /** Pre-emphasis time constant (receiver de-emphasises to match). */
+  emphasis: FmEmphasis;
+  /** Composite (MPX) multiplex generator. */
+  mpx: {
+    on: boolean;
+    /** 19 kHz pilot level, % of total deviation (FCC 73.322: 8–10 %). */
+    pilotPct: number;
+    /** 57 kHz RDS injection, % of 75 kHz (2–4 kHz deviation typical). */
+    rdsPct: number;
+    /** RDS programme service name — 8 characters, space-padded. */
+    rdsPs: string;
+    /** 67 kHz SCA subcarrier, % of total deviation (unmodulated placeholder). */
+    scaPct: number;
+    /** Composite clipper ceiling, % of ±75 kHz (US cap: 110 %). */
+    ceilingPct: number;
+    /** Overmodulation alarm threshold, % — sustained demand trips it. */
+    alarmPct: number;
+  };
 }
 
 export type MultibandSplits = [number, number, number, number, number];
@@ -92,6 +134,8 @@ export interface ProcessorParams {
   stereo: { width: number };
   /** Parallel harmonic exciter (Aphex-style sweetening). */
   exciter: { on: boolean; mix: number; freqHz: number };
+  /** FM transmission branch (pre-emphasis + MPX composite generator). */
+  fm: FmParams;
   rider: RiderParams;
   outputGainDb: number;
   monitorDb: number;
@@ -171,6 +215,19 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
   stereo: { width: 1 },
   exciter: { on: false, mix: 3, freqHz: 3200 },
+  fm: {
+    on: false,
+    emphasis: "75",
+    mpx: {
+      on: true,
+      pilotPct: 9,
+      rdsPct: 3.3,
+      rdsPs: "SIGNAL  ",
+      scaPct: 0,
+      ceilingPct: 100,
+      alarmPct: 100,
+    },
+  },
   rider: {
     on: false,
     targetLufs: LUFS_TARGET,
