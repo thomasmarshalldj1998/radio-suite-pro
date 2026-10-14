@@ -22,6 +22,10 @@ export interface StreamRuntime {
   stats: EncoderStats;
   startedAt: number;
   takes: Take[];
+  /** Total connection attempts this session — first is initial, the rest reconnects. */
+  connects: number;
+  /** Last connection failure (message + time) — cleared on success or manual stop. */
+  lastError: { message: string; at: number } | null;
 }
 
 const runtime: StreamRuntime = {
@@ -30,6 +34,8 @@ const runtime: StreamRuntime = {
   stats: { bytes: 0, elapsedMs: 0, kbps: 0, chunks: 0 },
   startedAt: 0,
   takes: [],
+  connects: 0,
+  lastError: null,
 };
 
 const listeners = new Set<() => void>();

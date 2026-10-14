@@ -90,6 +90,8 @@ export const pushLog = mutation({
       v.literal("metadata"),
       v.literal("config"),
       v.literal("preset"),
+      v.literal("error"),
+      v.literal("warn"),
     ),
     title: v.string(),
     detail: v.optional(v.string()),
@@ -98,13 +100,28 @@ export const pushLog = mutation({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (userId === null) throw new Error("Not authenticated");
+    const now = Date.now();
+
+    // Retention — 180 days. Opportunistically prune this user's oldest entries
+    // on each write: the index is oldest-first, so a capped batch scan keeps
+    // audit history bounded without a background job.
+    const cutoff = now - 180 * 24 * 60 * 60 * 1000;
+    const oldest = await ctx.db
+      .query("broadcastLog")
+      .withIndex("by_user_time", (q) => q.eq("userId", userId))
+      .take(60);
+    for (const row of oldest) {
+      if (row.at >= cutoff) break;
+      await ctx.db.delete(row._id);
+    }
+
     return await ctx.db.insert("broadcastLog", {
       userId,
       kind: args.kind,
       title: args.title,
       detail: args.detail,
       meta: args.meta,
-      at: Date.now(),
+      at: now,
     });
   },
 });

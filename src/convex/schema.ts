@@ -76,6 +76,8 @@ const schema = defineSchema(
         v.literal("metadata"),
         v.literal("config"),
         v.literal("preset"),
+        v.literal("error"),
+        v.literal("warn"),
       ),
       title: v.string(),
       detail: v.optional(v.string()),

@@ -1,6 +1,39 @@
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SILENT_SNAPSHOT, getEngine, type MeterSnapshot } from "@/lib/audio/engine";
 import { cn } from "@/lib/utils";
+import { Info } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
+/** Glossary tooltip for broadcast metering terms (GR, LUFS, LRA, dBFS, dBTP). */
+export function TermTip({
+  term,
+  definition,
+  className,
+}: {
+  term: string;
+  definition: string;
+  className?: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={`What is ${term}?`}
+          className={cn(
+            "inline-flex shrink-0 cursor-help items-center text-panel-mut transition-colors hover:text-panel-fg",
+            className,
+          )}
+        >
+          <Info className="size-3" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64 text-left">
+        <span className="font-semibold">{term}</span> — {definition}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 const COLORS = {
   ok: "#4cd964",
@@ -25,6 +58,8 @@ interface SegmentBarProps {
   zone: (db: number) => string;
   /** Peak-hold decay in dB/s (0 disables). */
   decay?: number;
+  /** Peak-hold duration in ms before decay starts (0 = decay immediately). */
+  holdMs?: number;
   className?: string;
 }
 
@@ -36,11 +71,13 @@ function SegmentBar({
   fromTop = false,
   zone,
   decay = 22,
+  holdMs = 1500,
   className,
 }: SegmentBarProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const getRef = useRef(get);
   const peakRef = useRef(minDb);
+  const holdUntilRef = useRef(0);
 
   useEffect(() => {
     getRef.current = get;
@@ -70,7 +107,12 @@ function SegmentBar({
 
       const value = Math.min(maxDb, Math.max(minDb, getRef.current()));
       const t = (value - minDb) / (maxDb - minDb);
-      peakRef.current = Math.max(value, peakRef.current - decay * dt);
+      if (value >= peakRef.current) {
+        peakRef.current = value;
+        holdUntilRef.current = now + holdMs;
+      } else if (now >= holdUntilRef.current) {
+        peakRef.current = Math.max(value, peakRef.current - decay * dt);
+      }
       const peakT = Math.min(1, Math.max(0, (peakRef.current - minDb) / (maxDb - minDb)));
 
       const segH = 3;
@@ -97,7 +139,7 @@ function SegmentBar({
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [minDb, maxDb, fromTop, zone, decay]);
+  }, [minDb, maxDb, fromTop, zone, decay, holdMs]);
 
   return <canvas ref={canvasRef} className={cn("block h-full w-full", className)} style={{ height }} />;
 }
@@ -140,14 +182,46 @@ function Readout({
   return <span ref={spanRef} className={cn("text-readout", className)} />;
 }
 
+/* ── gain-reduction peak tracker (real values, sampled at 4 Hz) ────────── */
+
+function useGrPeak(get: () => number, decayPerSec = 2): number {
+  const getRef = useRef(get);
+  useEffect(() => {
+    getRef.current = get;
+  }, [get]);
+  const [peak, setPeak] = useState(0);
+  useEffect(() => {
+    let v = 0;
+    let last = performance.now();
+    const id = window.setInterval(() => {
+      const now = performance.now();
+      const cur = Math.max(0, getRef.current());
+      v = Math.max(cur, v - ((now - last) / 1000) * decayPerSec);
+      last = now;
+      setPeak(v);
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [decayPerSec]);
+  return peak;
+}
+
 /* ── stereo level meter ─────────────────────────────────────────────────── */
 
 export function StereoLevelMeter({
   kind,
   height = 176,
+  holdMs = 1500,
+  decay = 22,
+  showState = false,
 }: {
   kind: "in" | "out";
   height?: number;
+  /** Peak-hold duration (ms) before the indicator starts falling. */
+  holdMs?: number;
+  /** Peak-hold decay in dB/s. */
+  decay?: number;
+  /** Render clip/activity LEDs and the no-signal state. */
+  showState?: boolean;
 }) {
   const getL = () => {
     const s = getEngine().snapshot();
@@ -158,35 +232,98 @@ export function StereoLevelMeter({
     return kind === "in" ? s.inPeakR : s.outPeakR;
   };
 
+  // state LEDs are sampled at 4 Hz — no per-frame React work
+  const [state, setState] = useState({ clip: false, active: false, noSignal: true });
+  useEffect(() => {
+    if (!showState) return;
+    let last = 0;
+    let lastActive = 0;
+    return getEngine().subscribe((s) => {
+      const now = performance.now();
+      if (now - last < 250) return;
+      last = now;
+      const clip = kind === "in" ? s.clipIn : s.clipOut;
+      const peak = Math.max(
+        kind === "in" ? s.inPeakL : s.outPeakL,
+        kind === "in" ? s.inPeakR : s.outPeakR,
+      );
+      if (s.powered && peak > -60) lastActive = now;
+      const noSignal = !s.powered || now - lastActive > 2500;
+      setState((prev) =>
+        prev.clip === clip && prev.active === !noSignal && prev.noSignal === noSignal
+          ? prev
+          : { clip, active: !noSignal, noSignal },
+      );
+    });
+  }, [kind, showState]);
+
   return (
-    <div className="flex items-stretch gap-2">
-      <div className="flex flex-col justify-between py-0.5 text-[8px] leading-none text-panel-mut">
-        {["0", "−6", "−20", "−40", "−60"].map((t) => (
-          <span key={t} className="text-right">
-            {t}
+    <div className="flex flex-col gap-1">
+      {showState && (
+        <div className="flex items-center justify-between gap-3 px-0.5">
+          <span className="flex items-center gap-1 text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+            <span className={cn("led size-1.5", state.active && "led-on")} aria-hidden />
+            Sig
           </span>
-        ))}
-      </div>
-      <div className="panel-well flex gap-1 rounded-md px-2 py-2">
-        <div className="flex w-3.5 flex-col items-center justify-end gap-1">
-          <span className="text-[8px] font-semibold text-panel-mut">L</span>
-          <div className="w-full" style={{ height: height - 14 }}>
-            <SegmentBar get={getL} minDb={-60} maxDb={0} height={height - 14} zone={levelZone} />
-          </div>
+          <span className="flex items-center gap-1 text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+            Clip
+            <span className={cn("led size-1.5", state.clip && "led-hot")} aria-hidden />
+          </span>
         </div>
-        <div className="flex w-3.5 flex-col items-center justify-end gap-1">
-          <span className="text-[8px] font-semibold text-panel-mut">R</span>
-          <div className="w-full" style={{ height: height - 14 }}>
-            <SegmentBar get={getR} minDb={-60} maxDb={0} height={height - 14} zone={levelZone} />
-          </div>
+      )}
+      <div className="flex items-stretch gap-2">
+        <div className="flex flex-col justify-between py-0.5 text-[8px] leading-none text-panel-mut">
+          {["0", "−6", "−20", "−40", "−60"].map((t) => (
+            <span key={t} className="text-right">
+              {t}
+            </span>
+          ))}
         </div>
-      </div>
-      <div className="flex flex-col justify-between">
-        <Readout get={getL} className="text-[9px] text-panel-fg" />
-        <div className="flex flex-col gap-1.5">
+        <div className="panel-well relative flex gap-1 rounded-md px-2 py-2">
+          <div className="flex w-3.5 flex-col items-center justify-end gap-1">
+            <span className="text-[8px] font-semibold text-panel-mut">L</span>
+            <div className="w-full" style={{ height: height - 14 }}>
+              <SegmentBar
+                get={getL}
+                minDb={-60}
+                maxDb={0}
+                height={height - 14}
+                zone={levelZone}
+                holdMs={holdMs}
+                decay={decay}
+              />
+            </div>
+          </div>
+          <div className="flex w-3.5 flex-col items-center justify-end gap-1">
+            <span className="text-[8px] font-semibold text-panel-mut">R</span>
+            <div className="w-full" style={{ height: height - 14 }}>
+              <SegmentBar
+                get={getR}
+                minDb={-60}
+                maxDb={0}
+                height={height - 14}
+                zone={levelZone}
+                holdMs={holdMs}
+                decay={decay}
+              />
+            </div>
+          </div>
+          {showState && state.noSignal && (
+            <span className="pointer-events-none absolute inset-x-1 top-1/2 -translate-y-1/2 text-center text-[8px] font-semibold tracking-[0.14em] text-panel-mut/70 uppercase">
+              No signal
+            </span>
+          )}
+        </div>
+        <div className="flex flex-col justify-between py-0.5">
+          <Readout get={getL} className="text-[9px] text-panel-fg" />
           <Readout get={getR} className="text-[9px] text-panel-fg" />
         </div>
       </div>
+      {showState && (
+        <p className="px-0.5 text-[7px] font-semibold tracking-[0.14em] text-panel-mut/80 uppercase">
+          dBFS · hold {holdMs >= 1000 ? `${(holdMs / 1000).toFixed(1)} s` : "off"}
+        </p>
+      )}
     </div>
   );
 }
@@ -209,10 +346,11 @@ export function GainReductionMeter({
   // GR is positive dB of reduction; render on a negative scale so the bar
   // falls from the top like a hardware GR meter.
   const mapped = () => -Math.min(maxDb, Math.max(0, get()));
+  const peak = useGrPeak(get);
   return (
     <div className="flex items-center gap-1.5">
       <div className="panel-well rounded px-1.5 py-1.5" style={{ width: width + 12 }}>
-        <SegmentBar get={mapped} minDb={-maxDb} maxDb={0} height={height} fromTop zone={grZone} decay={34} />
+        <SegmentBar get={mapped} minDb={-maxDb} maxDb={0} height={height} fromTop zone={grZone} decay={34} holdMs={800} />
       </div>
       <div className="flex h-full flex-col justify-between py-0.5">
         <span className="text-[8px] leading-none text-panel-mut">0</span>
@@ -223,7 +361,12 @@ export function GainReductionMeter({
           </span>
         )}
       </div>
-      <Readout get={() => -mapped()} suffix=" dB" className="text-[10px] text-panel-fg" />
+      <div className="flex flex-col gap-0.5">
+        <Readout get={() => -mapped()} suffix=" dB" className="text-[10px] text-panel-fg" />
+        <span className="text-readout text-[8px] leading-none text-panel-mut">
+          PK {peak < 0.05 ? "0.00" : peak.toFixed(2)}
+        </span>
+      </div>
     </div>
   );
 }
@@ -240,6 +383,7 @@ export function BandGrBar({
   height?: number;
 }) {
   const mapped = () => -Math.min(maxDb, Math.max(0, get()));
+  const peak = useGrPeak(get, 3);
   return (
     <div className="flex flex-col items-center gap-1">
       <div className="panel-well rounded px-[3px] py-1" style={{ width: 14 }}>
@@ -251,6 +395,7 @@ export function BandGrBar({
           fromTop
           zone={grZone}
           decay={34}
+          holdMs={800}
         />
       </div>
       <Readout
@@ -258,6 +403,9 @@ export function BandGrBar({
         suffix=""
         className="text-[9px] text-panel-fg"
       />
+      <span className="text-readout text-[7px] leading-none text-panel-mut">
+        pk {peak < 0.05 ? "0" : peak.toFixed(1)}
+      </span>
     </div>
   );
 }

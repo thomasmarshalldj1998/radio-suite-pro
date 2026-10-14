@@ -18,7 +18,7 @@ import {
   type ProcessorParams,
 } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
-import { Volume2, VolumeX, Zap } from "lucide-react";
+import { ChevronDown, Volume2, VolumeX, Zap } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 function useMeterSnapshot(intervalMs = 150): MeterSnapshot | null {
@@ -58,6 +58,38 @@ function bandRange(i: number, splits: MultibandSplits): string {
   return `${fmtEdge(lo)}–${fmtEdge(hi)}`;
 }
 
+/**
+ * Compact live gain-reduction readout for a chain-block header. Self-
+ * subscribes to the engine so only this chip re-renders on meter ticks.
+ */
+function GrChip({ label, get }: { label: string; get: () => number }) {
+  const [db, setDb] = useState(0);
+  useEffect(() => {
+    let last = 0;
+    return getEngine().subscribe(() => {
+      const now = performance.now();
+      if (now - last < 120) return;
+      last = now;
+      const v = Math.max(0, get());
+      setDb((p) => (Math.abs(p - v) < 0.15 ? p : v));
+    });
+  }, [get]);
+  const active = db >= 0.15;
+  return (
+    <span
+      title={`Live ${label} gain reduction (dB)`}
+      className={cn(
+        "text-readout hidden shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold tabular-nums sm:inline-flex",
+        active
+          ? "border-amber-led/40 bg-amber-led/10 text-amber-led"
+          : "border-rack-line text-panel-mut",
+      )}
+    >
+      {label} {active ? `−${db.toFixed(1)}` : "0.0"} dB
+    </span>
+  );
+}
+
 /* ── chain block: numbered StereoTool-style processing stage ────────────── */
 
 function ChainBlock({
@@ -68,6 +100,7 @@ function ChainBlock({
   onToggle,
   right,
   wide = false,
+  gr,
   children,
 }: {
   index: number;
@@ -77,15 +110,21 @@ function ChainBlock({
   onToggle?: () => void;
   right?: ReactNode;
   wide?: boolean;
+  /** Live gain-reduction readout shown in the header (self-subscribing). */
+  gr?: { label: string; get: () => number };
   children: ReactNode;
 }) {
   const bypassed = enabled === false;
+  // Open on desktop; collapsed on phones so the chain states read at a glance.
+  const [open, setOpen] = useState(
+    () => typeof window === "undefined" || window.innerWidth >= 768,
+  );
   return (
     <section
       className={cn(
-        "card-layer flex min-w-[300px] flex-1 flex-col rounded-xl border bg-card transition-colors",
+        "card-layer flex min-w-[min(300px,100%)] flex-1 flex-col rounded-xl border bg-card transition-colors",
         bypassed ? "border-border/50" : "border-border/70",
-        wide && "min-w-[460px]",
+        wide && "min-w-[min(460px,100%)]",
       )}
     >
       <header
@@ -122,6 +161,7 @@ function ChainBlock({
             Bypass
           </span>
         )}
+        {gr && <GrChip label={gr.label} get={gr.get} />}
         {right}
         {enabled !== undefined && onToggle && (
           <Switch
@@ -131,11 +171,26 @@ function ChainBlock({
             className="cursor-pointer"
           />
         )}
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
+          className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded border border-rack-line text-panel-mut transition-colors hover:border-signal/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-signal/60 focus-visible:outline-none"
+        >
+          <ChevronDown
+            className={cn(
+              "size-3.5 transition-transform duration-200",
+              !open && "-rotate-90",
+            )}
+          />
+        </button>
       </header>
       <div
         className={cn(
           "flex-1 p-3 transition-opacity",
           bypassed && "opacity-55",
+          !open && "hidden",
         )}
       >
         {children}
@@ -544,6 +599,10 @@ export function ProcessingTab({
           title="Multiband"
           subtitle="6-band · LR4 crossovers · per-band threshold"
           wide
+          gr={{
+            label: "MB",
+            get: () => Math.max(0, ...getEngine().snapshot().gr.bands),
+          }}
           enabled={params.multiband.on}
           onToggle={() =>
             setParams((p) => ({
@@ -619,6 +678,7 @@ export function ProcessingTab({
           index={4}
           title="AGC"
           subtitle="Program leveller · loudness rider"
+          gr={{ label: "AGC", get: () => getEngine().snapshot().gr.agc }}
           enabled={params.agc.on}
           onToggle={() =>
             setParams((p) => ({ ...p, agc: { ...p.agc, on: !p.agc.on } }))
@@ -759,6 +819,14 @@ export function ProcessingTab({
           index={5}
           title="Composite limit"
           subtitle="Pre-delay · clip stage · ceiling guard"
+          enabled={params.limiter.on}
+          onToggle={() =>
+            setParams((p) => ({
+              ...p,
+              limiter: { ...p.limiter, on: !p.limiter.on },
+            }))
+          }
+          gr={{ label: "LIM", get: () => getEngine().snapshot().gr.limiter }}
         >
           <div className="divide-y divide-border/60 rounded border border-border/60">
             <CtrlRow label="Pre">
@@ -824,34 +892,6 @@ export function ProcessingTab({
               />
               <Val>{ceilingPct} %</Val>
             </CtrlRow>
-            <CtrlRow label="Harm">
-              <Seg
-                ariaLabel="Harmonic exciter"
-                value={params.exciter.on ? "on" : "bypass"}
-                options={[
-                  { value: "on", label: "On" },
-                  { value: "bypass", label: "Bypass" },
-                ]}
-                onChange={(v) =>
-                  setParams((p) => ({
-                    ...p,
-                    exciter: { ...p.exciter, on: v === "on" },
-                  }))
-                }
-              />
-              <SliderRow
-                className="max-w-20"
-                min={0}
-                max={12}
-                step={0.5}
-                value={params.exciter.mix}
-                onChange={(v) =>
-                  setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: v } }))
-                }
-                label="Harmonic level"
-              />
-              <Val>{harmDb(params.exciter.mix)} dB</Val>
-            </CtrlRow>
             <CtrlRow label="True pk">
               <Val className={cn(peakOver && "text-meter-hot")}>
                 {snap?.powered
@@ -887,9 +927,63 @@ export function ProcessingTab({
 
         <ChainArrow />
 
-        {/* 06 — stereo & output */}
+        {/* 06 — density & enhancement */}
         <ChainBlock
           index={6}
+          title="Density & enhancement"
+          subtitle="Harmonic exciter · mix"
+          enabled={params.exciter.on}
+          onToggle={() =>
+            setParams((p) => ({
+              ...p,
+              exciter: { ...p.exciter, on: !p.exciter.on },
+            }))
+          }
+        >
+          <div className="divide-y divide-border/60 rounded border border-border/60">
+            <CtrlRow label="Exciter">
+              <Seg
+                ariaLabel="Harmonic exciter"
+                value={params.exciter.on ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    exciter: { ...p.exciter, on: v === "on" },
+                  }))
+                }
+              />
+              <Val>{params.exciter.on ? "armed" : "bypassed"}</Val>
+            </CtrlRow>
+            <CtrlRow label="Mix">
+              <SliderRow
+                min={0}
+                max={12}
+                step={0.5}
+                value={params.exciter.mix}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, exciter: { ...p.exciter, mix: v } }))
+                }
+                label="Harmonic level"
+              />
+              <Val>{harmDb(params.exciter.mix)} dB</Val>
+            </CtrlRow>
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+            The exciter regenerates controlled harmonic density for the top
+            octave. Mix is the engine blend, shown here as its insert level —
+            bypass returns a clean, uncoloured high end.
+          </p>
+        </ChainBlock>
+
+        <ChainArrow />
+
+        {/* 07 — stereo & output */}
+        <ChainBlock
+          index={7}
           title="Stereo & output"
           subtitle="Width · trim · monitor"
         >

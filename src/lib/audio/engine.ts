@@ -36,6 +36,14 @@ export interface MeterSnapshot {
   lufsS: number;
   /** K-weighted input-stage loudness (BS.1770, pre-chain) */
   lufsIn: number;
+  /** Gated integrated loudness (BS.1770-4) — null until enough programme */
+  lufsI: number | null;
+  /** Loudness range (EBU Tech 3342) — null until enough short-term data */
+  lra: number | null;
+  /** Measurement duration since reset (ms of powered time) */
+  measureMs: number;
+  /** Maximum sample peak since reset (dBFS) */
+  samplePeakDb: number;
   correlation: number;
   /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
   gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
@@ -64,6 +72,10 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   lufsM: -70,
   lufsS: -70,
   lufsIn: -70,
+  lufsI: null,
+  lra: null,
+  measureMs: 0,
+  samplePeakDb: -120,
   correlation: 1,
   gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
   riderDb: 0,
@@ -117,6 +129,17 @@ export class AudioEngine {
   private lufsPoints: LufsPoint[] = [];
   private clipInUntil = 0;
   private clipOutUntil = 0;
+
+  // integrated loudness (BS.1770-4 gated) + LRA (EBU Tech 3342)
+  private iBlocks: number[] = [];
+  private stBlocks: number[] = [];
+  private lufsIValue: number | null = null;
+  private lraValue: number | null = null;
+  private measureMsAcc = 0;
+  private lastMeasureT = 0;
+  private lastIBlockAt = 0;
+  private lastStBlockAt = 0;
+  private samplePeakDb = -120;
 
   // graph
   private sourceBus!: GainNode;
@@ -209,6 +232,7 @@ export class AudioEngine {
   /* ── lifecycle ────────────────────────────────────────────────────────── */
 
   async powerOn(): Promise<void> {
+    this.resetLoudness();
     if (this.ctx) {
       await this.ctx.resume();
       this.powered = true;
@@ -1158,7 +1182,7 @@ export class AudioEngine {
     while (this.lufsPoints.length > 2 && now - this.lufsPoints[0].t > 3200) {
       this.lufsPoints.shift();
     }
-    const windowLufs = (winMs: number) => {
+    const windowPower = (winMs: number) => {
       let acc = 0;
       let n = 0;
       for (const p of this.lufsPoints) {
@@ -1167,9 +1191,30 @@ export class AudioEngine {
           n++;
         }
       }
-      const v = n > 0 ? acc / n : 0;
+      return n > 0 ? acc / n : 0;
+    };
+    const windowLufs = (winMs: number) => {
+      const v = windowPower(winMs);
       return v > 1e-12 ? -0.691 + 10 * Math.log10(v) : -70;
     };
+
+    // ── integrated loudness + LRA measurement (real, gated per spec) ──
+    if (this.lastMeasureT > 0) this.measureMsAcc += now - this.lastMeasureT;
+    this.lastMeasureT = now;
+    if (now - this.lastIBlockAt >= 100) {
+      this.lastIBlockAt = now;
+      this.iBlocks.push(windowPower(400));
+      if (this.iBlocks.length > 90_000) this.iBlocks.shift();
+      this.lufsIValue = this.gatedIntegrated(this.iBlocks, this.measureMsAcc);
+    }
+    if (now - this.lastStBlockAt >= 1000) {
+      this.lastStBlockAt = now;
+      this.stBlocks.push(windowPower(3000));
+      if (this.stBlocks.length > 12_000) this.stBlocks.shift();
+      this.lraValue = this.loudnessRange(this.stBlocks);
+    }
+    if (outPeakL > this.samplePeakDb) this.samplePeakDb = outPeakL;
+    if (outPeakR > this.samplePeakDb) this.samplePeakDb = outPeakR;
 
     // ── loudness rider (Compellor leveler / AERO long-term controller) ──
     if (this.params?.rider.on) {
@@ -1200,6 +1245,10 @@ export class AudioEngine {
       lufsM: loudness > -70 ? loudness : -70,
       lufsS: windowLufs(3000),
       lufsIn: Math.max(-70, lufsIn),
+      lufsI: this.lufsIValue,
+      lra: this.lraValue,
+      measureMs: this.measureMsAcc,
+      samplePeakDb: this.samplePeakDb,
       correlation,
       gr: {
         bands: this.mbComps.map(grOf),
@@ -1223,6 +1272,74 @@ export class AudioEngine {
     const cost = performance.now() - t0;
     this.frameCostMs =
       this.frameCostMs === 0 ? cost : this.frameCostMs * 0.85 + cost * 0.15;
+  }
+
+  /**
+   * Reset the integrated-loudness / LRA / sample-peak measurement window.
+   * Called automatically on power-on; exposed for the operator's reset key.
+   */
+  resetLoudness() {
+    this.iBlocks = [];
+    this.stBlocks = [];
+    this.lufsIValue = null;
+    this.lraValue = null;
+    this.measureMsAcc = 0;
+    this.lastMeasureT = 0;
+    this.lastIBlockAt = 0;
+    this.lastStBlockAt = 0;
+    this.samplePeakDb = -120;
+    this.notify();
+  }
+
+  /** BS.1770-4 gated integrated loudness from 400 ms block powers. */
+  private gatedIntegrated(blocks: number[], measureMs: number): number | null {
+    if (measureMs < 20_000 || blocks.length < 50) return null;
+    const abs: number[] = [];
+    for (const b of blocks) {
+      if (b > 1e-12 && -0.691 + 10 * Math.log10(b) >= -70) abs.push(b);
+    }
+    if (abs.length === 0) return null;
+    let sum = 0;
+    for (const b of abs) sum += b;
+    const meanL = -0.691 + 10 * Math.log10(sum / abs.length);
+    const relThreshold = meanL - 10;
+    let gsum = 0;
+    let gn = 0;
+    for (const b of abs) {
+      if (-0.691 + 10 * Math.log10(b) >= relThreshold) {
+        gsum += b;
+        gn++;
+      }
+    }
+    if (gn === 0) return null;
+    return -0.691 + 10 * Math.log10(gsum / gn);
+  }
+
+  /** EBU Tech 3342 loudness range from short-term (3 s) block powers. */
+  private loudnessRange(blocks: number[]): number | null {
+    if (blocks.length < 30) return null;
+    const vals: number[] = [];
+    for (const b of blocks) {
+      if (b > 1e-12 && -0.691 + 10 * Math.log10(b) >= -70) vals.push(b);
+    }
+    if (vals.length < 20) return null;
+    let sum = 0;
+    for (const b of vals) sum += b;
+    const relThreshold = -0.691 + 10 * Math.log10(sum / vals.length) - 20;
+    const gated: number[] = [];
+    for (const b of vals) {
+      const l = -0.691 + 10 * Math.log10(b);
+      if (l >= relThreshold) gated.push(l);
+    }
+    if (gated.length < 10) return null;
+    gated.sort((a, b) => a - b);
+    const pct = (p: number) => {
+      const idx = (gated.length - 1) * p;
+      const lo = Math.floor(idx);
+      const hi = Math.ceil(idx);
+      return gated[lo] + (gated[hi] - gated[lo]) * (idx - lo);
+    };
+    return Math.max(0, pct(0.95) - pct(0.1));
   }
 
   snapshot(): MeterSnapshot {

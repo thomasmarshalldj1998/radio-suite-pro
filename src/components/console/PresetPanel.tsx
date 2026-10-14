@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { useMutation, useQuery } from "convex/react";
 import { format } from "date-fns";
-import { Bookmark, Download, RotateCcw, Trash2, X } from "lucide-react";
+import { Bookmark, Copy, Download, RotateCcw, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -41,11 +41,14 @@ function familyOf(p: ProcessorParams): string {
 export function PresetPanel({
   params,
   activeName,
+  dirty = false,
   onApply,
   onRevert,
 }: {
   params: ProcessorParams;
   activeName: string;
+  /** True when the displayed controls differ from the loaded preset. */
+  dirty?: boolean;
   onApply: (p: ProcessorParams, name: string) => void;
   onRevert: () => void;
 }) {
@@ -58,6 +61,8 @@ export function PresetPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const apply = (p: ProcessorParams, presetName: string) => {
     onApply(coerceParams(p), presetName);
@@ -70,30 +75,88 @@ export function PresetPanel({
   };
 
   const save = async () => {
-    if (!name.trim()) {
+    const trimmed = name.trim();
+    if (!trimmed) {
       toast.error("Give the preset a name");
+      return;
+    }
+    if (trimmed.length > 80) {
+      toast.error("Preset names are limited to 80 characters");
+      return;
+    }
+    // overwrite protection: second click confirms replacing an existing preset
+    const exists =
+      (saved ?? []).some(
+        (p) => p.name.toLowerCase() === trimmed.toLowerCase(),
+      ) ||
+      BUILTIN_PRESETS.some(
+        (p) => p.name.toLowerCase() === trimmed.toLowerCase(),
+      );
+    if (exists && !confirmOverwrite) {
+      setConfirmOverwrite(true);
+      toast.warning(`“${trimmed}” already exists — press Save again to overwrite it.`);
       return;
     }
     setSaving(true);
     try {
       await savePreset({
-        name: name.trim(),
+        name: trimmed,
         description: description.trim() || undefined,
         params,
       });
       await pushLog({
         kind: "preset",
-        title: `Saved preset “${name.trim()}”`,
+        title: `Saved preset “${trimmed}”`,
         detail: summaryOf(params).join(" · "),
       });
-      toast.success("Chain saved as preset");
+      toast.success(
+        exists ? `Overwrote “${trimmed}”` : "Chain saved as preset",
+      );
       setName("");
       setDescription("");
       setShowForm(false);
-    } catch {
-      toast.error("Could not save the preset");
+    } catch (err) {
+      toast.error("Could not save the preset", {
+        description:
+          err instanceof Error && err.message ? err.message : undefined,
+      });
     } finally {
       setSaving(false);
+      setConfirmOverwrite(false);
+    }
+  };
+
+  /** DUPLICATE — store a copy of a library entry under a free name. */
+  const duplicateFrom = async (
+    baseName: string,
+    desc: string | undefined,
+    p: ProcessorParams,
+  ) => {
+    const taken = new Set(
+      [
+        ...(saved ?? []).map((s) => s.name.toLowerCase()),
+        ...BUILTIN_PRESETS.map((b) => b.name.toLowerCase()),
+      ],
+    );
+    let candidate = `${baseName} (copy)`;
+    for (let i = 2; taken.has(candidate.toLowerCase()) && i < 10; i++) {
+      candidate = `${baseName} (copy ${i})`;
+    }
+    if (taken.has(candidate.toLowerCase())) {
+      candidate = `${baseName} (${new Date().toISOString().slice(11, 19)})`;
+    }
+    try {
+      await savePreset({
+        name: candidate,
+        description: desc || undefined,
+        params: p,
+      });
+      toast.success(`Duplicated as “${candidate}”`);
+    } catch (err) {
+      toast.error("Could not duplicate the preset", {
+        description:
+          err instanceof Error && err.message ? err.message : undefined,
+      });
     }
   };
 
@@ -101,8 +164,13 @@ export function PresetPanel({
     try {
       await removePreset({ id });
       toast.success(`Deleted “${presetName}”`);
-    } catch {
-      toast.error("Could not delete the preset");
+    } catch (err) {
+      toast.error("Could not delete the preset", {
+        description:
+          err instanceof Error && err.message ? err.message : undefined,
+      });
+    } finally {
+      setConfirmDeleteId(null);
     }
   };
 
@@ -124,6 +192,7 @@ export function PresetPanel({
       meta: "Factory",
       family: p.family ?? familyOf(p.params),
       onApply: () => apply(p.params, p.name),
+      onDuplicate: () => duplicateFrom(p.name, p.description, p.params),
       onDelete: undefined as undefined | (() => void),
     })),
     ...custom.map((p) => {
@@ -136,6 +205,7 @@ export function PresetPanel({
         meta: `Saved ${format(new Date(p._creationTime), "MMM d, yyyy")}`,
         family: familyOf(cp),
         onApply: () => apply(cp, p.name),
+        onDuplicate: () => duplicateFrom(p.name, p.description, cp),
         onDelete: () => void remove(p._id, p.name),
       };
     }),
@@ -195,12 +265,23 @@ export function PresetPanel({
         {/* active + actions */}
         <div className="card-layer flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card px-4 py-3">
           <div className="min-w-0">
-            <p className="text-[9px] font-semibold tracking-[0.2em] text-muted-foreground uppercase">
+            <p className="flex items-center gap-2 text-[9px] font-semibold tracking-[0.2em] text-muted-foreground uppercase">
               Active
+              {dirty && (
+                <span className="rounded border border-amber-led/40 bg-amber-led/10 px-1.5 py-0.5 text-[8px] font-bold tracking-[0.12em] text-amber-led">
+                  Unsaved changes
+                </span>
+              )}
             </p>
             <p className="truncate text-lg leading-6 font-semibold text-white">
               {activeName}
             </p>
+            {dirty && (
+              <p className="mt-0.5 text-[10px] text-meter-warn">
+                Controls differ from the loaded preset — Revert to restore it,
+                or Save to store this variation.
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -263,15 +344,25 @@ export function PresetPanel({
                 />
               </div>
             </div>
-            <div className="mt-3 flex items-center gap-3">
+            <div className="mt-3 flex flex-wrap items-center gap-3">
               <Button size="sm" onClick={() => void save()} disabled={saving}>
                 <Bookmark className="mr-1.5 size-3.5" />
-                {saving ? "Saving…" : "Save preset"}
+                {saving
+                  ? "Saving…"
+                  : confirmOverwrite
+                    ? "Save — overwrite?"
+                    : "Save preset"}
               </Button>
               <span className="text-[11px] text-muted-foreground">
                 {summaryOf(params).join(" · ")}
               </span>
             </div>
+            {confirmOverwrite && (
+              <p className="mt-2 rounded border border-meter-warn/40 bg-meter-warn/10 px-2.5 py-1.5 text-[11px] text-meter-warn">
+                A preset named “{name.trim()}” already exists — press Save
+                again to overwrite it, or change the name.
+              </p>
+            )}
           </div>
         )}
 
@@ -343,17 +434,59 @@ export function PresetPanel({
                       <span className="w-24 shrink-0 text-right text-[10px] text-muted-foreground">
                         {e.meta}
                       </span>
+                      <button
+                        type="button"
+                        aria-label={`Duplicate ${e.name}`}
+                        title="Duplicate as a new preset"
+                        className="flex shrink-0 items-center gap-1 text-muted-foreground/60 transition-colors hover:text-signal"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          e.onDuplicate();
+                        }}
+                      >
+                        <Copy className="size-3.5" />
+                      </button>
                       {e.onDelete && (
                         <button
                           type="button"
-                          aria-label={`Delete ${e.name}`}
-                          className="shrink-0 text-muted-foreground/60 transition-colors hover:text-destructive"
+                          aria-label={
+                            confirmDeleteId === e.key
+                              ? `Confirm delete ${e.name}`
+                              : `Delete ${e.name}`
+                          }
+                          title={
+                            confirmDeleteId === e.key
+                              ? "Click again to confirm deletion"
+                              : "Delete preset"
+                          }
+                          className={cn(
+                            "flex shrink-0 items-center gap-1 transition-colors",
+                            confirmDeleteId === e.key
+                              ? "font-bold text-destructive"
+                              : "text-muted-foreground/60 hover:text-destructive",
+                          )}
                           onClick={(ev) => {
                             ev.stopPropagation();
-                            e.onDelete?.();
+                            if (confirmDeleteId === e.key) {
+                              e.onDelete?.();
+                            } else {
+                              setConfirmDeleteId(e.key);
+                              window.setTimeout(
+                                () =>
+                                  setConfirmDeleteId((c) =>
+                                    c === e.key ? null : c,
+                                  ),
+                                4000,
+                              );
+                            }
                           }}
                         >
                           <Trash2 className="size-3.5" />
+                          {confirmDeleteId === e.key && (
+                            <span className="text-[9px] tracking-wide uppercase">
+                              Confirm
+                            </span>
+                          )}
                         </button>
                       )}
                       <Button

@@ -59,6 +59,7 @@ import {
   SkipForward,
   Square,
   Trash2,
+  TriangleAlert,
   Upload,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -136,6 +137,43 @@ function Field({
   );
 }
 
+/**
+ * Self-subscribing output-signal chip — only this chip re-renders on meter
+ * ticks, keeping the whole TX deck out of the hot path.
+ */
+function OutPresence() {
+  const engine = getEngine();
+  const [present, setPresent] = useState(false);
+  useEffect(() => {
+    let last = 0;
+    return engine.subscribe(() => {
+      const now = performance.now();
+      if (now - last < 250) return;
+      last = now;
+      const s = engine.snapshot();
+      const next = engine.powered && (s.outPeakL > -60 || s.outPeakR > -60);
+      setPresent((p) => (p === next ? p : next));
+    });
+  }, [engine]);
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium"
+      title="Program output signal presence (measured)"
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "size-1.5 rounded-full",
+          present ? "bg-meter-ok shadow-[0_0_6px_rgba(52,211,153,0.7)]" : "bg-white/20",
+        )}
+      />
+      <span className={present ? "text-meter-ok" : "text-panel-mut"}>
+        {present ? "Output signal present" : "No output signal"}
+      </span>
+    </span>
+  );
+}
+
 export function EncoderPanel() {
   const engine = getEngine();
   const mountDoc = useQuery(api.stations.getMount);
@@ -177,6 +215,8 @@ export function EncoderPanel() {
     stats: getRuntime().stats,
     startedAt: getRuntime().startedAt,
     takes: getRuntime().takes,
+    connects: getRuntime().connects,
+    lastError: getRuntime().lastError,
   }));
   useEffect(
     () =>
@@ -187,6 +227,8 @@ export function EncoderPanel() {
           stats: r.stats,
           startedAt: r.startedAt,
           takes: r.takes,
+          connects: r.connects,
+          lastError: r.lastError,
         });
       }),
     [],
@@ -302,8 +344,12 @@ export function EncoderPanel() {
       toast.error(`${currentCodec.label} is not supported in this browser`);
       return;
     }
+    const prev = getRuntime();
+    const attempt = prev.connects + 1;
+    let stage: "engine" | "stream" = "engine";
     try {
       if (!engine.powered) await engine.powerOn();
+      stage = "stream";
       setLiveOutput(sel);
 
       // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / HE-AAC v2) encode in a
@@ -322,6 +368,8 @@ export function EncoderPanel() {
           onAir: true,
           startedAt: Date.now(),
           stats: { bytes: 0, elapsedMs: 0, kbps: 0, chunks: 0 },
+          connects: attempt,
+          lastError: null,
         });
         void saveMount({ ...form });
         void pushLog({
@@ -348,6 +396,8 @@ export function EncoderPanel() {
         onAir: true,
         startedAt: Date.now(),
         stats: { bytes: 0, elapsedMs: 0, kbps: 0, chunks: 0 },
+        connects: attempt,
+        lastError: null,
       });
       void saveMount({ ...form });
       void pushLog({
@@ -357,9 +407,25 @@ export function EncoderPanel() {
       });
       toast.success("You are on air", { description: url });
     } catch (err) {
-      toast.error("Could not start the encoder", {
-        description: err instanceof Error ? err.message : undefined,
+      const message = err instanceof Error ? err.message : String(err);
+      patchRuntime({
+        connects: attempt,
+        lastError: { message, at: Date.now() },
       });
+      void pushLog({
+        kind: "error",
+        title:
+          stage === "engine"
+            ? "Engine failed to start for broadcast"
+            : "Stream connection failed",
+        detail: message,
+      });
+      toast.error(
+        stage === "engine"
+          ? "The audio engine failed to start"
+          : "Could not start the encoder",
+        { description: message },
+      );
     }
   };
 
@@ -380,7 +446,7 @@ export function EncoderPanel() {
       durationMs: pre.elapsedMs,
       at: Date.now(),
     });
-    patchRuntime({ encoder: null, onAir: false });
+    patchRuntime({ encoder: null, onAir: false, lastError: null });
     void pushLog({
       kind: "session",
       title: `OFF AIR — ${form.name}`,
@@ -585,7 +651,7 @@ export function EncoderPanel() {
           </div>
 
           {/* transmission stats */}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
             {[
               { label: "Uptime", value: formatUptime(uptime) },
               {
@@ -599,6 +665,16 @@ export function EncoderPanel() {
                 sub: form.bitrateKbps ? "kbps" : undefined,
               },
               { label: "Sent", value: formatBytes(rt.stats.bytes) },
+              {
+                label: "Reconnects",
+                value: String(Math.max(0, rt.connects - 1)),
+                sub: rt.connects > 0 ? `attempt ${rt.connects}` : undefined,
+              },
+              {
+                label: "Format",
+                value: `${((engine.sampleRate || form.sampleRateKhz * 1000) / 1000).toFixed(1)} kHz`,
+                sub: form.channels,
+              },
             ].map((s) => (
               <div key={s.label} className="panel-well rounded-md px-2.5 py-2">
                 <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
@@ -641,11 +717,26 @@ export function EncoderPanel() {
             <StereoLevelMeter kind="out" height={72} />
           </div>
         </div>
-        <p className="mt-3 text-[10px] text-panel-mut">
-          {rt.onAir
-            ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
-            : "The encoder keeps running across tabs until you stop it."}
-        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          <OutPresence />
+          <p className="min-w-0 flex-1 truncate text-[10px] text-panel-mut">
+            {rt.onAir
+              ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
+              : "The encoder keeps running across tabs until you stop it."}
+          </p>
+        </div>
+        {rt.lastError && (
+          <p
+            className="mt-1.5 flex items-center gap-1.5 text-[10px] text-meter-hot"
+            title={rt.lastError.message}
+          >
+            <TriangleAlert className="size-3 shrink-0" />
+            <span className="min-w-0 truncate">
+              Last error {new Date(rt.lastError.at).toLocaleTimeString()} —{" "}
+              {rt.lastError.message}
+            </span>
+          </p>
+        )}
       </div>
 
       {/* ── TX codec: family → profile → bitrate ── */}

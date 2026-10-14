@@ -9,6 +9,8 @@ const KIND_STYLE: Record<string, string> = {
   metadata: "border-meter-ok/30 bg-meter-ok/10 text-meter-ok",
   config: "border-border/70 bg-muted text-foreground/70",
   preset: "border-chart-3/40 bg-chart-3/10 text-chart-3",
+  error: "border-destructive/40 bg-destructive/10 text-destructive",
+  warn: "border-amber-400/40 bg-amber-400/10 text-amber-300",
 };
 
 export function LogPanel() {
@@ -19,7 +21,9 @@ export function LogPanel() {
       <div>
         <h2 className="text-lg font-semibold tracking-tight">Broadcast log</h2>
         <p className="mt-0.5 text-sm text-muted-foreground">
-          Sessions, metadata pushes, configuration changes and preset activity.
+          Sessions, configuration changes, preset activity and connection
+          errors — stamped in your time zone. Entries are retained for 180
+          days; stopping a broadcast never clears this record.
         </p>
       </div>
 
