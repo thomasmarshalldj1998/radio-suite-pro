@@ -863,40 +863,6 @@ export function EncoderPanel() {
           the mount’s codec when no profile is selected.
         </p>
       </ModuleCard>
-      <div className="flex flex-wrap items-center gap-2 lg:col-span-12">
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
-          onClick={() => void retryAll()}
-          disabled={retrying}
-        >
-          <RotateCw className="size-3.5" />
-          {retrying ? "Retrying…" : "Retry all"}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
-          onClick={() => void disconnect()}
-        >
-          <Square className="size-3.5" />
-          Stop all
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 cursor-pointer text-[11px] tracking-wide uppercase"
-          onClick={exportConfig}
-        >
-          <Download className="size-3.5" />
-          Export config
-        </Button>
-        <span className="ml-auto hidden text-[10px] text-muted-foreground sm:inline">
-          {slots.filter(isConfigured).length}/{OUTPUT_COUNT} outputs configured
-          {rt.onAir ? ` · broadcasting output ${liveSlot + 1}` : ""}
-        </span>
-      </div>
 
       {/* ── mount configuration ── */}
       <ModuleCard
