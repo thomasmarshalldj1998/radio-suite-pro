@@ -1,6 +1,7 @@
 import { BandGrBar, StereoLevelMeter, GainReductionMeter } from "@/components/console/Meters";
 import { Fader } from "@/components/console/Fader";
 import { Knob } from "@/components/console/Knob";
+import { SpectrumCanvas } from "@/components/console/Spectrum";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -196,9 +197,14 @@ function SliderRow({
 export function ProcessingTab({
   params,
   setParams,
+  compare,
+  setCompare,
 }: {
   params: ProcessorParams;
   setParams: React.Dispatch<React.SetStateAction<ProcessorParams>>;
+  /** A/B: true = monitoring the unprocessed source (chain bypassed). */
+  compare: boolean;
+  setCompare: (v: boolean) => void;
 }) {
   const engine = getEngine();
   const snap = useMeterSnapshot();
@@ -237,6 +243,66 @@ export function ProcessingTab({
         ))}
         <span aria-hidden>▶</span>
         <span className="text-panel-fg">Out</span>
+        <span className="ml-auto flex items-center gap-2 pl-3">
+          {compare && (
+            <span className="rounded border border-amber-led/45 bg-amber-led/10 px-2 py-1 text-[8px] font-bold tracking-[0.16em] text-amber-led uppercase">
+              Source · chain bypassed · guard armed
+            </span>
+          )}
+          <Seg
+            ariaLabel="Processed versus source compare"
+            value={compare ? "source" : "processed"}
+            options={[
+              { value: "processed", label: "Processed" },
+              { value: "source", label: "Source" },
+            ]}
+            onChange={(v) => setCompare(v === "source")}
+          />
+        </span>
+      </div>
+
+      {/* ── composite response analyzer ── */}
+      <div className="panel rounded-lg p-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+            <h2 className="text-[11px] font-semibold tracking-[0.12em] text-foreground/90 uppercase">
+              Composite response
+            </h2>
+            <p className="text-[9px] text-muted-foreground">
+              HPF + 6-band EQ curve · LR4 crossover map · live spectrum
+            </p>
+          </div>
+          <div className="flex items-center gap-3 text-[9px] text-panel-mut">
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-4 rounded bg-[#60a5fa]" />
+              EQ response
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-0 border-l border-dashed border-[#4a90e2]" />
+              Crossovers
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-2.5 w-4 rounded-sm bg-[#ef5b2b]/60" />
+              Spectrum
+            </span>
+          </div>
+        </div>
+        <SpectrumCanvas
+          mode="live"
+          height={210}
+          eq={params.eq}
+          hpf={params.hpf}
+          splits={params.multiband.splitsHz}
+        />
+        <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+          The blue trace is the static HPF + EQ response in dB (±15 scale);
+          dashed verticals are the{" "}
+          <span className="text-readout text-foreground/80">
+            {params.multiband.on ? "active" : "configured"}
+          </span>{" "}
+          multiband crossover points. Dynamic-EQ and compression are
+          level-dependent and aren't drawn.
+        </p>
       </div>
 
       {/* ── the chain ── */}

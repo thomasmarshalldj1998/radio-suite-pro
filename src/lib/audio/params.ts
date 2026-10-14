@@ -1215,7 +1215,146 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
   },
 ];
 
-/* ── helpers ────────────────────────────────────────────────────────────── */
+/* ── EQ response & A/B compare utilities ───────────────────────────────── */
+
+/** Magnitude (dB) of a normalized biquad at digital frequency w. */
+function biquadMagnitudeDb(
+  b0: number,
+  b1: number,
+  b2: number,
+  a0: number,
+  a1: number,
+  a2: number,
+  w: number,
+): number {
+  const c1 = Math.cos(w);
+  const s1 = Math.sin(w);
+  const c2 = Math.cos(2 * w);
+  const s2 = Math.sin(2 * w);
+  const nr = b0 + b1 * c1 + b2 * c2;
+  const ni = -(b1 * s1 + b2 * s2);
+  const dr = a0 + a1 * c1 + a2 * c2;
+  const di = -(a1 * s1 + a2 * s2);
+  const num = nr * nr + ni * ni;
+  const den = dr * dr + di * di;
+  return 10 * Math.log10(Math.max(num / Math.max(den, 1e-12), 1e-12));
+}
+
+/**
+ * RBJ cookbook magnitude response (dB) for one EQ/filter stage — mirrors
+ * the Web Audio BiquadFilterNodes the engine uses, so the analyzer's
+ * response curve matches what the chain actually does.
+ */
+function stageResponseDb(
+  type: "peaking" | "lowshelf" | "highshelf" | "highpass",
+  freqHz: number,
+  gainDb: number,
+  q: number,
+  f: number,
+  fs: number,
+): number {
+  const w0 = (2 * Math.PI * freqHz) / fs;
+  const cw = Math.cos(w0);
+  const sw = Math.sin(w0);
+  const w = (2 * Math.PI * f) / fs;
+  if (type === "highpass") {
+    const alpha = sw / (2 * q);
+    const a0 = 1 + alpha;
+    return biquadMagnitudeDb(
+      (1 + cw) / 2,
+      -(1 + cw),
+      (1 + cw) / 2,
+      a0,
+      -2 * cw,
+      1 - alpha,
+      w,
+    );
+  }
+  const A = Math.pow(10, gainDb / 40);
+  if (type === "peaking") {
+    const alpha = sw / (2 * q);
+    const a0 = 1 + alpha / A;
+    return biquadMagnitudeDb(
+      1 + alpha * A,
+      -2 * cw,
+      1 - alpha * A,
+      a0,
+      -2 * cw,
+      1 - alpha / A,
+      w,
+    );
+  }
+  // shelving (RBJ: S = slope, we use the band's Q as S — display accuracy)
+  const alpha =
+    (sw / 2) * Math.sqrt(Math.max(0, (A + 1 / A) * (1 / q - 1) + 2));
+  const twoRootA = 2 * Math.sqrt(A);
+  if (type === "lowshelf") {
+    const a0 = A + 1 + (A - 1) * cw + twoRootA * alpha;
+    return biquadMagnitudeDb(
+      A * (A + 1 - (A - 1) * cw + twoRootA * alpha),
+      2 * A * (A - 1 - (A + 1) * cw),
+      A * (A + 1 - (A - 1) * cw - twoRootA * alpha),
+      a0,
+      -2 * (A - 1 + (A + 1) * cw),
+      A + 1 + (A - 1) * cw - twoRootA * alpha,
+      w,
+    );
+  }
+  const a0 = A + 1 - (A - 1) * cw + twoRootA * alpha;
+  return biquadMagnitudeDb(
+    A * (A + 1 + (A - 1) * cw + twoRootA * alpha),
+    -2 * A * (A - 1 + (A + 1) * cw),
+    A * (A + 1 + (A - 1) * cw - twoRootA * alpha),
+    a0,
+    2 * (A - 1 - (A + 1) * cw),
+    A + 1 - (A - 1) * cw - twoRootA * alpha,
+    w,
+  );
+}
+
+/**
+ * Composite static response of the input filter + 6-band EQ (dB) at `f`.
+ * Display-only: dynamic-EQ and compression stages are level-dependent and
+ * deliberately not drawn.
+ */
+export function chainResponseDb(
+  p: Pick<ProcessorParams, "eq" | "hpf">,
+  f: number,
+  fs = 48000,
+): number {
+  let db = 0;
+  if (p.hpf.on) {
+    db += stageResponseDb("highpass", p.hpf.freqHz, 0, 0.707, f, fs);
+  }
+  if (p.eq.on) {
+    for (const band of p.eq.bands) {
+      db += stageResponseDb(band.type, band.freq, band.gainDb, band.q, f, fs);
+    }
+  }
+  return db;
+}
+
+/**
+ * SOURCE — the monitor feed with the processing chain bypassed for instant
+ * A/B comparison. Trim, limiter and the 4× ceiling guard stay in circuit
+ * (hot sources can't blast the monitor path), phase rotation has no engine
+ * bypass and is left untouched.
+ */
+export function sourceParams(p: ProcessorParams): ProcessorParams {
+  const src = cloneParams(p);
+  src.hpf = { ...src.hpf, on: false };
+  src.gate = { ...src.gate, on: false };
+  src.eq = { ...src.eq, on: false };
+  src.deq = { ...src.deq, on: false };
+  src.multiband = { ...src.multiband, on: false };
+  src.agc = { ...src.agc, on: false };
+  src.rider = { ...src.rider, on: false };
+  src.exciter = { ...src.exciter, on: false };
+  src.stereo = { ...src.stereo, width: 1 };
+  return src;
+}
+
+/* ── helpers ──────────────────────────────────────────────────────── */
 
 export function dbToGain(db: number): number {
   return Math.pow(10, db / 20);

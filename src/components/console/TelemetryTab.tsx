@@ -1,6 +1,14 @@
 import { LogPanel } from "@/components/console/LogPanel";
+import { LoudnessHistory } from "@/components/console/LoudnessHistory";
 import { CorrelationMeter, LoudnessMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
+import { Button } from "@/components/ui/button";
+import {
+  clearAlarms,
+  getAlarms,
+  subscribeAlarms,
+  type AlarmKind,
+} from "@/lib/audio/alarms";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
 import { formatBytes, formatUptime } from "@/lib/audio/encoder";
 import {
@@ -12,7 +20,7 @@ import { LUFS_TARGET, TRUE_PEAK_TARGET } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
   const [snap, setSnap] = useState<MeterSnapshot | null>(null);
@@ -84,6 +92,93 @@ function GrCell({ index, value }: { index: number; value: number }) {
         −{value.toFixed(2)}
       </span>
     </div>
+  );
+}
+
+const ALARM_STYLE: Record<AlarmKind, { led: string; chip: string }> = {
+  peak: {
+    led: "led-hot",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
+  clip: {
+    led: "led-hot",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
+  loudness: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+  correlation: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+};
+
+/* ── automatic tolerance alarms ────────────────────────────── */
+
+function AlarmHistory() {
+  const events = useSyncExternalStore(subscribeAlarms, getAlarms);
+  return (
+    <ModuleCard
+      className="xl:col-span-12"
+      title="Alarm history"
+      subtitle="Automatic tolerance watch · true peak · clipping · loudness drift · phase"
+      right={
+        events.length > 0 ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 cursor-pointer text-[10px]"
+            onClick={clearAlarms}
+          >
+            Clear
+          </Button>
+        ) : (
+          <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <span className="led led-on size-1.5" />
+            quiet
+          </span>
+        )
+      }
+    >
+      {events.length === 0 ? (
+        <div className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-muted/40 px-3 py-3">
+          <span className="led led-on size-1.5 shrink-0" />
+          <p className="text-[11px] text-muted-foreground">
+            No alarms this session — the chain is inside its peak, loudness
+            and phase tolerances.
+          </p>
+        </div>
+      ) : (
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {events.slice(0, 8).map((e) => {
+            const st = ALARM_STYLE[e.kind];
+            return (
+              <li
+                key={e.id}
+                className={cn("rounded-md border px-2.5 py-2", st.chip)}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn("led size-1.5 shrink-0", st.led)}
+                    aria-hidden
+                  />
+                  <span className="truncate text-[11px] font-semibold">
+                    {e.title}
+                  </span>
+                  <span className="text-readout ml-auto shrink-0 text-[9px] opacity-70">
+                    {new Date(e.at).toLocaleTimeString()}
+                  </span>
+                </div>
+                <p className="mt-0.5 truncate pl-4 text-[10px] opacity-80">
+                  {e.detail}
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </ModuleCard>
   );
 }
 
@@ -200,6 +295,14 @@ export function TelemetryTab() {
 
         <div className="mt-3">
           <LoudnessMeter target={LUFS_TARGET} />
+        </div>
+
+        <div className="mt-3">
+          <p className="mb-1 flex items-center justify-between text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
+            <span>Short-term loudness history</span>
+            <span className="text-readout">15 min window · 1 Hz</span>
+          </p>
+          <LoudnessHistory minutes={15} />
         </div>
 
         <div className="mt-3 grid gap-2 sm:grid-cols-3">
@@ -356,6 +459,9 @@ export function TelemetryTab() {
           {formatBytes(rt.stats.bytes)} sent this session
         </p>
       </ModuleCard>
+
+      {/* ── automatic alarms ── */}
+      <AlarmHistory />
 
       {/* ── system health ── */}
       <ModuleCard

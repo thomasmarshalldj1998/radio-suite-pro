@@ -1,4 +1,5 @@
 import { getEngine } from "@/lib/audio/engine";
+import { chainResponseDb, type EqBand, type MultibandSplits } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef } from "react";
 
@@ -27,6 +28,12 @@ export interface SpectrumCanvasProps {
   mode: "live" | "synthetic";
   height?: number;
   className?: string;
+  /** Draw the static EQ response curve (+0 dB axis) over the spectrum. */
+  eq?: { on: boolean; bands: EqBand[] };
+  /** Input high-pass marker — folded into the response curve. */
+  hpf?: { on: boolean; freqHz: number };
+  /** Multiband crossover splits — drawn as labelled verticals. */
+  splits?: MultibandSplits;
 }
 
 /**
@@ -34,7 +41,14 @@ export interface SpectrumCanvasProps {
  * spectrum (dim) under the processed output (illuminated) so operators can
  * see exactly what the chain is doing, with a slow peak-hold trace.
  */
-export function SpectrumCanvas({ mode, height = 190, className }: SpectrumCanvasProps) {
+export function SpectrumCanvas({
+  mode,
+  height = 190,
+  className,
+  eq,
+  hpf,
+  splits,
+}: SpectrumCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const peaksRef = useRef<Float32Array | null>(null);
   const synthRef = useRef<Float32Array | null>(null);
@@ -147,13 +161,107 @@ export function SpectrumCanvas({ mode, height = 190, className }: SpectrumCanvas
         if (x > 8 && x < w - 12) ctx.fillText(LABELS[f] ?? `${f}`, x, h - 4);
       }
 
+      /* ── overlay: EQ response curve + crossover markers ── */
+      const drawOverlay = () => {
+        const amp = h / 2 - 6;
+        const yOf = (db: number) =>
+          h / 2 - (Math.max(-16, Math.min(16, db)) / 15) * amp;
+        const mid = Math.round(h / 2) + 0.5;
+
+        ctx.save();
+        // 0 dB axis + scale
+        ctx.strokeStyle = "rgba(255,255,255,0.16)";
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, mid);
+        ctx.lineTo(w, mid);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = "8px 'JetBrains Mono', monospace";
+        ctx.textAlign = "left";
+        ctx.fillStyle = "rgba(255,255,255,0.3)";
+        ctx.fillText("+15", 4, 11);
+        ctx.fillText("0", 4, mid - 3);
+        ctx.fillText("−15", 4, h - 16);
+
+        // multiband crossover verticals
+        if (splits) {
+          ctx.textAlign = "center";
+          ctx.font = "8px 'JetBrains Mono', monospace";
+          for (const f of splits) {
+            const x = Math.round(logToX(f, w)) + 0.5;
+            ctx.strokeStyle = "rgba(74,144,226,0.32)";
+            ctx.setLineDash([3, 5]);
+            ctx.beginPath();
+            ctx.moveTo(x, 14);
+            ctx.lineTo(x, h - 12);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            if (x > 20 && x < w - 20) {
+              ctx.fillStyle = "rgba(74,144,226,0.8)";
+              ctx.fillText(f >= 1000 ? `${+(f / 1000).toFixed(1)}k` : `${f}`, x, 11);
+            }
+          }
+        }
+
+        // EQ + HPF response curve
+        if (eq) {
+          const n = eq.bands.length;
+          ctx.beginPath();
+          let px = 0;
+          for (; px <= w; px += 2) {
+            const db = chainResponseDb(
+              { eq, hpf: hpf ?? { on: false, freqHz: 80 } },
+              xToFreq(px, w),
+            );
+            const y = yOf(db);
+            if (px === 0) ctx.moveTo(px, y);
+            else ctx.lineTo(px, y);
+          }
+          if (px < w) {
+            const db = chainResponseDb(
+              { eq, hpf: hpf ?? { on: false, freqHz: 80 } },
+              xToFreq(w, w),
+            );
+            ctx.lineTo(w, yOf(db));
+          }
+          // tinted area between the curve and 0 dB
+          ctx.lineTo(w, mid);
+          ctx.lineTo(0, mid);
+          ctx.closePath();
+          ctx.fillStyle = "rgba(74,144,226,0.10)";
+          ctx.fill();
+          // the curve itself, with a soft glow
+          ctx.beginPath();
+          px = 0;
+          for (; px <= w; px += 2) {
+            const db = chainResponseDb(
+              { eq, hpf: hpf ?? { on: false, freqHz: 80 } },
+              xToFreq(px, w),
+            );
+            const y = yOf(db);
+            if (px === 0) ctx.moveTo(px, y);
+            else ctx.lineTo(px, y);
+          }
+          ctx.strokeStyle = n > 0 ? "rgba(96,165,250,0.95)" : "rgba(255,255,255,0.5)";
+          ctx.lineWidth = 1.5;
+          ctx.shadowColor = "rgba(74,144,226,0.65)";
+          ctx.shadowBlur = 6;
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+        }
+        ctx.restore();
+      };
+
       if (!live) {
-        // idle baseline
+        // idle baseline — the response curve still shows the static chain
         ctx.strokeStyle = "rgba(255,255,255,0.14)";
         ctx.beginPath();
         ctx.moveTo(0, h - 1);
         ctx.lineTo(w, h - 1);
         ctx.stroke();
+        drawOverlay();
         ctx.fillStyle = "rgba(255,255,255,0.28)";
         ctx.textAlign = "left";
         ctx.font = "10px 'JetBrains Mono', monospace";
@@ -202,12 +310,15 @@ export function SpectrumCanvas({ mode, height = 190, className }: SpectrumCanvas
       ctx.lineWidth = 1;
       ctx.stroke();
 
+      // response curve + crossovers sit above the spectrum fill
+      drawOverlay();
+
       raf = requestAnimationFrame(draw);
     };
 
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [mode]);
+  }, [mode, eq, hpf, splits]);
 
   return (
     <div className={cn("panel-well relative overflow-hidden rounded-lg", className)} style={{ height }}>

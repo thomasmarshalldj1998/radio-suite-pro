@@ -7,11 +7,14 @@ import { PresetPanel } from "@/components/console/PresetPanel";
 import { ProcessingTab } from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { Button } from "@/components/ui/button";
+import { api } from "@/convex/_generated/api";
+import { fireAlarm } from "@/lib/audio/alarms";
 import { getEngine } from "@/lib/audio/engine";
 import {
   DEFAULT_PARAMS,
   cloneParams,
   coerceParams,
+  sourceParams,
   type ProcessorParams,
 } from "@/lib/audio/params";
 import { getRuntime } from "@/lib/audio/runtime";
@@ -26,6 +29,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useMutation } from "convex/react";
 import { toast } from "sonner";
 
 const STORAGE_KEY = "signalpath.params.v2";
@@ -99,6 +103,9 @@ export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("input");
   const [powerBusy, setPowerBusy] = useState(false);
   const [activePreset, setActivePreset] = useState("Omnia · General");
+  /** A/B compare: true = monitoring the raw source (chain bypassed). */
+  const [compare, setCompare] = useState(false);
+  const pushLog = useMutation(api.stations.pushLog);
 
   // preset baseline (what REVERT restores) + engine power timestamp
   const baselineRef = useRef<{ params: ProcessorParams; name: string }>({
@@ -106,6 +113,8 @@ export default function Dashboard() {
     name: "Omnia · General",
   });
   const poweredAtRef = useRef(0);
+  /** sustained-condition timestamps for the automatic alarm feed */
+  const alarmCondRef = useRef({ driftSince: 0, corrSince: 0 });
   const paramsRef = useRef(params);
   useEffect(() => {
     paramsRef.current = params;
@@ -124,6 +133,53 @@ export default function Dashboard() {
       if (powered && poweredAtRef.current === 0) poweredAtRef.current = Date.now();
       if (!powered) poweredAtRef.current = 0;
       const p = paramsRef.current;
+
+      // ── automatic tolerance alarms (throttled per kind) ──
+      if (powered) {
+        const now = Date.now();
+        const cond = alarmCondRef.current;
+        if (snap.truePeak > p.limiter.ceilingDb + 0.1) {
+          fireAlarm(
+            "peak",
+            "True peak over ceiling",
+            `${snap.truePeak.toFixed(2)} dBTP exceeds the ${p.limiter.ceilingDb.toFixed(2)} dBTP ceiling`,
+          );
+        }
+        if (snap.clipOut) {
+          fireAlarm(
+            "clip",
+            "Output clipping",
+            "A composite-bus sample was clipped above the ceiling guard",
+          );
+        }
+        // loudness drift — only when there is real program material
+        const programPresent = snap.lufsS > -70 && snap.lufsIn > -55;
+        if (
+          programPresent &&
+          Math.abs(snap.lufsS - p.rider.targetLufs) > 4
+        ) {
+          if (cond.driftSince === 0) cond.driftSince = now;
+          else if (now - cond.driftSince > 15_000) {
+            fireAlarm(
+              "loudness",
+              "Loudness out of tolerance",
+              `${snap.lufsS.toFixed(1)} LUFS against the ${p.rider.targetLufs.toFixed(1)} LUFS target for 15 s`,
+            );
+          }
+        } else cond.driftSince = 0;
+        // mono-compatibility: sustained negative correlation
+        if (snap.correlation < 0) {
+          if (cond.corrSince === 0) cond.corrSince = now;
+          else if (now - cond.corrSince > 5_000) {
+            fireAlarm(
+              "correlation",
+              "Negative stereo correlation",
+              `Correlation ${snap.correlation.toFixed(2)} for 5 s — mono compatibility at risk`,
+            );
+          }
+        } else cond.corrSince = 0;
+      }
+
       setHud({
         powered,
         onAir: rt.onAir,
@@ -151,25 +207,39 @@ export default function Dashboard() {
     }
   }, [params]);
   useEffect(() => {
-    engine.apply(params);
-  }, [params, engine]);
+    engine.apply(compare ? sourceParams(params) : params);
+  }, [params, engine, compare]);
 
   const togglePower = useCallback(async () => {
     if (engine.powered) {
       engine.powerOff();
+      void pushLog({
+        kind: "session",
+        title: "Engine stopped",
+        detail: `Chain taken off monitor · preset “${activePreset}”`,
+      }).catch(() => {
+        /* log is best-effort */
+      });
       return;
     }
     setPowerBusy(true);
     try {
       await engine.powerOn();
-      engine.apply(params);
+      engine.apply(compare ? sourceParams(params) : params);
       poweredAtRef.current = Date.now();
+      void pushLog({
+        kind: "session",
+        title: "Engine started",
+        detail: `${engine.sampleRate ? `${(engine.sampleRate / 1000).toFixed(1)} kHz · ` : ""}preset “${activePreset}”`,
+      }).catch(() => {
+        /* log is best-effort */
+      });
     } catch {
       toast.error("The audio engine could not start in this browser.");
     } finally {
       setPowerBusy(false);
     }
-  }, [engine, params]);
+  }, [engine, params, compare, activePreset, pushLog]);
 
   const applyPreset = useCallback((p: ProcessorParams, name: string) => {
     const coerced = coerceParams(p);
@@ -371,6 +441,12 @@ export default function Dashboard() {
             <p className="mt-1 truncate text-[10px] text-rack-mut">
               {activePreset}
             </p>
+            <p className="text-readout mt-1 text-[9px] text-rack-mut/80">
+              {hud.powered && engine.sampleRate
+                ? `${(engine.sampleRate / 1000).toFixed(1)} kHz`
+                : "—"}{" "}
+              · 6-band LR4 · 4× guard
+            </p>
           </div>
         </nav>
 
@@ -397,7 +473,12 @@ export default function Dashboard() {
 
           {tab === "input" && <InputTab params={params} setParams={setParams} />}
           {tab === "processing" && (
-            <ProcessingTab params={params} setParams={setParams} />
+            <ProcessingTab
+              params={params}
+              setParams={setParams}
+              compare={compare}
+              setCompare={setCompare}
+            />
           )}
           {tab === "encoder" && <EncoderPanel />}
           {tab === "presets" && (
