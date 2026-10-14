@@ -238,13 +238,22 @@ function mb6(
 
 /**
  * Built-in presets — parameter snapshots modelled on the documented
- * characters of real Orban Optimod (8600/8700i) and Omnia (ONE/9) factory
- * presets. Neither manufacturer publishes numeric recipes, so each preset
- * follows its documented *behaviour*: Orban NEWS-TALK/SPORTS fast
- * multiband release, JAZZ quiet/mellow restraint, ROCK bright highs +
- * punchy lows + vocal presence, URBAN 18 dB/oct bass shape, IMPACT maximum
- * loudness, and Omnia's documented 180 Hz / 1 kHz / 3.3 kHz / 6.5 kHz
- * band structure with purist Classical handling.
+ * characters of real Orban Optimod (8500/8600/8700i) and Omnia (ONE/9)
+ * factory presets. Neither manufacturer publishes numeric recipes, so each
+ * preset follows its documented *behaviour* and factory-preset roster:
+ *
+ * - Orban's density rule: "Open" = slow multiband release, "Medium" =
+ *   medium-slow, "Dense" = medium-fast, with fast release reserved for
+ *   NEWS-TALK and SPORTS only.
+ * - Orban 8500/8600 factory names: NEWS-TALK, SPORTS, JAZZ, SMOOTH JAZZ,
+ *   ROCK-DENSE/OPEN/MEDIUM, URBAN-HEAVY/LIGHT, COUNTRY-MEDIUM, GOLD,
+ *   IMPACT, plus the LOUD-* texture family.
+ * - Documented characters: ROCK bright highs + punchy lows + vocal
+ *   presence, URBAN 18 dB/oct bass shape, JAZZ quiet/mellow restraint,
+ *   IMPACT maximum loudness.
+ * - Omnia: the documented 180 Hz / 1 kHz / 3.3 kHz / 6.5 kHz band
+ *   structure (OMNIA_SPLITS), purist Classical handling, and the ONE's
+ *   AC / CHR / urban-dance format extension set.
  */
 export const BUILTIN_PRESETS: BuiltinPreset[] = [
   {
@@ -752,6 +761,456 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       rider: { on: true, targetLufs: -24, maxRideDb: 5, gateDb: -60, speed: "slow" },
       stereo: { width: 1.02 },
       limiter: { on: true, ceilingDb: -1.5, attackMs: 3, releaseMs: 280 },
+    }),
+  },
+  {
+    id: "orban-rock-medium",
+    name: "Orban · Rock Medium",
+    description:
+      "Optimod ROCK-MEDIUM character: Orban's documented 'Medium' density — a medium-slow multiband release between Rock Open and Rock Dense, with the family's bright top, punchy low end and vocal presence lift.",
+    tags: ["Music", "Orban", "Medium"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 65 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 2.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.1, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2.5, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 2, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -22, maxCutDb: 5, attackMs: 12, releaseMs: 300 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 280 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -22, maxCutDb: 4, attackMs: 8, releaseMs: 240 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -21, maxCutDb: 5, attackMs: 6, releaseMs: 200 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -23, maxCutDb: 7, attackMs: 5, releaseMs: 170 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -15, ratio: 4, attackMs: 10, releaseMs: 300, makeupDb: 3 },
+        { thresholdDb: -17, ratio: 4, attackMs: 7, releaseMs: 280, makeupDb: 3 },
+        { thresholdDb: -19, ratio: 3.5, attackMs: 4, releaseMs: 250, makeupDb: 2 },
+        [130, 480, 1900, 4800, 9500],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -20,
+        ratio: 4,
+        kneeDb: 6,
+        attackMs: 10,
+        releaseMs: 350,
+        makeupDb: 6,
+      },
+      exciter: { on: true, mix: 3, freqHz: 5000 },
+      stereo: { width: 1.1 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 110 },
+    }),
+  },
+  {
+    id: "orban-smooth-jazz",
+    name: "Orban · Smooth Jazz",
+    description:
+      "Optimod SMOOTH JAZZ factory character: the softer sibling of JAZZ — warm midrange for sax and Rhodes, a silky eased-off top and very slow dynamics that leave quiet late-night beds intact.",
+    tags: ["Music", "Orban", "Silky"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 50 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 1.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -0.5, q: 0.9, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: -0.5, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: -1.5, q: 1.6, type: "peaking" },
+          { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -26, maxCutDb: 3, attackMs: 22, releaseMs: 460 },
+          { freqHz: 250, q: 1.0, thresholdDb: -25, maxCutDb: 3, attackMs: 20, releaseMs: 440 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -27, maxCutDb: 2, attackMs: 16, releaseMs: 400 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -24, maxCutDb: 3, attackMs: 14, releaseMs: 360 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -26, maxCutDb: 4, attackMs: 12, releaseMs: 320 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -12, ratio: 2, attackMs: 25, releaseMs: 600, makeupDb: 1 },
+        { thresholdDb: -14, ratio: 2, attackMs: 18, releaseMs: 550, makeupDb: 1 },
+        { thresholdDb: -16, ratio: 2.2, attackMs: 10, releaseMs: 500, makeupDb: 1 },
+        [120, 450, 1800, 4800, 9800],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -16,
+        ratio: 2,
+        kneeDb: 10,
+        attackMs: 30,
+        releaseMs: 700,
+        makeupDb: 3,
+      },
+      rider: { on: true, targetLufs: -25, maxRideDb: 5, gateDb: -58, speed: "slow" },
+      stereo: { width: 1.05 },
+      limiter: { on: true, ceilingDb: -1.5, attackMs: 2.5, releaseMs: 240 },
+    }),
+  },
+  {
+    id: "orban-country",
+    name: "Orban · Country",
+    description:
+      "Optimod COUNTRY-MEDIUM character: a warm, midrange-forward balance for acoustic guitars, fiddle and vocals — moderate shaped bass, gentle presence lift and a medium-slow release that keeps the band breathing.",
+    tags: ["Music", "Orban", "Warm"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 60 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 1.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -0.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 1, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2.5, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: -1, q: 1.8, type: "peaking" },
+          { freq: 12000, gainDb: 1, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -24, maxCutDb: 4, attackMs: 14, releaseMs: 340 },
+          { freqHz: 250, q: 1.0, thresholdDb: -22, maxCutDb: 5, attackMs: 12, releaseMs: 320 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -24, maxCutDb: 4, attackMs: 9, releaseMs: 260 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 5, attackMs: 7, releaseMs: 220 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 6, attackMs: 5, releaseMs: 180 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 3.5, attackMs: 12, releaseMs: 320, makeupDb: 2.5 },
+        { thresholdDb: -16, ratio: 3.5, attackMs: 8, releaseMs: 300, makeupDb: 2.5 },
+        { thresholdDb: -18, ratio: 3.5, attackMs: 5, releaseMs: 270, makeupDb: 2 },
+        [140, 500, 1900, 4700, 9600],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -18,
+        ratio: 3,
+        kneeDb: 7,
+        attackMs: 12,
+        releaseMs: 380,
+        makeupDb: 5,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 6, gateDb: -55, speed: "slow" },
+      stereo: { width: 1.06 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1.2, releaseMs: 130 },
+    }),
+  },
+  {
+    id: "orban-impact",
+    name: "Orban · Impact",
+    description:
+      "Optimod IMPACT character: the maximum-loudness factory preset — deep AGC threshold, dense medium-fast multiband and a hot −0.5 dB ceiling for formats that must win the dial. The 8600's IMPACT MX variant trades some of this heat for cleanliness.",
+    tags: ["Music", "Orban", "Loud"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 60 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 3.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -2, q: 1.1, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 3, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 3, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -18, maxCutDb: 8, attackMs: 7, releaseMs: 200 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 8, attackMs: 7, releaseMs: 190 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 6, releaseMs: 170 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -19, maxCutDb: 7, attackMs: 5, releaseMs: 150 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -20, maxCutDb: 10, attackMs: 4, releaseMs: 120 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -19, ratio: 6, attackMs: 4, releaseMs: 140, makeupDb: 4.5 },
+        { thresholdDb: -21, ratio: 5, attackMs: 2.5, releaseMs: 120, makeupDb: 4.5 },
+        { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 100, makeupDb: 3.5 },
+        [130, 470, 1900, 4800, 9500],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -26,
+        ratio: 7,
+        kneeDb: 2,
+        attackMs: 4,
+        releaseMs: 170,
+        makeupDb: 10,
+      },
+      rider: { on: true, targetLufs: -16, maxRideDb: 8, gateDb: -50, speed: "fast" },
+      exciter: { on: true, mix: 5, freqHz: 5500 },
+      stereo: { width: 1.15 },
+      limiter: { on: true, ceilingDb: -0.5, attackMs: 0.4, releaseMs: 70 },
+    }),
+  },
+  {
+    id: "orban-gold",
+    name: "Orban · Gold",
+    description:
+      "Optimod GOLD character: oldies and gold formats — a warm 18 dB/octave bass shape, midrange-forward balance that flatters vintage masters, gentle taming of bright reissues and relaxed dynamics that respect mono-era recordings.",
+    tags: ["Music", "Orban", "Nostalgia"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 55 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 2.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 1.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: -1.5, q: 1.6, type: "peaking" },
+          { freq: 12000, gainDb: -0.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -24, maxCutDb: 4, attackMs: 16, releaseMs: 380 },
+          { freqHz: 250, q: 1.0, thresholdDb: -23, maxCutDb: 5, attackMs: 14, releaseMs: 360 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -25, maxCutDb: 3, attackMs: 12, releaseMs: 320 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -24, maxCutDb: 4, attackMs: 10, releaseMs: 280 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -26, maxCutDb: 4, attackMs: 9, releaseMs: 260 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -13, ratio: 2.5, attackMs: 18, releaseMs: 450, makeupDb: 2 },
+        { thresholdDb: -15, ratio: 2.5, attackMs: 12, releaseMs: 420, makeupDb: 2 },
+        { thresholdDb: -17, ratio: 2.5, attackMs: 8, releaseMs: 380, makeupDb: 1.5 },
+        [130, 460, 1800, 4700, 9500],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -16,
+        ratio: 2.5,
+        kneeDb: 8,
+        attackMs: 20,
+        releaseMs: 550,
+        makeupDb: 4,
+      },
+      rider: { on: true, targetLufs: -23, maxRideDb: 6, gateDb: -56, speed: "slow" },
+      stereo: { width: 1.03 },
+      limiter: { on: true, ceilingDb: -1.2, attackMs: 1.8, releaseMs: 180 },
+    }),
+  },
+  {
+    id: "orban-urban-light",
+    name: "Orban · Urban Light",
+    description:
+      "Optimod URBAN-LIGHT factory character: the same documented 18 dB/octave bass-EQ shape as Urban Heavy, dialed back — groove without dominating small speakers, moderate density, wider headroom.",
+    tags: ["Music", "Orban", "Bass"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 50 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 2.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -0.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1.5, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 0.5, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 1.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -20, maxCutDb: 7, attackMs: 9, releaseMs: 240 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 6, attackMs: 8, releaseMs: 220 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -22, maxCutDb: 4, attackMs: 7, releaseMs: 200 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -22, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -23, maxCutDb: 7, attackMs: 5, releaseMs: 150 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -16, ratio: 4, attackMs: 7, releaseMs: 220, makeupDb: 3.5 },
+        { thresholdDb: -18, ratio: 4, attackMs: 5, releaseMs: 200, makeupDb: 3 },
+        { thresholdDb: -19, ratio: 3.5, attackMs: 2.5, releaseMs: 180, makeupDb: 2.5 },
+        [120, 450, 1800, 4700, 9500],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -20,
+        ratio: 4.5,
+        kneeDb: 4,
+        attackMs: 6,
+        releaseMs: 220,
+        makeupDb: 6,
+      },
+      stereo: { width: 1.12 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 90 },
+    }),
+  },
+  {
+    id: "omnia-ac",
+    name: "Omnia · AC",
+    description:
+      "Omnia ONE adult-contemporary lineage (part of the format extension set added to the ONE's preset bank): warm, smooth and vocal-forward — gentle density, silky top end and a slow rider that keeps ballads level against the talk breaks.",
+    tags: ["Music", "Omnia", "Smooth"],
+    family: "Omnia",
+    params: merge({
+      hpf: { on: true, freqHz: 60 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 1.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: -0.5, q: 1.6, type: "peaking" },
+          { freq: 12000, gainDb: 1.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -23, maxCutDb: 5, attackMs: 13, releaseMs: 320 },
+          { freqHz: 250, q: 1.0, thresholdDb: -22, maxCutDb: 5, attackMs: 11, releaseMs: 300 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -24, maxCutDb: 4, attackMs: 8, releaseMs: 240 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -22, maxCutDb: 4, attackMs: 7, releaseMs: 210 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 7, attackMs: 5, releaseMs: 170 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 3.5, attackMs: 12, releaseMs: 280, makeupDb: 2.5 },
+        { thresholdDb: -16, ratio: 3.5, attackMs: 8, releaseMs: 250, makeupDb: 2.5 },
+        { thresholdDb: -18, ratio: 3.5, attackMs: 5, releaseMs: 200, makeupDb: 2 },
+        [...OMNIA_SPLITS] as MultibandSplits,
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -18,
+        ratio: 3,
+        kneeDb: 7,
+        attackMs: 12,
+        releaseMs: 320,
+        makeupDb: 5,
+      },
+      rider: { on: true, targetLufs: -23, maxRideDb: 6, gateDb: -56, speed: "slow" },
+      stereo: { width: 1.08 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1.2, releaseMs: 140 },
+    }),
+  },
+  {
+    id: "omnia-chr",
+    name: "Omnia · CHR",
+    description:
+      "Omnia ONE CHR extension lineage: competitive top-40 density — bright, forward and loud, with a fast levelling AGC, tight de-essing and a −0.8 dBTP ceiling that stays legal while sounding hot.",
+    tags: ["Music", "Omnia", "Loud"],
+    family: "Omnia",
+    params: merge({
+      hpf: { on: true, freqHz: 65 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 3, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.1, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 3, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 1.5, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 3, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -19, maxCutDb: 7, attackMs: 8, releaseMs: 210 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 7, attackMs: 7, releaseMs: 200 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 6, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -19, maxCutDb: 7, attackMs: 5, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -20, maxCutDb: 10, attackMs: 4, releaseMs: 120 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -18, ratio: 5, attackMs: 5, releaseMs: 160, makeupDb: 4 },
+        { thresholdDb: -20, ratio: 4.5, attackMs: 3, releaseMs: 140, makeupDb: 4 },
+        { thresholdDb: -21, ratio: 4, attackMs: 1.5, releaseMs: 110, makeupDb: 3.5 },
+        [...OMNIA_SPLITS] as MultibandSplits,
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -24,
+        ratio: 5,
+        kneeDb: 3,
+        attackMs: 5,
+        releaseMs: 190,
+        makeupDb: 8,
+      },
+      rider: { on: true, targetLufs: -17, maxRideDb: 8, gateDb: -52, speed: "fast" },
+      exciter: { on: true, mix: 4, freqHz: 5500 },
+      stereo: { width: 1.14 },
+      limiter: { on: true, ceilingDb: -0.8, attackMs: 0.5, releaseMs: 80 },
+    }),
+  },
+  {
+    id: "omnia-dance",
+    name: "Omnia · Dance",
+    description:
+      "Omnia ONE urban/dance extension lineage: a deep bottom that is compressed fast enough to pump on the beat without flapping, a crisp open top and wide stereo for club and electronic formats.",
+    tags: ["Music", "Omnia", "Club"],
+    family: "Omnia",
+    params: merge({
+      hpf: { on: true, freqHz: 40 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 4.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1.5, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: 1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 2.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -17, maxCutDb: 9, attackMs: 6, releaseMs: 200 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 7, attackMs: 7, releaseMs: 210 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -21, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -21, maxCutDb: 5, attackMs: 5, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 130 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -17, ratio: 5, attackMs: 5, releaseMs: 180, makeupDb: 4 },
+        { thresholdDb: -19, ratio: 4.5, attackMs: 3.5, releaseMs: 150, makeupDb: 3.5 },
+        { thresholdDb: -20, ratio: 4, attackMs: 2, releaseMs: 120, makeupDb: 3 },
+        [...OMNIA_SPLITS] as MultibandSplits,
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -23,
+        ratio: 4.5,
+        kneeDb: 4,
+        attackMs: 6,
+        releaseMs: 240,
+        makeupDb: 7,
+      },
+      stereo: { width: 1.18 },
+      limiter: { on: true, ceilingDb: -0.8, attackMs: 0.5, releaseMs: 85 },
     }),
   },
 ];
