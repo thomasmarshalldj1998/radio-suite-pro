@@ -310,7 +310,7 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
         </div>
 
         {/* ── gain reduction ── */}
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               Lim GR

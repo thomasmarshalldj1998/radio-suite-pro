@@ -7,6 +7,10 @@ import { defineConfig } from "vite";
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), vlyPlugin(), tailwindcss()],
+  // The audio-encoder worker loads WASM codecs via dynamic import, so its
+  // bundle code-splits — which the default IIFE worker format cannot emit.
+  // ES-module workers are supported by every browser this app targets.
+  worker: { format: "es" },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
