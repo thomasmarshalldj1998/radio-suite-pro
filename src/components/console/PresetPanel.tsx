@@ -1,5 +1,9 @@
-import { api } from "@/convex/_generated/api";
-import type { Id } from "@/convex/_generated/dataModel";
+import {
+  usePresets,
+  usePushLog,
+  useRemovePreset,
+  useSavePreset,
+} from "@/lib/backend/hooks";
 import {
   BUILTIN_PRESETS,
   coerceParams,
@@ -11,7 +15,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { useMutation, useQuery } from "convex/react";
 import { format } from "date-fns";
 import { Bookmark, Copy, Download, RotateCcw, Trash2, X } from "lucide-react";
 import { useState } from "react";
@@ -52,10 +55,10 @@ export function PresetPanel({
   onApply: (p: ProcessorParams, name: string) => void;
   onRevert: () => void;
 }) {
-  const saved = useQuery(api.presets.list);
-  const savePreset = useMutation(api.presets.save);
-  const removePreset = useMutation(api.presets.remove);
-  const pushLog = useMutation(api.stations.pushLog);
+  const saved = usePresets();
+  const savePreset = useSavePreset();
+  const removePreset = useRemovePreset();
+  const pushLog = usePushLog();
 
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -160,9 +163,9 @@ export function PresetPanel({
     }
   };
 
-  const remove = async (id: Id<"presets">, presetName: string) => {
+  const remove = async (id: string, presetName: string) => {
     try {
-      await removePreset({ id });
+      await removePreset(id);
       toast.success(`Deleted “${presetName}”`);
     } catch (err) {
       toast.error("Could not delete the preset", {
@@ -175,7 +178,7 @@ export function PresetPanel({
   };
 
   const custom = (saved ?? []) as {
-    _id: Id<"presets">;
+    _id: string;
     name: string;
     description?: string;
     params: unknown;

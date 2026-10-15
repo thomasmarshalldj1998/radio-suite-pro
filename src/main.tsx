@@ -1,11 +1,23 @@
 import { Toaster } from "@/components/ui/sonner";
 import { RequireAuth } from "@/components/RequireAuth";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
+import {
+  CLOUD_ENABLED,
+  CloudBackendProvider,
+  IS_DESKTOP,
+  LocalBackendProvider,
+} from "@/lib/backend";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import { ConvexReactClient } from "convex/react";
 import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router";
 import "./index.css";
 
 // Lazy load route components for better code splitting
@@ -79,7 +91,12 @@ class RootErrorBoundary extends React.Component<
   }
 }
 
-const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
+/** Cloud client — only constructed when a Convex deployment backs this
+ * build. The standalone desktop package runs the local binding instead.
+ */
+const convex = CLOUD_ENABLED
+  ? new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string)
+  : null;
 
 
 
@@ -107,36 +124,69 @@ function RouteSyncer() {
 }
 
 
+/** App routes + toaster — mounted under whichever backend binding applies. */
+function AppTree() {
+  return (
+    <>
+      <BrowserRouter>
+        <RouteSyncer />
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route
+              path="/"
+              element={
+                IS_DESKTOP ? <Navigate to="/dashboard" replace /> : <Landing />
+              }
+            />
+            <Route
+              path="/auth"
+              element={<AuthPage redirectAfterAuth="/dashboard" />}
+            />
+            <Route
+              path="/dashboard"
+              element={
+                <RequireAuth>
+                  <Dashboard />
+                </RequireAuth>
+              }
+            />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+      <Toaster />
+    </>
+  );
+}
+
+/**
+ * Provider wiring: cloud binding needs the Convex client in the tree (auth
+ * + queries); local binding needs nothing but device storage. The desktop
+ * package always takes the local branch and never loads the Freebuff
+ * preview toolbar.
+ */
+function BoundTree({ children }: { children: React.ReactNode }) {
+  if (convex) {
+    return (
+      <ConvexAuthProvider client={convex}>
+        <CloudBackendProvider>{children}</CloudBackendProvider>
+      </ConvexAuthProvider>
+    );
+  }
+  return <LocalBackendProvider>{children}</LocalBackendProvider>;
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
-      <ToolbarErrorBoundary>
-        <VlyToolbar />
-      </ToolbarErrorBoundary>
-      <ConvexAuthProvider client={convex}>
-        <BrowserRouter>
-          <RouteSyncer />
-          <Suspense fallback={<RouteLoading />}>
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route
-                path="/auth"
-                element={<AuthPage redirectAfterAuth="/dashboard" />}
-              />
-              <Route
-                path="/dashboard"
-                element={
-                  <RequireAuth>
-                    <Dashboard />
-                  </RequireAuth>
-                }
-              />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Suspense>
-        </BrowserRouter>
-        <Toaster />
-      </ConvexAuthProvider>
+      {!IS_DESKTOP && (
+        <ToolbarErrorBoundary>
+          <VlyToolbar />
+        </ToolbarErrorBoundary>
+      )}
+      <BoundTree>
+        <AppTree />
+      </BoundTree>
     </RootErrorBoundary>
   </StrictMode>,
 );

@@ -1,6 +1,5 @@
-import { api } from "@/convex/_generated/api";
 import { cn } from "@/lib/utils";
-import { useQuery } from "convex/react";
+import { useStationLog } from "@/lib/backend/hooks";
 import { format } from "date-fns";
 import { ScrollText } from "lucide-react";
 
@@ -14,7 +13,7 @@ const KIND_STYLE: Record<string, string> = {
 };
 
 export function LogPanel() {
-  const entries = useQuery(api.stations.listLog, { limit: 100 });
+  const entries = useStationLog();
 
   return (
     <div className="space-y-4">

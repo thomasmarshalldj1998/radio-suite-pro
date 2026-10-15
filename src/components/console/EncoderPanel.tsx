@@ -1,7 +1,13 @@
 import { StereoLevelMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { FmPanel } from "@/components/console/FmPanel";
-import { api } from "@/convex/_generated/api";
+import {
+  useMount,
+  usePushLog,
+  useSaveMount,
+  useSetNowPlaying,
+  useStationLog,
+} from "@/lib/backend/hooks";
 import { getEngine } from "@/lib/audio/engine";
 import {
   codecById,
@@ -51,7 +57,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { useMutation, useQuery } from "convex/react";
 import {
   CheckCircle2,
   Download,
@@ -191,11 +196,11 @@ export function EncoderPanel({
   setParams: React.Dispatch<React.SetStateAction<ProcessorParams>>;
 }) {
   const engine = getEngine();
-  const mountDoc = useQuery(api.stations.getMount);
-  const logEntries = useQuery(api.stations.listLog, { limit: 5 });
-  const saveMount = useMutation(api.stations.saveMount);
-  const setNowPlaying = useMutation(api.stations.setNowPlaying);
-  const pushLog = useMutation(api.stations.pushLog);
+  const mountDoc = useMount();
+  const logEntries = useStationLog();
+  const saveMount = useSaveMount();
+  const setNowPlaying = useSetNowPlaying();
+  const pushLog = usePushLog();
 
   const { slots, liveSlot } = useOutputs();
   const [sel, setSel] = useState(0);
@@ -581,10 +586,7 @@ export function EncoderPanel({
       return;
     }
     try {
-      await setNowPlaying({
-        title: npTitle.trim(),
-        artist: npArtist.trim() || undefined,
-      });
+      await setNowPlaying(npTitle.trim(), npArtist.trim() || undefined);
       toast.success("Metadata sent to listeners");
     } catch {
       toast.error("Could not send metadata");
@@ -625,10 +627,7 @@ export function EncoderPanel({
     const entry = rotation[i];
     if (!entry) return;
     try {
-      await setNowPlaying({
-        title: entry.title,
-        artist: entry.artist || undefined,
-      });
+      await setNowPlaying(entry.title, entry.artist || undefined);
       toast.success(
         `Metadata sent — ${entry.artist ? `${entry.artist} · ` : ""}${entry.title}`,
       );

@@ -8,7 +8,10 @@ import { ProcessingTab } from "@/components/console/ProcessingTab";
 import { SignalFlow } from "@/components/console/SignalFlow";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { Button } from "@/components/ui/button";
-import { api } from "@/convex/_generated/api";
+import {
+  useConnectionState,
+  usePushLog,
+} from "@/lib/backend/hooks";
 import {
   fireAlarm,
   getAlarms,
@@ -44,7 +47,6 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { useConvexConnectionState, useMutation } from "convex/react";
 import { toast } from "sonner";
 
 const STORAGE_KEY = "signalpath.params.v2";
@@ -403,12 +405,12 @@ function StatusFooter({
             <span
               className={cn(
                 "led size-1.5",
-                conn === "connected" && "led-on",
+                (conn === "connected" || conn === "local") && "led-on",
                 conn === "connecting" && "led-warn",
               )}
               aria-hidden
             />
-            API {conn === "connected" ? "connected" : conn}
+            {conn === "local" ? "Local storage" : `API ${conn}`}
           </span>
           <span>Engine {PHASE_META[phase].label.toLowerCase()}</span>
           <span>
@@ -427,8 +429,8 @@ function StatusFooter({
  */
 export default function Dashboard() {
   const engine = getEngine();
-  const connState = useConvexConnectionState();
-  const pushLog = useMutation(api.stations.pushLog);
+  const connState = useConnectionState();
+  const pushLog = usePushLog();
   const [params, setParams] = useState<ProcessorParams>(() => {
     try {
       const raw =
@@ -1033,11 +1035,13 @@ export default function Dashboard() {
       <StatusFooter
         phase={phase}
         conn={
-          connState.isWebSocketConnected
+          connState === "connected"
             ? "connected"
-            : connState.hasEverConnected
+            : connState === "connecting"
               ? "reconnecting"
-              : "offline"
+              : connState === "local"
+                ? "local"
+                : "offline"
         }
       />
     </div>

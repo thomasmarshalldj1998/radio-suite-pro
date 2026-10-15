@@ -1,20 +1,9 @@
-import { api } from "@/convex/_generated/api";
-import { useAuthActions } from "@convex-dev/auth/react";
-import { useConvexAuth, useQuery } from "convex/react";
+/** Operator session hook — delegates to the pluggable backend, so the
+ * console works signed-in through Convex on the web build and as the local
+ * operator in the standalone desktop package.
+ */
+import { useSession } from "@/lib/backend/hooks";
 
 export function useAuth() {
-  const { isLoading: isAuthLoading, isAuthenticated } = useConvexAuth();
-  const user = useQuery(api.users.currentUser);
-  const { signIn, signOut } = useAuthActions();
-
-  // Derive isLoading directly from the dependencies instead of managing separate state
-  const isLoading = isAuthLoading || user === undefined;
-
-  return {
-    isLoading,
-    isAuthenticated,
-    user,
-    signIn,
-    signOut,
-  };
+  return useSession();
 }

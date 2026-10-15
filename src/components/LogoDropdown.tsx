@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import logo from "@/assets/logo.svg";
+import { CLOUD_ENABLED } from "@/lib/backend/context";
 import { useAuth } from "@/hooks/use-auth";
 import { Home, LogOut } from "lucide-react";
 import { useNavigate } from "react-router";
@@ -48,7 +49,7 @@ export function LogoDropdown() {
           <Home className="mr-2 h-4 w-4" />
           Landing Page
         </DropdownMenuItem>
-        {isAuthenticated && (
+        {CLOUD_ENABLED && isAuthenticated && (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem
