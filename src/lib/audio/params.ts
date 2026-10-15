@@ -2116,25 +2116,25 @@ export const DEFAULT_PRESETS: Preset[] = [
           }
           
           /** Format mm:ss for transport displays. */
-          export function formatTime(seconds: number): string {
+export function formatTime(seconds: number): string {
 export function formatTime(seconds?: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
+if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+const m = Math.floor(seconds / 60);
+const s = Math.floor(seconds % 60);
+return `${m}:${s.toString().padStart(2, "0")}`;
 }
           
 export function isNum(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
+return typeof v === "number" && Number.isFinite(v);
 }
           
 export function mergeDeep<T>(base: T, patch: unknown): T {
-  if (Array.isArray(base)) {
-    if (!Array.isArray(patch) || patch.length !== base.length) return base;
-    return base.map((b, i) =>
-      b && typeof b === "object" ? mergeDeep(b, patch[i]) : (patch[i] ?? b),
-    ) as unknown as T;
-  }
+if (Array.isArray(base)) {
+if (!Array.isArray(patch) || patch.length !== base.length) return base;
+return base.map((b, i) =>
+b && typeof b === "object" ? mergeDeep(b, patch[i]) : (patch[i] ?? b),
+) as unknown as T;
+}
   if (base && typeof base === "object") {
     const src = (patch ?? {}) as Record<string, unknown>;
     const out: Record<string, unknown> = {};
@@ -2145,18 +2145,18 @@ export function mergeDeep<T>(base: T, patch: unknown): T {
   }
   if (typeof base === "boolean") {
     return (typeof patch === "boolean" ? patch : base) as T;
-  }
-  if (isNum(base)) return (isNum(patch) ? patch : base) as T;
+  }  if (isNum(base)) return (isNum(patch) ? patch : base) as T;
   return (typeof patch === typeof base && patch !== undefined ? patch : base) as T;
 }
-          
-          /**
-          * Coerce arbitrary (possibly stale) saved params onto the current shape so
-          * old presets and localStorage snapshots always load safely — legacy 3-band
-          * multiband configs fall back to the 6-band defaults.
-          */
+/**
+ * Coerce arbitrary (possibly stale) saved params onto the current shape so
+ * old presets and localStorage snapshots always load safely — legacy 3-band
+ * multiband configs fall back to the 6-band defaults.
+ */
 export function coerceParams(saved: unknown): ProcessorParams {
   const base = structuredClone(DEFAULT_PARAMS);
   if (!saved || typeof saved !== "object") return base;
   return mergeDeep(base, saved);
 }
+
+
