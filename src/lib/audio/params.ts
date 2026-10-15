@@ -104,11 +104,7 @@ export interface FmParams {
 }
 
 export type MultibandSplits = [number, number, number, number, number];
-// Allow the multiband bands array to be typed either as a strict 6-tuple or
-// as an inferred array from helpers like mb6(). Runtime code coerces it back to
-// a 6-band matrix before the engine touches it.
 export type MultibandBands = [BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams];
-
 export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
 
 export interface ProcessorParams {
@@ -120,63 +116,165 @@ export interface ProcessorParams {
   gate: { on: boolean; thresholdDb: number; holdMs: number };
   eq: { on: boolean; bands: EqBand[] };
   deq: { on: boolean; bands: DeqBands };
-          multiband: mb6(
-            { thresholdDb: -14, ratio: 5, attackMs: 4, releaseMs: 90, makeupDb: 2.5 },
-            { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 80, makeupDb: 2.5 },
-            { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 70, makeupDb: 2 },
-            [150, 500, 1900, 4800, 10000],
-            ),
-      agc: {
-        on: true,
-        thresholdDb: -22,
-        ratio: 5,
-        kneeDb: 3,
-        attackMs: 3,
-        releaseMs: 120,
-        makeupDb: 6,
-        },
-        rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, gateDb: -50, speed: "fast" },
-        limiter: { on: true, ceilingDb: -1, attackMs: 0.5, releaseMs: 60 },
-        }),
-        },
-        {
-        id: "orban-sports",
-        name: "Orban · Sports",
-        description:
-        "Optimod SPORTS/NEWS-TALK lineage: fast multiband release keeps crowd surges and hot field mics in check while a presence lift keeps commentary intelligible over the din.",
-        tags: ["Speech", "Orban", "Fast"],
-        family: "Orban",
-        params: merge({
-        hpf: { on: true, freqHz: 100 },
-        eq: {
-        on: true,
-        bands: [
-        { freq: 60, gainDb: -3, q: 0.7, type: "lowshelf" },
-        { freq: 200, gainDb: -1.5, q: 1.0, type: "peaking" },
-        { freq: 700, gainDb: 1.5, q: 1.0, type: "peaking" },
-        { freq: 2500, gainDb: 4, q: 1.1, type: "peaking" },
-        { freq: 6000, gainDb: -2, q: 1.8, type: "peaking" },
-        { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
-        ],
-        },
-        deq: {
-        on: true,
-        bands: [
-        { freqHz: 80, q: 0.9, thresholdDb: -22, maxCutDb: 6, attackMs: 8, releaseMs: 200 },
-        { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 8, attackMs: 8, releaseMs: 200 },
-        { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 7, releaseMs: 180 },
-        { freqHz: 5000, q: 1.2, thresholdDb: -16, maxCutDb: 8, attackMs: 5, releaseMs: 150 },
-        { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 120 },
-        ],      },
-        multiband: mb6(
-          { thresholdDb: -16, ratio: 6, attackMs: 3, releaseMs: 100, makeupDb: 3 },
-          { thresholdDb: -16, ratio: 4, attackMs: 2, releaseMs: 100, makeupDb: 3 },
-          { thresholdDb: -18, ratio: 4, attackMs: 1.2, releaseMs: 90, makeupDb: 2 },
-          [140, 500, 1900, 4600, 9000],
-          ),
-        ),
+  multiband: MultibandBands;
+  agc: {
+    on: boolean;
+    thresholdDb: number;
+    ratio: number;
+    kneeDb: number;
+    attackMs: number;
+    releaseMs: number;
+    makeupDb: number;
+  };
+  rider: {
+    on: boolean;
+    targetLufs: number;
+    maxRideDb: number;
+    gateDb: number;
+    speed: "fast" | "slow";
+  };
+  limiter: {
+    on: boolean;
+    ceilingDb: number;
+    attackMs: number;
+    releaseMs: number;
+  };
+}
 
+export type MultibandSplits = [number, number, number, number, number];
+export type MultibandBands = [BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams];
+export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
+
+export const DEQ_OFF: DeqBands = [
+  { freqHz: 6500, thresholdDb: -28, ratio: 4, attackMs: 1, releaseMs: 40, makeupDb: 0, width: 0 },
+  { freqHz: 8000, thresholdDb: -30, ratio: 3.5, attackMs: 1, releaseMs: 35, makeupDb: 0, width: 0 },
+  { freqHz: 10000, thresholdDb: -32, ratio: 3, attackMs: 0.6, releaseMs: 30, makeupDb: 0, width: 0 },
+  { freqHz: 12000, thresholdDb: -34, ratio: 2.5, attackMs: 0.5, releaseMs: 25, makeupDb: 0, width: 0 },
+  { freqHz: 15000, thresholdDb: -36, ratio: 2, attackMs: 0.4, releaseMs: 22, makeupDb: 0, width: 0 },
+];
+
+const _multibandBase: MultibandBands = mb6(
+  { thresholdDb: -14, ratio: 5, attackMs: 4, releaseMs: 90, makeupDb: 2.5 },
+  { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 80, makeupDb: 2.5 },
+  { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 70, makeupDb: 2 },
+  [150, 500, 1900, 4800, 10000],
+);
+
+export const DEFAULT_PARAMS: ProcessorParams = {
+  inputGainDb: 0,
+  hpf: { on: true, freqHz: 80 },
+  phase: { mode: "auto", freqHz: 90 },
+  gate: { on: true, thresholdDb: -55, holdMs: 60 },
+  eq: { on: true, bands: [] },
+  deq: { on: false, bands: DEQ_OFF },
+  multiband: _multibandBase,
+  agc: {
+    on: true,
+    thresholdDb: -22,
+    ratio: 5,
+    kneeDb: 3,
+    attackMs: 3,
+    releaseMs: 120,
+    makeupDb: 6,
+  },
+  rider: {
+    on: true,
+    targetLufs: LUFS_TARGET,
+    maxRideDb: 10,
+    gateDb: -50,
+    speed: "fast" as const,
+  },
+  limiter: {
+    on: true,
+    ceilingDb: -1,
+    attackMs: 0.5,
+    releaseMs: 60,
+  },
+};
+
+export const DEQ_OFF: DeqBands = [
+  { freqHz: 6500, thresholdDb: -28, ratio: 4, attackMs: 1, releaseMs: 40, makeupDb: 0, width: 0 },
+  { freqHz: 8000, thresholdDb: -30, ratio: 3.5, attackMs: 1, releaseMs: 35, makeupDb: 0, width: 0 },
+  { freqHz: 10000, thresholdDb: -32, ratio: 3, attackMs: 0.6, releaseMs: 30, makeupDb: 0, width: 0 },
+  { freqHz: 12000, thresholdDb: -34, ratio: 2.5, attackMs: 0.5, releaseMs: 25, makeupDb: 0, width: 0 },
+  { freqHz: 15000, thresholdDb: -36, ratio: 2, attackMs: 0.4, releaseMs: 22, makeupDb: 0, width: 0 },
+];
+
+const _multibandBase: MultibandBands = mb6(
+  { thresholdDb: -14, ratio: 5, attackMs: 4, releaseMs: 90, makeupDb: 2.5 },
+  { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 80, makeupDb: 2.5 },
+  { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 70, makeupDb: 2 },
+  [150, 500, 1900, 4800, 10000],
+);
+
+export const DEFAULT_PARAMS: ProcessorParams = {
+  inputGainDb: 0,
+  hpf: { on: true, freqHz: 80 },
+  phase: { mode: "auto", freqHz: 90 },
+  gate: { on: true, thresholdDb: -55, holdMs: 60 },
+  eq: { on: true, bands: [] },
+  deq: { on: false, bands: DEQ_OFF },
+  multiband: _multibandBase,
+  agc: {
+    on: true,
+    thresholdDb: -22,
+    ratio: 5,
+    kneeDb: 3,
+    attackMs: 3,
+    releaseMs: 120,
+    makeupDb: 6,
+  },
+  rider: {
+    on: true,
+    targetLufs: LUFS_TARGET,
+    maxRideDb: 10,
+    gateDb: -50,
+    speed: "fast" as const,
+  },
+  limiter: {
+    on: true,
+    ceilingDb: -1,
+    attackMs: 0.5,
+    releaseMs: 60,
+  },
+};
+
+export const DEFAULT_PRESETS: Preset[] = [
+  {
+    id: "orban-sports",
+    name: "Orban · Sports",
+    description:
+      "Optimod SPORTS/NEWS-TALK lineage: fast multiband release keeps crowd surges and hot field mics in check while a presence lift keeps commentary intelligible over the din.",
+    tags: ["Speech", "Orban", "Fast"],
+    family: "Orban",
+    params: merge({
+      hpf: { on: true, freqHz: 100 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: -3, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 1.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 4, q: 1.1, type: "peaking" },
+          { freq: 6000, gainDb: -2, q: 1.8, type: "peaking" },
+          { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
+        ],
       },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -22, maxCutDb: 6, attackMs: 8, releaseMs: 200 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 8, attackMs: 8, releaseMs: 200 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 7, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -16, maxCutDb: 8, attackMs: 5, releaseMs: 150 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 120 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -16, ratio: 6, attackMs: 3, releaseMs: 100, makeupDb: 3 },
+        { thresholdDb: -16, ratio: 4, attackMs: 2, releaseMs: 100, makeupDb: 3 },
+        { thresholdDb: -18, ratio: 4, attackMs: 1.2, releaseMs: 90, makeupDb: 2 },
+        [140, 500, 1900, 4600, 9000],      ),
       agc: {
         on: true,
         thresholdDb: -20,
@@ -186,8 +284,19 @@ export interface ProcessorParams {
         releaseMs: 120,
         makeupDb: 6,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 12, gateDb: -48, speed: "fast" },
-      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 50 },
+      rider: {
+        on: true,
+        targetLufs: LUFS_TARGET,
+        maxRideDb: 12,
+        gateDb: -48,
+        speed: "fast" as const,
+      },
+      limiter: {
+        on: true,
+        ceilingDb: -1,
+        attackMs: 0.8,
+        releaseMs: 50,
+      },
     }),
   },
   {
@@ -219,24 +328,35 @@ export interface ProcessorParams {
           { freqHz: 5000, q: 1.2, thresholdDb: -22, maxCutDb: 3, attackMs: 12, releaseMs: 320 },
           { freqHz: 10000, q: 1.1, thresholdDb: -26, maxCutDb: 3, attackMs: 10, releaseMs: 300 },
         ],
+      },
       multiband: mb6(
         { thresholdDb: -12, ratio: 2, attackMs: 20, releaseMs: 550, makeupDb: 1 },
         { thresholdDb: -14, ratio: 2, attackMs: 15, releaseMs: 500, makeupDb: 1 },
         { thresholdDb: -16, ratio: 2.5, attackMs: 8, releaseMs: 450, makeupDb: 1 },
-        [120, 450, 1800, 4800, 9800],
-        ),
-        agc: {
-          on: true,
-          thresholdDb: -18,
-          ratio: 2,
-          kneeDb: 10,
-          attackMs: 25,
-          releaseMs: 650,
-          makeupDb: 3,
-        },
-      rider: { on: true, targetLufs: -26, maxRideDb: 6, gateDb: -58, speed: "slow" },
+        [120, 450, 1800, 4800, 9800],      ),
+      agc: {
+        on: true,
+        thresholdDb: -18,
+        ratio: 2,
+        kneeDb: 10,
+        attackMs: 25,
+        releaseMs: 650,
+        makeupDb: 3,
+      },
+      rider: {
+        on: true,
+        targetLufs: -26,
+        maxRideDb: 6,
+        gateDb: -58,
+        speed: "slow" as const,
+      },
       stereo: { width: 1.05 },
-      limiter: { on: true, ceilingDb: -1.5, attackMs: 2, releaseMs: 220 },
+      limiter: {
+        on: true,
+        ceilingDb: -1.5,
+        attackMs: 2,
+        releaseMs: 220,
+      },
     }),
   },
   {
@@ -268,21 +388,21 @@ export interface ProcessorParams {
           { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 6, attackMs: 5, releaseMs: 160 },
           { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
         ],
+      },
       multiband: mb6(
         { thresholdDb: -18, ratio: 6, attackMs: 5, releaseMs: 150, makeupDb: 4 },
         { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 130, makeupDb: 4 },
         { thresholdDb: -20, ratio: 4, attackMs: 1.5, releaseMs: 110, makeupDb: 3 },
-        [130, 480, 1900, 4800, 9500],
-        ),
-        agc: {
-          on: true,
-          thresholdDb: -24,
-          ratio: 6,
-          kneeDb: 3,
-          attackMs: 5,
-          releaseMs: 200,
-          makeupDb: 8,
-        },
+        [130, 480, 1900, 4800, 9500],      ),
+      agc: {
+        on: true,
+        thresholdDb: -24,
+        ratio: 6,
+        kneeDb: 3,
+        attackMs: 5,
+        releaseMs: 200,
+        makeupDb: 8,
+      },
       exciter: { on: true, mix: 4, freqHz: 5000 },
       stereo: { width: 1.12 },
       limiter: { on: true, ceilingDb: -0.8, attackMs: 0.8, releaseMs: 60 },
@@ -319,25 +439,30 @@ export interface ProcessorParams {
           { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 130 },
         ],
       },
-        multiband: mb6(
-          { thresholdDb: -18, ratio: 6, attackMs: 4, releaseMs: 160, makeupDb: 4.5 },
-          { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 140, makeupDb: 4 },
-          { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 120, makeupDb: 3 },
-          [120, 450, 1800, 4700, 9500],
-          ),
-          agc: {
-          on: true,
-          thresholdDb: -24,
-          ratio: 6,
-          kneeDb: 2.5,
-          attackMs: 4,
-          releaseMs: 180,
-          makeupDb: 8,
-          },
-          stereo: { width: 1.15 },
-          limiter: { on: true, ceilingDb: -0.8, attackMs: 0.6, releaseMs: 70 },
-          }),
-          },
+      multiband: mb6(
+        { thresholdDb: -18, ratio: 6, attackMs: 4, releaseMs: 160, makeupDb: 4.5 },
+        { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 140, makeupDb: 4 },
+        { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 120, makeupDb: 3 },
+        [120, 450, 1800, 4700, 9500],
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -24,
+        ratio: 6,
+        kneeDb: 2.5,
+        attackMs: 4,
+        releaseMs: 180,
+        makeupDb: 8,
+      },
+      stereo: { width: 1.15 },
+      limiter: {
+        on: true,
+        ceilingDb: -0.8,
+        attackMs: 0.6,
+        releaseMs: 70,
+      },
+    }),
+  },
           {
           id: "omnia-vox",
           name: "Omnia · Vox",
@@ -373,8 +498,8 @@ export interface ProcessorParams {
             { thresholdDb: -16, ratio: 3.5, attackMs: 4, releaseMs: 200, makeupDb: 2 },
             { thresholdDb: -18, ratio: 4, attackMs: 2, releaseMs: 150, makeupDb: 1.5 },
             [180, 1000, 3300, 6500, 12000],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -18,
           ratio: 3.5,
@@ -417,30 +542,28 @@ export interface ProcessorParams {
           { freqHz: 1600, q: 1.1, thresholdDb: -24, maxCutDb: 3, attackMs: 12, releaseMs: 340 },
           { freqHz: 5000, q: 1.2, thresholdDb: -22, maxCutDb: 4, attackMs: 10, releaseMs: 300 },
           { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 5, attackMs: 8, releaseMs: 260 },
-          ],
-          },
+          ],          },
           multiband: mb6(
             { thresholdDb: -14, ratio: 3, attackMs: 15, releaseMs: 420, makeupDb: 2 },
             { thresholdDb: -16, ratio: 3, attackMs: 10, releaseMs: 400, makeupDb: 2 },
             { thresholdDb: -18, ratio: 3, attackMs: 6, releaseMs: 350, makeupDb: 1.5 },
-            [130, 480, 1900, 4800, 9500],
-            ),
-          agc: {
-          on: true,
-          thresholdDb: -18,
-          ratio: 2.5,
-          kneeDb: 9,
-          attackMs: 15,
-          releaseMs: 500,
-          makeupDb: 4,
+            [130, 480, 1900, 4800, 9500],      ),
+      agc: {
+            on: true,
+            thresholdDb: -18,
+            ratio: 2.5,
+            kneeDb: 9,
+            attackMs: 15,
+            releaseMs: 500,
+            makeupDb: 4,
           },
           exciter: { on: true, mix: 3, freqHz: 5000 },
           stereo: { width: 1.15 },
           limiter: { on: true, ceilingDb: -1, attackMs: 1.2, releaseMs: 150 },
-          }),
-          },
-          {
-          id: "omnia-big-bottom",
+        }),
+      },
+      {
+        id: "omnia-big-bottom",
           name: "Omnia · Big Bottom",
           description:
           "The famous Omnia bass preset: a weighty low shelf tamed by tight dynamic-EQ control so the bottom stays huge without flapping — club, dance and modern pop.",
@@ -468,14 +591,14 @@ export interface ProcessorParams {
           { freqHz: 5000, q: 1.2, thresholdDb: -22, maxCutDb: 5, attackMs: 5, releaseMs: 160 },
           { freqHz: 10000, q: 1.1, thresholdDb: -24, maxCutDb: 6, attackMs: 4, releaseMs: 130 },
           ],
-          },
-          multiband: mb6(
+          },          multiband: mb6(
             { thresholdDb: -16, ratio: 5, attackMs: 6, releaseMs: 200, makeupDb: 3.5 },
             { thresholdDb: -18, ratio: 4, attackMs: 4, releaseMs: 180, makeupDb: 3 },
-            { thresholdDb: -20, ratio: 3.5, attackMs: 2, releaseMs: 150, makeupDb: 2.5 },
-            [180, 1000, 3300, 6500, 12000],
-            ),
-          agc: {
+
+              { thresholdDb: -20, ratio: 3.5, attackMs: 2, releaseMs: 150, makeupDb: 2.5 },
+              [180, 1000, 3300, 6500, 12000],
+        ),
+      agc: {
           on: true,
           thresholdDb: -22,
           ratio: 4,
@@ -522,16 +645,15 @@ export interface ProcessorParams {
             { thresholdDb: -20, ratio: 6, attackMs: 4, releaseMs: 140, makeupDb: 5 },
             { thresholdDb: -22, ratio: 5, attackMs: 2.5, releaseMs: 120, makeupDb: 5 },
             { thresholdDb: -22, ratio: 4.5, attackMs: 1.5, releaseMs: 100, makeupDb: 4 },
-            [180, 1000, 3300, 6500, 12000],
-            ),
-          agc: {
-          on: true,
-          thresholdDb: -26,
-          ratio: 7,
-          kneeDb: 2,
-          attackMs: 3,
-          releaseMs: 150,
-          makeupDb: 10,
+            [180, 1000, 3300, 6500, 12000],      ),
+      agc: {
+            on: true,
+            thresholdDb: -26,
+            ratio: 7,
+            kneeDb: 2,
+            attackMs: 3,
+            releaseMs: 150,
+            makeupDb: 10,
           },
           exciter: { on: true, mix: 5, freqHz: 6000 },
           stereo: { width: 1.2 },
@@ -573,8 +695,8 @@ export interface ProcessorParams {
             { thresholdDb: -14, ratio: 1.8, attackMs: 25, releaseMs: 650, makeupDb: 1 },
             { thresholdDb: -16, ratio: 2, attackMs: 15, releaseMs: 600, makeupDb: 1 },
             [180, 1000, 3300, 6500, 12000],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -16,
           ratio: 1.8,
@@ -623,8 +745,8 @@ export interface ProcessorParams {
             { thresholdDb: -17, ratio: 4, attackMs: 7, releaseMs: 280, makeupDb: 3 },
             { thresholdDb: -19, ratio: 3.5, attackMs: 4, releaseMs: 250, makeupDb: 2 },
             [130, 480, 1900, 4800, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -20,
           ratio: 4,
@@ -673,8 +795,8 @@ export interface ProcessorParams {
             { thresholdDb: -14, ratio: 2, attackMs: 18, releaseMs: 550, makeupDb: 1 },
             { thresholdDb: -16, ratio: 2.2, attackMs: 10, releaseMs: 500, makeupDb: 1 },
             [120, 450, 1800, 4800, 9800],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -16,
           ratio: 2,
@@ -723,8 +845,8 @@ export interface ProcessorParams {
             { thresholdDb: -16, ratio: 3.5, attackMs: 8, releaseMs: 300, makeupDb: 2.5 },
             { thresholdDb: -18, ratio: 3.5, attackMs: 5, releaseMs: 270, makeupDb: 2 },
             [140, 500, 1900, 4700, 9600],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -18,
           ratio: 3,
@@ -773,8 +895,8 @@ export interface ProcessorParams {
             { thresholdDb: -21, ratio: 5, attackMs: 2.5, releaseMs: 120, makeupDb: 4.5 },
             { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 100, makeupDb: 3.5 },
             [130, 470, 1900, 4800, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -26,
           ratio: 7,
@@ -824,8 +946,8 @@ export interface ProcessorParams {
             { thresholdDb: -15, ratio: 2.5, attackMs: 12, releaseMs: 420, makeupDb: 2 },
             { thresholdDb: -17, ratio: 2.5, attackMs: 8, releaseMs: 380, makeupDb: 1.5 },
             [130, 460, 1800, 4700, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -16,
           ratio: 2.5,
@@ -874,8 +996,8 @@ export interface ProcessorParams {
             { thresholdDb: -18, ratio: 4, attackMs: 5, releaseMs: 200, makeupDb: 3 },
             { thresholdDb: -19, ratio: 3.5, attackMs: 2.5, releaseMs: 180, makeupDb: 2.5 },
             [120, 450, 1800, 4700, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -20,
           ratio: 4.5,
@@ -923,8 +1045,8 @@ export interface ProcessorParams {
             { thresholdDb: -16, ratio: 3.5, attackMs: 8, releaseMs: 250, makeupDb: 2.5 },
             { thresholdDb: -18, ratio: 3.5, attackMs: 5, releaseMs: 200, makeupDb: 2 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -18,
           ratio: 3,
@@ -973,8 +1095,8 @@ export interface ProcessorParams {
             { thresholdDb: -20, ratio: 4.5, attackMs: 3, releaseMs: 140, makeupDb: 4 },
             { thresholdDb: -21, ratio: 4, attackMs: 1.5, releaseMs: 110, makeupDb: 3.5 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -24,
           ratio: 5,
@@ -1024,8 +1146,8 @@ export interface ProcessorParams {
             { thresholdDb: -19, ratio: 4.5, attackMs: 3.5, releaseMs: 150, makeupDb: 3.5 },
             { thresholdDb: -20, ratio: 4, attackMs: 2, releaseMs: 120, makeupDb: 3 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -23,
           ratio: 4.5,
@@ -1073,8 +1195,8 @@ export interface ProcessorParams {
             { thresholdDb: -15, ratio: 3, attackMs: 9, releaseMs: 340, makeupDb: 2 },
             { thresholdDb: -17, ratio: 3, attackMs: 6, releaseMs: 300, makeupDb: 1.5 },
             [130, 480, 1900, 4800, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -17,
           ratio: 2.5,
@@ -1122,8 +1244,8 @@ export interface ProcessorParams {
             { thresholdDb: -14, ratio: 2.5, attackMs: 10, releaseMs: 380, makeupDb: 1.5 },
             { thresholdDb: -16, ratio: 2.5, attackMs: 6, releaseMs: 330, makeupDb: 1 },
             [140, 500, 1900, 4700, 9600],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -16,
           ratio: 2,
@@ -1172,8 +1294,8 @@ export interface ProcessorParams {
             { thresholdDb: -14, ratio: 2, attackMs: 13, releaseMs: 490, makeupDb: 1.5 },
             { thresholdDb: -16, ratio: 2.2, attackMs: 9, releaseMs: 440, makeupDb: 1 },
             [130, 470, 1850, 4700, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -16,
           ratio: 2,
@@ -1222,8 +1344,8 @@ export interface ProcessorParams {
             { thresholdDb: -14, ratio: 2, attackMs: 14, releaseMs: 510, makeupDb: 1.5 },
             { thresholdDb: -16, ratio: 2, attackMs: 10, releaseMs: 460, makeupDb: 1 },
             [140, 520, 1950, 4900, 9800],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -15,
           ratio: 2,
@@ -1272,8 +1394,8 @@ export interface ProcessorParams {
             { thresholdDb: -13, ratio: 1.8, attackMs: 20, releaseMs: 600, makeupDb: 1 },
             { thresholdDb: -15, ratio: 1.8, attackMs: 15, releaseMs: 520, makeupDb: 0.5 },
             [150, 550, 2000, 5000, 10000],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -14,
           ratio: 1.6,
@@ -1322,8 +1444,8 @@ export interface ProcessorParams {
             { thresholdDb: -17, ratio: 4.5, attackMs: 7, releaseMs: 190, makeupDb: 3 },
             { thresholdDb: -19, ratio: 4.5, attackMs: 3, releaseMs: 150, makeupDb: 2.5 },
             [150, 500, 1900, 4800, 9800],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -22,
           ratio: 4.5,
@@ -1373,8 +1495,8 @@ export interface ProcessorParams {
             { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 130, makeupDb: 4 },
             { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 110, makeupDb: 3 },
             [130, 470, 1900, 4800, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -25,
           ratio: 6,
@@ -1424,8 +1546,8 @@ export interface ProcessorParams {
             { thresholdDb: -19, ratio: 4.5, attackMs: 4, releaseMs: 150, makeupDb: 3.5 },
             { thresholdDb: -20, ratio: 4, attackMs: 2, releaseMs: 125, makeupDb: 3 },
             [130, 470, 1800, 4700, 9500],
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -24,
           ratio: 5,
@@ -1474,8 +1596,8 @@ export interface ProcessorParams {
             { thresholdDb: -17, ratio: 4, attackMs: 6, releaseMs: 210, makeupDb: 3 },
             { thresholdDb: -19, ratio: 4, attackMs: 4, releaseMs: 170, makeupDb: 2.5 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -20,
           ratio: 4,
@@ -1524,8 +1646,8 @@ export interface ProcessorParams {
             { thresholdDb: -18, ratio: 4, attackMs: 4, releaseMs: 180, makeupDb: 3 },
             { thresholdDb: -19, ratio: 4, attackMs: 2.5, releaseMs: 140, makeupDb: 2.5 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -21,
           ratio: 4.5,
@@ -1574,8 +1696,8 @@ export interface ProcessorParams {
             { thresholdDb: -17, ratio: 4.5, attackMs: 5, releaseMs: 200, makeupDb: 3 },
             { thresholdDb: -18, ratio: 3.5, attackMs: 3, releaseMs: 170, makeupDb: 2.5 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -21,
           ratio: 4.5,
@@ -1623,8 +1745,8 @@ export interface ProcessorParams {
             { thresholdDb: -17, ratio: 3.5, attackMs: 8, releaseMs: 250, makeupDb: 2.5 },
             { thresholdDb: -19, ratio: 3.5, attackMs: 5, releaseMs: 200, makeupDb: 2 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -20,
           ratio: 3.5,
@@ -1673,8 +1795,8 @@ export interface ProcessorParams {
             { thresholdDb: -15, ratio: 2.5, attackMs: 13, releaseMs: 420, makeupDb: 1.5 },
             { thresholdDb: -17, ratio: 2.5, attackMs: 9, releaseMs: 380, makeupDb: 1 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -17,
           ratio: 2.5,
@@ -1723,8 +1845,8 @@ export interface ProcessorParams {
             { thresholdDb: -16, ratio: 3.5, attackMs: 10, releaseMs: 250, makeupDb: 2.5 },
             { thresholdDb: -18, ratio: 3.5, attackMs: 6, releaseMs: 210, makeupDb: 2 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -19,
           ratio: 3,
@@ -1773,8 +1895,8 @@ export interface ProcessorParams {
             { thresholdDb: -21, ratio: 5, attackMs: 3, releaseMs: 130, makeupDb: 4 },
             { thresholdDb: -21, ratio: 4.5, attackMs: 1.5, releaseMs: 105, makeupDb: 3.5 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -25,
           ratio: 6,
@@ -1824,8 +1946,8 @@ export interface ProcessorParams {
             { thresholdDb: -20, ratio: 5, attackMs: 3, releaseMs: 130, makeupDb: 4 },
             { thresholdDb: -20, ratio: 4.5, attackMs: 1.5, releaseMs: 110, makeupDb: 3 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -24,
           ratio: 6,
@@ -1873,8 +1995,8 @@ export interface ProcessorParams {
             { thresholdDb: -23, ratio: 5.5, attackMs: 2.5, releaseMs: 110, makeupDb: 5 },
             { thresholdDb: -23, ratio: 5, attackMs: 1.5, releaseMs: 95, makeupDb: 4 },
             [...OMNIA_SPLITS] as MultibandSplits,
-            ),
-          agc: {
+        ),
+      agc: {
           on: true,
           thresholdDb: -27,
           ratio: 7,
