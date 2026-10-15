@@ -17,20 +17,17 @@
  * output orientation. Signalpath does not claim a dual-band limiter or other
  * AMP blocks that current AMP docs do not confirm.
  */
-
 export type ProcessorVariant =
   | "default"
   | "talk"
   | "music"
   | "fm-stereo";
-
 export interface EqBand {
   freq: number;
   gainDb: number;
   q: number;
   type: "lowshelf" | "peaking" | "highshelf";
 }
-
 export interface BandCompParams {
   thresholdDb: number;
   ratio: number;
@@ -38,7 +35,6 @@ export interface BandCompParams {
   releaseMs: number;
   makeupDb: number;
 }
-
 /** One dynamic-EQ band: cut the band (up to maxCutDb) when it exceeds threshold. */
 export interface DeqBand {
   freqHz: number;
@@ -49,7 +45,6 @@ export interface DeqBand {
   attackMs: number;
   releaseMs: number;
 }
-
 /**
  * Loudness rider — the Compellor-style leveler / AERO.lite long-term
  * controller. Slow K-weighted gain ride toward a target loudness, bounded
@@ -64,10 +59,8 @@ export interface RiderParams {
   /** "fast" ≈ Compellor fast leveler (1.5 s down / 3 s up), "slow" ≈ 5 s / 10 s. */
   speed: "fast" | "slow";
 }
-
 /** Pre-emphasis time constant: 50 µs (CEPT/Europe) or 75 µs (ITU Region 2). */
 export type FmEmphasis = "off" | "50" | "75";
-
 /**
  * FM transmission branch — pre-emphasis and the composite (MPX) generator
  * that feeds an exciter. All percentages are of the ±75 kHz total permitted
@@ -102,11 +95,9 @@ export interface FmParams {
     alarmPct: number;
   };
 }
-
 export type MultibandSplits = [number, number, number, number, number];
 export type MultibandBands = [BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams];
 export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
-
 export interface ProcessorParams {
   inputGainDb: number;
   hpf: { on: boolean; freqHz: number };
@@ -140,11 +131,9 @@ export interface ProcessorParams {
     releaseMs: number;
   };
 }
-
 export type MultibandSplits = [number, number, number, number, number];
 export type MultibandBands = [BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams, BandCompParams];
 export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
-
 export const DEQ_OFF: DeqBands = [
   { freqHz: 6500, thresholdDb: -28, ratio: 4, attackMs: 1, releaseMs: 40, makeupDb: 0, width: 0 },
   { freqHz: 8000, thresholdDb: -30, ratio: 3.5, attackMs: 1, releaseMs: 35, makeupDb: 0, width: 0 },
@@ -152,14 +141,12 @@ export const DEQ_OFF: DeqBands = [
   { freqHz: 12000, thresholdDb: -34, ratio: 2.5, attackMs: 0.5, releaseMs: 25, makeupDb: 0, width: 0 },
   { freqHz: 15000, thresholdDb: -36, ratio: 2, attackMs: 0.4, releaseMs: 22, makeupDb: 0, width: 0 },
 ];
-
 const _multibandBase: MultibandBands = mb6(
   { thresholdDb: -14, ratio: 5, attackMs: 4, releaseMs: 90, makeupDb: 2.5 },
   { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 80, makeupDb: 2.5 },
   { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 70, makeupDb: 2 },
   [150, 500, 1900, 4800, 10000],
 );
-
 export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
   hpf: { on: true, freqHz: 80 },
@@ -191,54 +178,6 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     releaseMs: 60,
   },
 };
-
-export const DEQ_OFF: DeqBands = [
-  { freqHz: 6500, thresholdDb: -28, ratio: 4, attackMs: 1, releaseMs: 40, makeupDb: 0, width: 0 },
-  { freqHz: 8000, thresholdDb: -30, ratio: 3.5, attackMs: 1, releaseMs: 35, makeupDb: 0, width: 0 },
-  { freqHz: 10000, thresholdDb: -32, ratio: 3, attackMs: 0.6, releaseMs: 30, makeupDb: 0, width: 0 },
-  { freqHz: 12000, thresholdDb: -34, ratio: 2.5, attackMs: 0.5, releaseMs: 25, makeupDb: 0, width: 0 },
-  { freqHz: 15000, thresholdDb: -36, ratio: 2, attackMs: 0.4, releaseMs: 22, makeupDb: 0, width: 0 },
-];
-
-const _multibandBase: MultibandBands = mb6(
-  { thresholdDb: -14, ratio: 5, attackMs: 4, releaseMs: 90, makeupDb: 2.5 },
-  { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 80, makeupDb: 2.5 },
-  { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 70, makeupDb: 2 },
-  [150, 500, 1900, 4800, 10000],
-);
-
-export const DEFAULT_PARAMS: ProcessorParams = {
-  inputGainDb: 0,
-  hpf: { on: true, freqHz: 80 },
-  phase: { mode: "auto", freqHz: 90 },
-  gate: { on: true, thresholdDb: -55, holdMs: 60 },
-  eq: { on: true, bands: [] },
-  deq: { on: false, bands: DEQ_OFF },
-  multiband: _multibandBase,
-  agc: {
-    on: true,
-    thresholdDb: -22,
-    ratio: 5,
-    kneeDb: 3,
-    attackMs: 3,
-    releaseMs: 120,
-    makeupDb: 6,
-  },
-  rider: {
-    on: true,
-    targetLufs: LUFS_TARGET,
-    maxRideDb: 10,
-    gateDb: -50,
-    speed: "fast" as const,
-  },
-  limiter: {
-    on: true,
-    ceilingDb: -1,
-    attackMs: 0.5,
-    releaseMs: 60,
-  },
-};
-
 export const DEFAULT_PRESETS: Preset[] = [
   {
     id: "orban-sports",
@@ -594,7 +533,6 @@ export const DEFAULT_PRESETS: Preset[] = [
           },          multiband: mb6(
             { thresholdDb: -16, ratio: 5, attackMs: 6, releaseMs: 200, makeupDb: 3.5 },
             { thresholdDb: -18, ratio: 4, attackMs: 4, releaseMs: 180, makeupDb: 3 },
-
               { thresholdDb: -20, ratio: 3.5, attackMs: 2, releaseMs: 150, makeupDb: 2.5 },
               [180, 1000, 3300, 6500, 12000],
         ),
@@ -2217,10 +2155,8 @@ export const DEFAULT_PRESETS: Preset[] = [
           * multiband configs fall back to the 6-band defaults.
           */
           export function coerceParams(saved: unknown): ProcessorParams {
-          const base = structuredClone(DEFAULT_PARAMS);
-          if (!saved || typeof saved !== "object") return base;
-          return mergeDeep(base, saved);
+            const base = structuredClone(DEFAULT_PARAMS);
+            if (!saved || typeof saved !== "object") return base;
+            return mergeDeep(base, saved);
           }
-          
-          
-          ),
+        }
