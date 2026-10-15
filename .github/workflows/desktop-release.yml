@@ -1,0 +1,52 @@
+# Builds the Signalpath desktop installers on each native OS, so every
+# artifact is produced with the platform's own toolchain (no wine/cross hacks).
+name: desktop-release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            args: --linux
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Generate icon
+        run: bun run desktop:icon
+
+      - name: Build renderer
+        run: bun run desktop:build:renderer
+
+      - name: Package installers
+        run: bunx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signalpath-${{ matrix.os }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error

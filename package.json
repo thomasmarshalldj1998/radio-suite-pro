@@ -1,15 +1,29 @@
 {
-  "name": "vite-template",
+  "name": "signalpath",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Broadcast audio processor and stream encoder",
+  "homepage": "https://signalpath.app",
+  "author": "Signalpath <support@signalpath.app>",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop:icon": "node scripts/make-icon.mjs",
+    "desktop:build:renderer": "tsc -b && vite build --config vite.desktop.config.ts",
+    "desktop:build": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml",
+    "desktop:build:win": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml --win --x64",
+    "desktop:build:mac": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml --mac",
+    "desktop:build:linux": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml --linux"
   },
+  "trustedDependencies": [
+    "electron",
+    "electron-builder"
+  ],
   "dependencies": {
     "@audio/encode": "^1.10.0",
     "@convex-dev/auth": "^0.0.90",
@@ -74,6 +88,8 @@
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
+    "electron": "^38.2.0",
+    "electron-builder": "^26.0.12",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",

@@ -29,6 +29,58 @@ The convex server has a separate set of environment variables that are accessibl
 
 Currently, these variables include auth-specific keys: JWKS, JWT_PRIVATE_KEY, and SITE_URL.
 
+## Desktop App (Windows, macOS, Linux)
+
+The whole console also ships as a standalone desktop package built with
+[Electron](https://electronjs.org) + [electron-builder](https://electron.build).
+The desktop build is **fully offline**: presets, the broadcast log, the stream
+mount configuration and the operator session persist on-device (localStorage)
+through the pluggable backend in `src/lib/backend/`, and no Convex client is
+constructed. The web build keeps the cloud binding (accounts + sync) exactly as
+before.
+
+### Build installers
+
+```bash
+bun install              # installs electron + electron-builder (dev deps)
+bun run desktop:icon     # regenerates build/icon.png from the logo geometry
+
+bun run desktop:build:linux   # AppImage + .deb   → release/
+bun run desktop:build:win     # NSIS installer    → release/  (run on Windows)
+bun run desktop:build:mac     # DMG + zip         → release/  (run on macOS)
+bun run desktop:build         # current platform's default targets
+```
+
+Cross-build notes:
+- Linux targets (AppImage, deb) build on Linux; deb additionally needs
+  `binutils` (`ar`) and `xz-utils` — both preinstalled on normal desktops and
+  CI runners.
+- The Windows NSIS installer builds natively on Windows; building it from
+  Linux requires `wine` for the final NSIS link step.
+- macOS targets must be built on macOS. Code signing is disabled by default
+  (`mac.identity: null` in `electron-builder.yml`) — remove that line and set
+  `CSC_LINK`/`CSC_KEY_PATH` to sign and notarize.
+
+### How the desktop build differs from the web build
+
+- `vite.desktop.config.ts` compiles with `VITE_APP_MODE=desktop` and an empty
+  `VITE_CONVEX_URL`, which flips `src/lib/backend/context.ts` to the
+  device-local binding and compiles out the Freebuff preview toolbar.
+- `electron/main.cjs` serves `dist-desktop/` through a custom `app://`
+  scheme (standard + secure) so BrowserRouter deep links, ES-module workers,
+  the WASM codecs and the audio worklet all behave exactly like they do over
+  http.
+- The app opens straight on the console (`/` → `/dashboard`); the marketing
+  landing page and the sign-in page remain web-only.
+- Media/fullscreen permissions are granted in the main process; microphone
+  use is declared for macOS in `electron-builder.yml`.
+
+### CI
+
+`.github/workflows/desktop-release.yml` builds all three platforms natively
+(Ubuntu/Windows/macOS runners) and uploads the installers as artifacts on
+every `v*` tag.
+
 
 # Using Authentication (Important!)
 

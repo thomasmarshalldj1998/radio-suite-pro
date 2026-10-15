@@ -1,0 +1,59 @@
+# Signalpath desktop packaging — installers for all three desktop OSes.
+#
+#   bun run desktop:build:renderer   → dist-desktop/
+#   bunx electron-builder --linux    → AppImage + .deb
+#   bunx electron-builder --win      → NSIS installer
+#   bunx electron-builder --mac      → DMG + zip (must run on macOS)
+#
+# The renderer is fully bundled by Vite, so no node_modules ship in the asar.
+appId: com.signalpath.desktop
+productName: Signalpath
+copyright: © 2026 Signalpath
+directories:
+  output: release
+  buildResources: build
+files:
+  - package.json
+  - dist-desktop/**/*
+  - electron/**/*
+  - "!node_modules/**/*"
+asar: true
+npmRebuild: false
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Sound
+  icon: build/icon.png
+  synopsis: Broadcast audio processor and stream encoder
+  maintainer: Signalpath <support@signalpath.app>
+
+win:
+  target:
+    - nsis
+  icon: build/icon.png
+
+deb:
+  # gzip instead of the xz default: builds on minimal systems without xz-utils
+  compression: gz
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  shortcutName: Signalpath
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.music
+  icon: build/icon.png
+  # Unsigned by default so anyone can build; set up signing by removing
+  # `identity: null` and providing CSC_KEYFILE/CSC_LINK in CI.
+  identity: null
+  hardenedRuntime: false
+  extendInfo:
+    NSMicrophoneUsageDescription: Signalpath uses audio input devices as live program sources for broadcast processing.
