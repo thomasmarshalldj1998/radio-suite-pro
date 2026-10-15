@@ -11,7 +11,12 @@
  * metadata) and is not written to from the audio thread's watchdog.
  */
 
-export type AlarmKind = "peak" | "clip" | "loudness" | "correlation";
+export type AlarmKind =
+  | "peak"
+  | "clip"
+  | "loudness"
+  | "correlation"
+  | "mod";
 
 export interface AlarmEvent {
   id: number;
@@ -26,6 +31,7 @@ const COOLDOWN_MS: Record<AlarmKind, number> = {
   clip: 30_000,
   loudness: 60_000,
   correlation: 60_000,
+  mod: 30_000,
 };
 
 const MAX_EVENTS = 50;
@@ -37,6 +43,7 @@ const lastFired: Record<AlarmKind, number> = {
   clip: 0,
   loudness: 0,
   correlation: 0,
+  mod: 0,
 };
 
 const listeners = new Set<() => void>();

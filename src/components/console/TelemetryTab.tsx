@@ -112,6 +112,10 @@ const ALARM_STYLE: Record<AlarmKind, { led: string; chip: string }> = {
     led: "led-warn",
     chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
   },
+  mod: {
+    led: "led-hot",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
 };
 
 /* ── automatic tolerance alarms ────────────────────────────── */
@@ -122,7 +126,7 @@ function AlarmHistory() {
     <ModuleCard
       className="xl:col-span-12"
       title="Alarm history"
-      subtitle="Automatic tolerance watch · true peak · clipping · loudness drift · phase"
+      subtitle="Automatic tolerance watch · true peak · clipping · loudness drift · phase · FM deviation"
       right={
         events.length > 0 ? (
           <Button

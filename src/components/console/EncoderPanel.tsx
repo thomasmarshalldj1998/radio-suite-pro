@@ -1,5 +1,6 @@
 import { StereoLevelMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
+import { FmPanel } from "@/components/console/FmPanel";
 import { api } from "@/convex/_generated/api";
 import { getEngine } from "@/lib/audio/engine";
 import {
@@ -18,6 +19,8 @@ import {
   type ProbeResult,
 } from "@/lib/audio/encoder";
 import { JsStreamEncoder } from "@/lib/audio/js-encoder";
+import { MpxStreamEncoder } from "@/lib/audio/fm";
+import type { ProcessorParams } from "@/lib/audio/params";
 import {
   EMPTY_SLOT,
   OUTPUT_COUNT,
@@ -113,6 +116,12 @@ const CODEC_FAMILIES: CodecFamily[] = [
     hint: "Adaptive relay ladder",
     formats: ["hls-abr"],
   },
+  {
+    id: "mpx",
+    label: "MPX",
+    hint: "FM composite over IP · FLAC 192 kHz",
+    formats: ["mpx-flac-192"],
+  },
 ];
 
 const familyOfFormat = (formatId: string): CodecFamily | undefined =>
@@ -174,7 +183,13 @@ function OutPresence() {
   );
 }
 
-export function EncoderPanel() {
+export function EncoderPanel({
+  params,
+  setParams,
+}: {
+  params: ProcessorParams;
+  setParams: React.Dispatch<React.SetStateAction<ProcessorParams>>;
+}) {
   const engine = getEngine();
   const mountDoc = useQuery(api.stations.getMount);
   const logEntries = useQuery(api.stations.listLog, { limit: 5 });
@@ -299,12 +314,15 @@ export function EncoderPanel() {
         targetFormat: formatProfile(f),
       }));
       const wasm = jsFormatFor(f.id);
+      const mpx = f.id === "mpx-flac-192";
       toast(
-        wasm ? `${f.label} selected` : `${f.label} set as relay target`,
+        wasm || mpx ? `${f.label} selected` : `${f.label} set as relay target`,
         {
           description: wasm
             ? "Encodes in-browser via the WASM worker."
-            : "No browser packager — a transcoder relay emits this format from the local proxy stream.",
+            : mpx
+              ? "The FM composite is FLAC-encoded at 192 kHz from the MPX generator."
+              : "No browser packager — a transcoder relay emits this format from the local proxy stream.",
         },
       );
       return;
@@ -340,7 +358,8 @@ export function EncoderPanel() {
     }
     const targetFmt = FORMATS.find((f) => formatProfile(f) === form.targetFormat);
     const jsFmt = targetFmt ? jsFormatFor(targetFmt.id) : null;
-    if (!jsFmt && !isCodecSupported(currentCodec.mimeType)) {
+    const mpxFmt = targetFmt?.id === "mpx-flac-192";
+    if (!jsFmt && !mpxFmt && !isCodecSupported(currentCodec.mimeType)) {
       toast.error(`${currentCodec.label} is not supported in this browser`);
       return;
     }
@@ -379,6 +398,36 @@ export function EncoderPanel() {
         });
         toast.success("You are on air", {
           description: `${targetFmt.label} · encoded natively at ${(engine.sampleRate / 1000).toFixed(1)} kHz`,
+        });
+        return;
+      }
+
+      // MPX over IP: FLAC-encode the FM composite at the composite rate
+      if (mpxFmt && targetFmt) {
+        if (!params.fm.on) {
+          throw new Error(
+            "Engage the FM module first — the composite feed is generated there",
+          );
+        }
+        const enc = new MpxStreamEncoder();
+        enc.onStats = (stats: EncoderStats) => patchRuntime({ stats });
+        await enc.start();
+        patchRuntime({
+          encoder: enc,
+          onAir: true,
+          startedAt: Date.now(),
+          stats: { bytes: 0, elapsedMs: 0, kbps: 0, chunks: 0 },
+          connects: attempt,
+          lastError: null,
+        });
+        void saveMount({ ...form });
+        void pushLog({
+          kind: "session",
+          title: `ON AIR — ${form.name}`,
+          detail: `${targetFmt.label} · FM composite @ 192 kHz → ${url}`,
+        });
+        toast.success("MPX feed on air", {
+          description: `Composite FLAC @ 192 kHz → ${url}`,
         });
         return;
       }
@@ -1167,6 +1216,14 @@ export function EncoderPanel() {
           <OutputTable slots={slots} from={4} sel={sel} onSelect={setSel} />
         </div>
       </ModuleCard>
+      {/* ── FM exciter · MPX composite ── */}
+      <div className="lg:col-span-12">
+        <FmPanel
+          fm={params.fm}
+          onChange={(next) => setParams((prev) => ({ ...prev, fm: next }))}
+        />
+      </div>
+
       <div className="flex flex-wrap items-center gap-2 lg:col-span-12">
         <Button
           size="sm"

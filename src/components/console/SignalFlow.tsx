@@ -1,4 +1,5 @@
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
+import { getFm, subscribeFm, type FmSnapshot } from "@/lib/audio/fm";
 import { formatDb, type ProcessorParams } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
 import { getOutputs, isConfigured } from "@/lib/audio/outputs";
@@ -55,6 +56,9 @@ export function SignalFlow({
     () => subscribeRuntime(() => setOnAir(getRuntime().onAir)),
     [],
   );
+
+  const [fmSnap, setFmSnap] = useState<FmSnapshot>(() => getFm());
+  useEffect(() => subscribeFm(() => setFmSnap(getFm())), []);
 
   const s = snap;
   const powered = s.powered;
@@ -156,6 +160,18 @@ export function SignalFlow({
       active: outActive,
       warn: false,
       target: "processing",
+    },
+    {
+      id: "fm",
+      name: "FM MPX",
+      detail: params.fm.on
+        ? `${params.fm.emphasis === "off" ? "flat" : `${params.fm.emphasis} µs`} · ${(fmSnap.stats?.modPct ?? 0).toFixed(0)}% mod`
+        : "bypassed",
+      enabled: params.fm.on,
+      grDb: null,
+      active: powered && params.fm.on && (fmSnap.stats?.modPct ?? 0) > 1,
+      warn: params.fm.on && (fmSnap.stats?.sustainedOver ?? false),
+      target: "encoder",
     },
     {
       id: "tx",

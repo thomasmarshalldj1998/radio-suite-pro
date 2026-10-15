@@ -215,6 +215,16 @@ export const FORMATS: BroadcastFormat[] = [
     ext: "m3u8",
     use: "AAC ladder manifest (64–192 kbps)",
   },
+  {
+    id: "mpx-flac-192",
+    label: "MPX over IP (FLAC)",
+    bitrateKbps: 0,
+    sampleRateKhz: 192,
+    channels: "Mono composite",
+    mimes: [],
+    ext: "flac",
+    use: "Composite feed to a distant FM exciter / STL",
+  },
 ];
 
 export interface FormatSupport {
@@ -227,6 +237,15 @@ export interface FormatSupport {
 
 /** Probe whether the browser can record a delivery-matrix format. */
 export function formatSupport(f: BroadcastFormat): FormatSupport {
+  // MPX over IP encodes the FM composite at 192 kHz in the WASM worker —
+  // available whenever the FM branch can run
+  if (f.id === "mpx-flac-192") {
+    return {
+      ready: true,
+      mime: null,
+      note: "Composite FLAC · requires the FM module",
+    };
+  }
   // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / Ogg Opus / AAC-LC /
   // HE-AAC v2) encode in the worker — the same path connect() routes them
   // through — regardless of what MediaRecorder offers
@@ -251,6 +270,9 @@ export function formatSupport(f: BroadcastFormat): FormatSupport {
 export function formatProfile(f: BroadcastFormat): string {
   if (f.id === "hls-abr") {
     return `HLS Adaptive Multi-Bitrate (${f.bitrateKbps}–${f.bitrateMaxKbps} kbps AAC Manifest)`;
+  }
+  if (f.id === "mpx-flac-192") {
+    return "MPX over IP @ Lossless (192.0 kHz, Mono composite)";
   }
   const rate = f.bitrateMaxKbps
     ? `${f.bitrateKbps}–${f.bitrateMaxKbps} kbps`

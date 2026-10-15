@@ -15,6 +15,7 @@ import {
   subscribeAlarms,
 } from "@/lib/audio/alarms";
 import { getEngine } from "@/lib/audio/engine";
+import { getFm, stopFm, syncFm } from "@/lib/audio/fm";
 import { getOutputs, isConfigured, useOutputs } from "@/lib/audio/outputs";
 import {
   DEFAULT_PARAMS,
@@ -176,6 +177,7 @@ function QuickStatus({
   engineError: string | null;
 }) {
   const [s, setS] = useState(() => getEngine().snapshot());
+  const [fm, setFm] = useState(() => getFm());
   useEffect(() => {
     let last = 0;
     return getEngine().subscribe((snap) => {
@@ -183,6 +185,7 @@ function QuickStatus({
       if (now - last >= 500) {
         last = now;
         setS(snap);
+        setFm(getFm());
       }
     });
   }, []);
@@ -272,6 +275,23 @@ function QuickStatus({
       sub: tpOver ? "over ceiling" : "within ceiling",
       tone: tpOver ? "hot" : "fg",
       led: tpOver ? "hot" : "",
+    },
+    {
+      label: "Modulation",
+      value: params.fm.on
+        ? `${(fm.stats?.modPct ?? 0).toFixed(0)} %MOD`
+        : "—",
+      sub: params.fm.on
+        ? fm.stats?.sustainedOver
+          ? `over ${fm.stats.alarmPct}% for 5 s — reduce drive`
+          : `${fm.stats?.ceilingPct.toFixed(0) ?? "100"}% ceiling · ${params.fm.emphasis === "off" ? "flat" : `${params.fm.emphasis} µs`}`
+        : "FM branch bypassed",
+      tone: !params.fm.on
+        ? "fg"
+        : fm.stats?.sustainedOver
+          ? "hot"
+          : "ok",
+      led: !params.fm.on ? "" : fm.stats?.sustainedOver ? "hot" : "on",
     },
     {
       label: "Preset",
@@ -501,6 +521,16 @@ export default function Dashboard() {
             );
           }
         } else cond.corrSince = 0;
+        // sustained FM overmodulation (composite demand over the alarm
+        // threshold for ≥5 s — reported by the MPX generator itself)
+        const fmSnap = getFm();
+        if (p.fm.on && fmSnap.stats?.sustainedOver) {
+          fireAlarm(
+            "mod",
+            "FM overmodulation",
+            `Composite demand ${fmSnap.stats.modPct.toFixed(0)}% held over the ${fmSnap.stats.alarmPct}% threshold for 5 s`,
+          );
+        }
       }
 
       // source / destination labels (real engine + output matrix state)
@@ -561,6 +591,8 @@ export default function Dashboard() {
   }, [params]);
   useEffect(() => {
     engine.apply(compare ? sourceParams(params) : params);
+    // the FM branch taps the program bus — keep the MPX generator in step
+    syncFm(params.fm);
   }, [params, engine, compare]);
 
   const phase: EnginePhase = powerBusy
@@ -602,6 +634,7 @@ export default function Dashboard() {
       if (powerBusyRef.current) return;
       if (reason === "restart" && engine.powered) {
         engine.powerOff();
+        stopFm();
         poweredAtRef.current = 0;
         logSession("Engine stopped", "Restart requested by operator");
       }
@@ -630,6 +663,7 @@ export default function Dashboard() {
           }),
         ]);
         engine.apply(compareRef.current ? sourceParams(paramsRef.current) : paramsRef.current);
+        syncFm(paramsRef.current.fm);
         poweredAtRef.current = Date.now();
         logSession(
           reason === "restart" ? "Engine restarted" : "Engine started",
@@ -668,6 +702,7 @@ export default function Dashboard() {
   const stopEngine = useCallback(() => {
     if (powerBusyRef.current || !engine.powered) return;
     engine.powerOff();
+    stopFm();
     poweredAtRef.current = 0;
     setEngineError(null);
     logSession(
@@ -978,7 +1013,9 @@ export default function Dashboard() {
                 setCompare={setCompare}
               />
             )}
-            {tab === "encoder" && <EncoderPanel />}
+            {tab === "encoder" && (
+              <EncoderPanel params={params} setParams={setParams} />
+            )}
             {tab === "presets" && (
               <PresetPanel
                 params={params}

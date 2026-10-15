@@ -105,21 +105,13 @@ function designShapedLpf(opts: {
     h[k] = g;
     if (k > 0 && k < m / 2) h[m - k] = g;
   }
-  // inverse FFT → zero-phase impulse, centred at index 0
-  const re = new Float64Array(m);
-  const im = new Float64Array(m);
-  for (let k = 0; k < m; k++) {
-    let sr = 0;
-    let si = 0;
-    for (let nn = 0; nn < m; nn++) {
-      const ang = (2 * Math.PI * k * nn) / m;
-      sr += h[nn] * Math.cos(ang);
-      si -= h[nn] * Math.sin(ang);
-    }
-    re[k] = sr / m;
-    im[k] = si / m;
-  }
-  // h is real-even → imaginary part is numerical noise; take real part
+  // inverse FFT → zero-phase impulse, centred at index 0. The spectrum is
+  // real-even, so the forward DFT already equals the (real) inverse up to
+  // scaling — one FFT instead of an O(m²) transform.
+  const re = new Float32Array(m);
+  const im = new Float32Array(m);
+  for (let k = 0; k < m; k++) re[k] = h[k];
+  fft(re, im);
   const beta = kaiserBeta(stopbandDb);
   const out = new Float64Array(n);
   let sum = 0;
@@ -128,7 +120,7 @@ function designShapedLpf(opts: {
     const w =
       besselI0(beta * Math.sqrt(1 - Math.pow((i - mid) / mid, 2))) /
       besselI0(beta);
-    out[i] = re[idx] * w;
+    out[i] = (re[idx] / m) * w;
     sum += out[i];
   }
   for (let i = 0; i < n; i++) out[i] /= sum; // exact unity gain at DC
@@ -157,15 +149,20 @@ function designInterpLpf(taps: number, cutoffHz: number, fs: number): Float64Arr
 
 /** History-delay FIR (linear phase, direct convolution). */
 class FirFilter {
+  private readonly taps: Float64Array;
   private hist: Float64Array;
   private scratch: Float64Array;
-  constructor(private readonly taps: Float64Array, blockSize: number) {
+  constructor(taps: Float64Array, blockSize: number) {
+    this.taps = taps;
     this.hist = new Float64Array(taps.length - 1);
     this.scratch = new Float64Array(taps.length - 1 + blockSize);
   }
   process(input: Float32Array, output: Float32Array): void {
     const n = this.taps.length;
     const m = input.length;
+    if (m + n - 1 > this.scratch.length) {
+      this.scratch = new Float64Array(m + n - 1);
+    }
     this.scratch.set(this.hist, 0);
     this.scratch.set(input, n - 1);
     for (let i = 0; i < m; i++) {
@@ -181,50 +178,48 @@ class FirFilter {
 
 /** ×L polyphase interpolator (16 taps per phase, L=4). */
 class PolyphaseUpsampler {
-  private hist: Float64Array;
   private readonly l = 4;
   private readonly pp: number;
+  private readonly proto: Float64Array;
+  private readonly hist: Float64Array;
+  private readonly scratch: Float64Array;
   constructor(proto: Float64Array) {
+    this.proto = proto;
     this.pp = proto.length / this.l;
     this.hist = new Float64Array(this.pp);
+    this.scratch = new Float64Array(this.pp - 1 + 4096);
   }
   process(input: Float32Array, output: Float32Array): void {
-    const { pp, l } = this;
+    const { pp, l, proto, scratch } = this;
     const m = input.length;
-    const scratch = new Float64Array(pp - 1 + m);
-    scratch.set(this.hist, 0);
-    scratch.set(input, pp - 1);
+    if (m + pp - 1 > scratch.length) this.scratch = new Float64Array(m + pp - 1);
+    const buf = this.scratch;
+    buf.set(this.hist, 0);
+    buf.set(input, pp - 1);
     for (let i = 0; i < m; i++) {
       for (let p = 0; p < l; p++) {
         let acc = 0;
+        // polyphase branch p taps: proto[p], proto[p+L], proto[p+2L] …
         for (let k = 0; k < pp; k++) {
-          acc += this.protoIdx(k, p) * scratch[i + k];
+          acc += proto[k * l + p] * buf[i + pp - 1 - k];
         }
         output[i * l + p] = acc;
       }
     }
-    this.hist.set(scratch.subarray(m, m + pp - 1));
-  }
-  // polyphase branch p taps: proto[p], proto[p+L], proto[p+2L] …
-  private protoIdx(k: number, p: number): number {
-    return this.proto[k * this.l + p];
-  }
-  private readonly proto: Float64Array = new Float64Array(0);
-  setProto(p: Float64Array) {
-    (this as { proto: Float64Array }).proto = p;
+    this.hist.set(buf.subarray(m, m + pp - 1));
   }
 }
 
 /* ── RDS (IEC 62106) group 0A encoder ──────────────────────────────────── */
 
-/** CRC-10 generator: x¹⁰+x⁸+x⁷+x⁵+x⁴+x³+1. */
-const RDS_POLY = 0b10100110111;
+/** CRC-10 generator: x¹⁰+x⁸+x⁷+x⁵+x⁴+x³+1 (IEC 62106 §3.2.2). */
+const RDS_POLY = 0b10110111001; // 0x5B9
 
 /** Block offset words identifying A/B/C/C′/D within a group. */
 const RDS_OFFSET = { A: 0x0fc, B: 0x198, C: 0x168, D: 0x1b4 } as const;
 
 function crc10(data16: number): number {
-  let reg = (data16 << 10) & 0x3fff;
+  let reg = data16 << 10; // 26-bit working register
   for (let i = 25; i >= 10; i--) {
     if (reg & (1 << i)) reg ^= RDS_POLY << (i - 10);
   }
@@ -248,7 +243,7 @@ export class RdsBitSource {
   private seg = 0;
   readonly pi: number;
   readonly pty: number;
-  private readonly ps: string;
+  private ps: string;
 
   constructor(pi: number, ps: string, pty = 10, tp = 0) {
     this.pi = pi & 0xffff;
@@ -257,7 +252,8 @@ export class RdsBitSource {
   }
 
   setPs(ps: string) {
-    (this as { ps: string }).ps = (ps + "        ").slice(0, 8);
+    this.ps = (ps + "        ").slice(0, 8);
+    this.idx = this.bits.length; // rebuild the next group with the new name
   }
 
   private buildGroup(): void {
@@ -339,14 +335,17 @@ export class MpxGenerator {
   private sideBuf: Float32Array;
   private empOutL: Float32Array;
   private empOutR: Float32Array;
+  private sideHi: Float32Array;
   private compBuf: Float32Array;
 
   // RDS
   private rdsBits: RdsBitSource;
   private rdsPrevEnc = 0;
-  private bitPhase = 0;
-  private half = 0;
+  private rdsCurEnc = 0;
+  private halfPhase = 0;
+  private inSecondHalf = false;
   private rdsShaper: Biquad;
+  private rdsShaper2: Biquad;
   private rdsPs: string;
 
   // oscillator phases (all subcarriers derive from the pilot accumulator)
@@ -373,21 +372,30 @@ export class MpxGenerator {
     this.fm = fm;
     this.block = blockSize;
     const tau = fm.emphasis === "off" ? null : EMPHASIS_TAU[fm.emphasis];
+    const empTaps = this.designEmphasis(tau);
 
-    this.empL = new FirFilter(this.designEmphasis(tau), blockSize);
-    this.empR = new FirFilter(this.designEmphasis(tau), blockSize);
-    const proto = designInterpLpf(64, 16000, this.outRate);
+    // both channels share one tap set (FIR never mutates its taps)
+    this.empL = new FirFilter(empTaps, blockSize);
+    this.empR = new FirFilter(empTaps, blockSize);
+    // interpolation: flat across the 15 kHz audio band (passband ≈18.6 kHz),
+    // ≥85 dB down from ≈29 kHz up — kills every image of the brickwalled
+    // programme (first image at 48k−15k = 33 kHz)
+    const proto = designInterpLpf(96, 24000, this.outRate);
     this.upM = new PolyphaseUpsampler(proto);
     this.upS = new PolyphaseUpsampler(proto);
     this.monoBuf = new Float32Array(blockSize);
     this.sideBuf = new Float32Array(blockSize);
     this.empOutL = new Float32Array(blockSize);
     this.empOutR = new Float32Array(blockSize);
+    this.sideHi = new Float32Array(blockSize * 4);
     this.compBuf = new Float32Array(blockSize * 4);
 
     this.rdsPs = fm.mpx.rdsPs;
     this.rdsBits = new RdsBitSource(0x1234, fm.mpx.rdsPs);
-    this.rdsShaper = new Biquad.lowpass(2400, this.outRate);
+    // 4th-order 2.4 kHz lowpass on the biphase stream — the IEC 62106
+    // spectrum mask confines RDS to roughly ±2.4 kHz around 57 kHz
+    this.rdsShaper = Biquad.lowpass(2400, this.outRate);
+    this.rdsShaper2 = Biquad.lowpass(2400, this.outRate);
     this.wPilot = (2 * Math.PI * PILOT_HZ) / this.outRate;
     this.wSca = (2 * Math.PI * SCA_HZ) / this.outRate;
   }
@@ -412,8 +420,9 @@ export class MpxGenerator {
     this.fm = fm;
     if (tauChanged) {
       const tau = fm.emphasis === "off" ? null : EMPHASIS_TAU[fm.emphasis];
-      this.empL = new FirFilter(this.designEmphasis(tau), this.block);
-      this.empR = new FirFilter(this.designEmphasis(tau), this.block);
+      const empTaps = this.designEmphasis(tau);
+      this.empL = new FirFilter(empTaps, this.block);
+      this.empR = new FirFilter(empTaps, this.block);
     }
     if (psChanged) {
       this.rdsPs = fm.mpx.rdsPs;
@@ -427,11 +436,12 @@ export class MpxGenerator {
    */
   process(l: Float32Array, r: Float32Array): Float32Array {
     const fm = this.fm;
-    const n = l.length;
+    const n = Math.min(l.length, this.block);
+    const clen = n * 4;
 
     // 1. per-channel emphasis + 15 kHz brickwall
-    this.empL.process(l, this.empOutL);
-    this.empR.process(r, this.empOutR);
+    this.empL.process(l.subarray(0, n), this.empOutL);
+    this.empR.process(r.subarray(0, n), this.empOutR);
 
     // 2. stereo matrix at the input rate
     for (let i = 0; i < n; i++) {
@@ -446,9 +456,9 @@ export class MpxGenerator {
     }
 
     // 3. ×4 interpolation to the composite rate
-    this.upM.process(this.monoBuf, this.compBuf);
-    const sideHi = new Float32Array(n * 4);
-    this.upS.process(this.sideBuf, sideHi);
+    this.upM.process(this.monoBuf.subarray(0, n), this.compBuf);
+    const sideHi = this.sideHi;
+    this.upS.process(this.sideBuf.subarray(0, n), sideHi);
 
     // 4. subcarrier synthesis + clipper (single pass, exact phase lock:
     //    38 kHz = cos 2φ, RDS carrier = sin 3φ all derive from φ)
@@ -460,18 +470,19 @@ export class MpxGenerator {
     const alarm = fm.mpx.alarmPct / 100;
     let phi = this.phi;
     let psi = this.psi;
-    let bitPhase = this.bitPhase;
-    let half = this.half;
+    let halfPhase = this.halfPhase;
+    let inSecond = this.inSecondHalf;
     let prevEnc = this.rdsPrevEnc;
+    let curEnc = this.rdsCurEnc;
     const bits = this.rdsBits;
-    const shape = this.rdsShaper;
     const comp = this.compBuf;
     let maxPre = this.maxPre;
     let clip = this.clipSamples;
     let over = this.overSamples;
-    const bitAdv = RDS_BIT_RATE / this.outRate;
+    // biphase symbols run at 2× the bit rate — one transition mid-bit
+    const halfAdv = (2 * RDS_BIT_RATE) / this.outRate;
 
-    for (let i = 0; i < comp.length; i++) {
+    for (let i = 0; i < clen; i++) {
       phi += this.wPilot;
       if (phi > Math.PI * 2) phi -= Math.PI * 2;
       psi += this.wSca;
@@ -481,17 +492,22 @@ export class MpxGenerator {
       const sin3 = s1 * (3 - 4 * s1 * s1); // sin 3φ
 
       let rdsW = 0;
-      if (r > 0 || rds > 0) {
-        bitPhase += bitAdv;
-        while (bitPhase >= 1) {
-          bitPhase -= 1;
-          const enc = bits.next() ^ prevEnc;
-          prevEnc = enc;
-          half ^= 1;
+      if (rds > 0) {
+        halfPhase += halfAdv;
+        while (halfPhase >= 1) {
+          halfPhase -= 1;
+          if (!inSecond) {
+            inSecond = true;
+          } else {
+            // next bit starts: differential encode, then biphase it
+            inSecond = false;
+            curEnc = bits.next() ^ prevEnc;
+            prevEnc = curEnc;
+          }
         }
         // biphase: +enc for the first half-bit, −enc for the second
-        const lvl = half === 0 ? 1 - 2 * prevEnc : 2 * prevEnc - 1;
-        rdsW = shape.process(lvl);
+        const sign = 1 - 2 * curEnc;
+        rdsW = this.rdsShaper.process(this.rdsShaper2.process(inSecond ? -sign : sign));
       }
 
       const pre =
@@ -506,17 +522,18 @@ export class MpxGenerator {
       comp[i] = apre > ceil ? (pre > 0 ? ceil : -ceil) : pre;
       if (apre > ceil) clip++;
     }
-    this.totalSamples += comp.length;
+    this.totalSamples += clen;
 
     this.phi = phi;
     this.psi = psi;
-    this.bitPhase = bitPhase;
-    this.half = half;
+    this.halfPhase = halfPhase;
+    this.inSecondHalf = inSecond;
     this.rdsPrevEnc = prevEnc;
+    this.rdsCurEnc = curEnc;
     this.maxPre = maxPre;
     this.clipSamples = clip;
     this.overSamples = over;
-    return comp;
+    return comp.subarray(0, clen);
   }
 
   /** Take the metering tick and reset the window accumulators. */
@@ -651,7 +668,6 @@ function hann(n: number): Float32Array {
  */
 export function spectrumDb(
   composite: Float32Array,
-  outRate: number,
   fftSize = 4096,
 ): Float32Array {
   const n = Math.min(fftSize, 1 << Math.floor(Math.log2(composite.length)));
@@ -668,6 +684,5 @@ export function spectrumDb(
     const mag = Math.hypot(re[k], im[k]) * norm * 2;
     out[k] = Math.max(-110, 20 * Math.log10(mag + 1e-11));
   }
-  void outRate;
   return out;
 }
