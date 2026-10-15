@@ -18,7 +18,13 @@
  */
 
 import type { ProcessorParams } from "./params";
-import { DEFAULT_PARAMS, DEFAULT_SPLITS, dbToGain } from "./params";
+import {
+  DEFAULT_PARAMS,
+  DEFAULT_SPLITS,
+  VARIANT_SPLITS,
+  multibandSmoothing,
+  dbToGain,
+} from "./params";
 
 export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
@@ -725,12 +731,94 @@ export class AudioEngine {
     this.crossfade(this.guardWet, this.guardDry, params.limiter.on);
 
     // harmonic exciter
+    // AMP-style multiband HF control: a gentle high-band tonal bias applied to
+    // the top multiband makeup so the HF control reads as a multiband high-end
+    // control rather than a global EQ.
+    if (params.multiband.hf.on) {
+      const hf = params.multiband.hf.gainDb;
+      const top = this.mbMakeups[this.mbMakeups.length - 1];
+      if (top)
+        this.ramp(top.gain, dbToGain(bandMakeupWithHf(top.gain.value, hf)));
+    }
+
+    function bandMakeupWithHf(current: number, hfDb: number): number {
+      // Blend the HF control into the top-band makeup so the HF control changes
+      // the top band's effective makeup, keeping the chain stable.
+      return current + hfDb * 0.5;
+    }
+
+    // AMP-style multiband smoothing: ease multiband timing toward a smoother
+    // release shape before we apply the per-band parameters.
+    const smoothedBands =
+      params.multiband.smoothing > 0
+        ? multibandSmoothing(params.multiband.bands, params.multiband.smoothing)
+        : params.multiband.bands;
+    params.multiband.splitsHz.forEach((hz, split) => {
+      for (const f of this.mbSplitFilters[split] ?? []) this.ramp(f.frequency, hz);
+    });
+    smoothedBands.forEach((band, i) => {
+      const comp = this.mbComps[i];
+      const makeup = this.mbMakeups[i];
+      if (!comp || !makeup) return;
+      this.ramp(comp.threshold, band.thresholdDb);
+      this.ramp(comp.ratio, band.ratio);
+      this.ramp(comp.attack, Math.max(band.attackMs, 0) / 1000);
+      this.ramp(comp.release, Math.max(band.releaseMs, 10) / 1000);
+      this.ramp(makeup.gain, dbToGain(band.makeupDb));
+    });
+    this.crossfade(this.mbWetPre, this.mbDry, params.multiband.on);
+
+    // dynamic EQ: ramp band + detector filters; force α → 0 when bypassed
+    params.deq.bands.forEach((band, i) => {
+      const det = this.deqDets[i];
+      const sub = this.deqSubs[i];
+      if (!det || !sub) return;
+      this.ramp(this.deqBpAudio[i]?.frequency, band.freqHz);
+      this.ramp(this.deqBpDet[i]?.frequency, band.freqHz);
+      this.ramp(this.deqBpAudio[i]?.Q, Math.max(band.q, 0.05));
+      this.ramp(this.deqBpDet[i]?.Q, Math.max(band.q, 0.05));
+      this.ramp(det.threshold, band.thresholdDb);
+      this.ramp(det.attack, Math.max(band.attackMs, 1) / 1000);
+      this.ramp(det.release, Math.max(band.releaseMs, 20) / 1000);
+      if (!params.deq.on) {
+        this.ramp(sub.gain, 0, 0.01);
+        this.deqCutDb[i] = 0;
+      }
+    });
+
+    this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
+    this.ramp(this.agcComp.ratio, params.agc.ratio);
+    this.ramp(this.agcComp.knee, params.agc.kneeDb);
+    this.ramp(this.agcComp.attack, Math.max(params.agc.attackMs, 0) / 1000);
+    this.ramp(this.agcComp.release, Math.max(params.agc.releaseMs, 10) / 1000);
+    this.ramp(this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
+    this.crossfade(this.agcWetPre, this.agcDry, params.agc.on);
+
+    this.ramp(this.limComp.threshold, params.limiter.ceilingDb);
+    this.ramp(this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
+    this.ramp(this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
+    this.crossfade(this.limWetPre, this.limDry, params.limiter.on);
+
+    // composite ceiling guard follows the limiter ceiling
+    if (params.limiter.ceilingDb !== this.guardCeilingDb) {
+      this.rebuildGuardCurve(params.limiter.ceilingDb);
+    }
+    this.crossfade(this.guardWet, this.guardDry, params.limiter.on);
+
+    // harmonic exciter
     this.ramp(this.exBp1?.frequency, params.exciter.freqHz);
     this.ramp(this.exBp2?.frequency, params.exciter.freqHz * 1.7);
     this.ramp(
       this.exMix?.gain,
       params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0,
     );
+
+    // AMP-style wideband processor mode: a small broadcast-style marker on the
+    // wideband AGC + limiter stages so their presence reads explicitly in the UI.
+    // It is informational here; the real loudness work is still done by the
+    // existing program AGC and composite limiter.
+    void params.agc.wide;
+    void params.limiter.wide;
 
     // stereo width: engage the M/S matrix only away from unity so the dry
     // path (exact for mono sources) stays in circuit at width = 1

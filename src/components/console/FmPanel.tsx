@@ -274,6 +274,21 @@ export function FmPanel({
   const setMpx = (patch: Partial<FmParams["mpx"]>) =>
     onChange({ ...fm, mpx: { ...fm.mpx, ...patch } });
 
+  const deViaB = (fm.emphasis === "off" ? 75000 : Math.round(75000 * (1 + 0.0000000141 * (fm.emphasis === "75" ? 75 : 50))));
+  const devTarget = (emphasis: FmEmphasis, hz: number) => {
+    const cb = emphasis === "off" ? null : emphasisCornerHz(emphasis);
+    const dBu = cb === null ? 0 : 20 * Math.log10(hz / Math.max(cb, 1));
+    return 18 * Math.pow(10, Math.max(0, dBu) / 20);
+  };
+  const devAt = (hz: number) => {
+    const cb = fm.emphasis === "off" ? null : emphasisCornerHz(fm.emphasis);
+    const cornerHz = cb ?? 75000;
+    const above = hz > cornerHz ? (hz - cornerHz) / cornerHz : 0;
+    const linearDev = Math.pow(10, above * 2 / 10) * deViaB * 0.01;
+    return Math.round(Math.min(75000, linearDev * 100)) / 100;
+  };
+
+
   const corner =
     fm.emphasis === "off" ? null : emphasisCornerHz(fm.emphasis);
   const boost15 =
@@ -399,11 +414,38 @@ export function FmPanel({
                 onBlur={() => setMpx({ rdsPs: psDraft.padEnd(8, " ").slice(0, 8) })}
                 className="text-readout font-mono tracking-[0.2em] uppercase"
                 aria-label="RDS programme service name (8 characters)"
-              />
-              <span className="text-[9px] text-muted-foreground">
+              />                <span className="text-[9px] text-muted-foreground">
                 8 characters · sent as group 0A on the 57 kHz subcarrier
               </span>
             </div>
+          </div>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+                Deviation level
+              </Label>
+              <Val className="text-readout">
+                ±{fm.emphasis === "off" ? "75" : fm.emphasis} µs @ 1 kHz → ±{devAt(1000).toFixed(2)} kHz
+              </Val>
+              <CtrlRow label="Deviation @ 15 kHz">
+                <Val className="w-24 text-right">
+                  +{devAt(15000).toFixed(2)} kHz
+                </Val>
+                <span className="text-[10px] text-muted-foreground">
+                  Pre-emphasis-boosted deviation on programme highs.
+                </span>
+              </CtrlRow>
+              <CtrlRow label="Pre-emphasis budget">
+                <Val className="w-24 text-right">
+                  +{(devAt(15000) - 75).toFixed(2)} kHz over 1 kHz
+                </Val>
+                <span className="text-[10px] text-muted-foreground">
+                  Extra deviation consumed by the pre-emphasis boost on the top octave.
+                </span>
+              </CtrlRow>
+            </div>
+
             <div className="flex flex-col justify-end gap-1.5">
               <span
                 className={cn(
@@ -414,8 +456,11 @@ export function FmPanel({
                 )}
               >
                 Subcarrier budget {subcarrierSum.toFixed(1)} % of 20 % max
-                (pilot + RDS + SCA) — {sumWarn ? "over the FCC 73.319 sum" : "within FCC 73.319"}
+                (pilot + RDS + SCA) —
+                {sumWarn ? "over the FCC 73.319 sum" : "within FCC 73.319"}
               </span>
+
+
               {snap.error && (
                 <span className="rounded border border-meter-hot/50 bg-meter-hot/10 px-2 py-1.5 text-[9px] text-meter-hot">
                   {snap.error}

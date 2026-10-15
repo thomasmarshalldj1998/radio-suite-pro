@@ -16,6 +16,7 @@ import {
   type MultibandBands,
   type MultibandSplits,
   type ProcessorParams,
+  type ProcessorVariant,
 } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { ChevronDown, Volume2, VolumeX, Zap } from "lucide-react";
@@ -597,7 +598,7 @@ export function ProcessingTab({
         <ChainBlock
           index={3}
           title="Multiband"
-          subtitle="6-band · LR4 crossovers · per-band threshold"
+          subtitle="6-band · LR4 crossovers · per-band threshold · AMP-style HF & smoothing"
           wide
           gr={{
             label: "MB",
@@ -669,6 +670,93 @@ export function ProcessingTab({
             loaded preset. Sustained GR over 6 dB on a band means its
             threshold is working too hard.
           </p>
+
+          <div className="mt-3 flex items-center gap-3">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold tracking-[0.12em] uppercase text-muted-foreground">
+                Multiband HF
+              </span>
+              <CtrlRow>
+                <Seg
+                  ariaLabel="Multiband HF control"
+                  value={params.multiband.hf.on ? "on" : "off"}
+                  options={[
+                    { value: "on", label: "On" },
+                    { value: "off", label: "Off" },
+                  ]}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      multiband: {
+                        ...p.multiband,
+                        hf: { ...p.multiband.hf, on: v === "on" },
+                      },
+                    }))
+                  }
+                  inline
+                  small
+                />
+                {params.multiband.hf.on ? (
+                  <Val>
+                    {sgn(params.multiband.hf.gainDb)} dB
+                  </Val>
+                ) : (
+                  <Val className="text-panel-mut">
+                    off
+                  </Val>
+                )}
+              </CtrlRow>
+              {params.multiband.hf.on && (
+                <SliderRow
+                  className="max-w-24"
+                  min={-12}
+                  max={12}
+                  step={0.5}
+                  value={params.multiband.hf.gainDb}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      multiband: {
+                        ...p.multiband,
+                        hf: { ...p.multiband.hf, gainDb: v },
+                      },
+                    }))
+                  }
+                  label="HF trim"
+                />
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold tracking-[0.12em] uppercase text-muted-foreground">
+                Smoothing
+              </span>
+              <CtrlRow>
+                <SliderRow
+                  className="max-w-24"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={params.multiband.smoothing}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      multiband: {
+                        ...p.multiband,
+                        smoothing: v,
+                      },
+                    }))
+                  }
+                  label="Smooth 0–100"
+                />
+                <Val className="text-panel-mut">{params.multiband.smoothing} %</Val>
+              </CtrlRow>
+              <span className="text-[9px] leading-3 text-panel-mut">
+                AMP-style multiband timing smoothing. Higher values ease the
+                multiband attack/release toward a simpler gating envelope.
+              </span>
+            </div>
+          </div>
         </ChainBlock>
 
         <ChainArrow />
@@ -1057,6 +1145,8 @@ export function ProcessingTab({
             </Button>
           </div>
 
+          
+
           <div className="panel-well mt-2 rounded px-2.5 py-1.5">
             <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
               Correlation
@@ -1073,8 +1163,66 @@ export function ProcessingTab({
             </p>
           </div>
 
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold tracking-[0.12em] uppercase text-muted-foreground">
+                Processor variant
+              </span>
+              <CtrlRow>
+                <Seg
+                  ariaLabel="Processor variant / pre-emphasis"
+                  value={params.variant}
+                  options={[
+                    { value: "off", label: "Pre-emphasis off" },
+                    { value: "50", label: "Pre-emphasis 50 \u00b5s" },
+                    { value: "75", label: "Pre-emphasis 75 \u00b5s" },
+                    { value: "auto-75", label: "Auto 75 \u00b5s (stereo default)" },
+                  ]}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      variant: v as ProcessorVariant,
+                    }))
+                  }
+                  inline
+                  small
+                />
+              </CtrlRow>
+              <span className="text-[9px] leading-3 text-panel-mut">
+                AMP-style processor variant selection. The FM panel reads the
+                chosen variant to drive the pre-emphasis stage.
+              </span>
+            </div>
+          </div>
+
           <div className="mt-2 flex justify-center">
             <StereoLevelMeter kind="out" height={120} />
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-start gap-3">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold tracking-[0.12em] uppercase text-muted-foreground">
+                Processor variant
+              </span>
+              <CtrlRow>
+                <Seg
+                  ariaLabel="Processor variant and pre-emphasis"
+                  value={params.variant}
+                  options={[
+                    { value: "off", label: "Pre-emphasis off" },
+                    { value: "50", label: "Pre-emphasis 50 µs" },
+                    { value: "75", label: "Pre-emphasis 75 µs" },
+                    { value: "auto-75", label: "Auto 75 µs (stereo default)" },
+                  ]}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      variant: v as ProcessorVariant,
+                    }))
+                  }
+                />
+              </CtrlRow>
+            </div>
           </div>
         </ChainBlock>
       </div>
