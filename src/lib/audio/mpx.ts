@@ -127,8 +127,14 @@ function designShapedLpf(opts: {
   return out;
 }
 
-/** Upsampling interpolator prototype: ×L zero-stuff image killer. */
-function designInterpLpf(taps: number, cutoffHz: number, fs: number): Float64Array {
+/**
+ * Upsampling interpolator prototype: ×L zero-stuff image killer.
+ *
+ * Normalised so the total tap sum equals `l` — each polyphase branch then
+ * sums to ≈1, giving the branch unity gain (zero-stuffing dilutes amplitude
+ * by 1/L, so the prototype must supply the L back).
+ */
+function designInterpLpf(taps: number, cutoffHz: number, fs: number, l: number): Float64Array {
   const mid = (taps - 1) / 2;
   const beta = kaiserBeta(85);
   const out = new Float64Array(taps);
@@ -141,7 +147,7 @@ function designInterpLpf(taps: number, cutoffHz: number, fs: number): Float64Arr
     out[i] = s * w;
     sum += out[i];
   }
-  for (let i = 0; i < taps; i++) out[i] /= sum;
+  for (let i = 0; i < taps; i++) out[i] = (out[i] / sum) * l; // Σ = L → each branch sums to ≈1
   return out;
 }
 
@@ -243,11 +249,13 @@ export class RdsBitSource {
   private seg = 0;
   readonly pi: number;
   readonly pty: number;
+  readonly tp: number;
   private ps: string;
 
   constructor(pi: number, ps: string, pty = 10, tp = 0) {
     this.pi = pi & 0xffff;
     this.pty = pty & 0x1f;
+    this.tp = tp & 1;
     this.ps = (ps + "        ").slice(0, 8);
   }
 
@@ -262,7 +270,7 @@ export class RdsBitSource {
     // rotates with the segment per the DI spread), C1C0 = segment address
     const di = (0b1000 >> seg) & 1;
     const blockB =
-      (0 << 12) | (0 << 11) | (0 << 10) | (this.pty << 5) | (0 << 4) |
+      (0 << 12) | (0 << 11) | (this.tp << 10) | (this.pty << 5) | (0 << 4) |
       (1 << 3) | (di << 2) | seg;
     const cA = this.char(2 * seg);
     const cB = this.char(2 * seg + 1);
@@ -380,7 +388,7 @@ export class MpxGenerator {
     // interpolation: flat across the 15 kHz audio band (passband ≈18.6 kHz),
     // ≥85 dB down from ≈29 kHz up — kills every image of the brickwalled
     // programme (first image at 48k−15k = 33 kHz)
-    const proto = designInterpLpf(96, 24000, this.outRate);
+    const proto = designInterpLpf(96, 24000, this.outRate, 4);
     this.upM = new PolyphaseUpsampler(proto);
     this.upS = new PolyphaseUpsampler(proto);
     this.monoBuf = new Float32Array(blockSize);

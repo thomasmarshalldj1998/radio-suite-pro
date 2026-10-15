@@ -32,9 +32,11 @@ function MpxSpectrumCanvas({ height = 120 }: { height?: number }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     let raf = 0;
-    let lastSpec: Float32Array | null = getFm().spectrum;
+    let lastSnap = getFm();
+    let lastSpec: Float32Array | null = lastSnap.spectrum;
     const unsub = subscribeFm(() => {
-      lastSpec = getFm().spectrum;
+      lastSnap = getFm();
+      lastSpec = lastSnap.spectrum;
     });
 
     const draw = () => {
@@ -84,7 +86,7 @@ function MpxSpectrumCanvas({ height = 120 }: { height?: number }) {
       }
 
       if (spec && spec.length > 0) {
-        const binHz = 192000 / 4096;
+        const binHz = (lastSnap.outRate || 192000) / 4096;
         // spectrum trace (filled)
         ctx.beginPath();
         ctx.moveTo(0, h);
