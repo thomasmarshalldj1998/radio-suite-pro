@@ -4,4 +4,5 @@ dist
 dist-desktop
 release
 build
-src/convex/_generated
+# Convex's generated types ARE versioned: CI typechecks and bundles from a
+# fresh checkout, where `convex dev` never ran (they are never hand-edited).

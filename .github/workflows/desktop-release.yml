@@ -33,6 +33,11 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      # Fail fast with one clear line instead of a wall of tsc errors if the
+      # versioned Convex types are missing from the checkout.
+      - name: Verify versioned sources
+        run: node -e "const fs=require('fs');if(!fs.existsSync('src/convex/_generated/api.js')){console.error('::error::src/convex/_generated is missing from the repo — commit the generated Convex types (do not gitignore them); CI typechecks from a fresh checkout.');process.exit(1)}"
+
       - name: Generate icon
         run: bun run desktop:icon
 
