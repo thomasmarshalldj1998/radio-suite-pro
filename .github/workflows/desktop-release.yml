@@ -18,7 +18,10 @@ jobs:
           - os: windows-latest
             args: --win
           - os: macos-latest
-            args: --mac
+            # macos-latest is Apple silicon; name both archs explicitly or
+            # only arm64 would build (defaults to process.arch) and the
+            # Intel DMG link on the site would 404.
+            args: --mac --arm64 --x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
