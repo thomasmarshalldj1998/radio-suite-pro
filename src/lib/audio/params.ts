@@ -331,6 +331,14 @@ function mb6(
  *   — form a graded ladder from open/transparent to fully processed, plus
  *   the voice-optimised Talk (phase rotation + fast multiband) and the
  *   gating-focused Sports tunings.
+ * - OFCOM family: UK FM compliance tunings — 50 µs pre-emphasis (ITU Region 1
+ *   standard, required by UK FM receivers), MPX composite engaged with a
+ *   9 % pilot and 3 % RDS injection (8–10 % / 2–4 % of the ±75 kHz total
+ *   permitted deviation), a hard 100 % composite ceiling with alarm, and
+ *   −23 LUFS / EBU R128 loudness practice with true-peak headroom (−1.5 to
+ *   −2 dBTP) so the pre-emphasis high-frequency boost can never drive the
+ *   composite over 100 % modulation. Speech entries honour Ofcom's speech
+ *   quota formats (talk, phone-in, sports OB).
  */
 export const BUILTIN_PRESETS: BuiltinPreset[] = [
   {
@@ -2950,6 +2958,281 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       rider: { on: true, targetLufs: -24, maxRideDb: 5, gateDb: -58, speed: "slow" },
       stereo: { width: 1.05 },
       limiter: { on: true, ceilingDb: -1.5, attackMs: 2, releaseMs: 220 },
+    }),
+  },
+  {
+    id: "ofcom-fm-reference",
+    name: "OFCOM · UK FM Reference",
+    description:
+      "The UK FM compliance chain: 50 µs pre-emphasis with the composite generator engaged at legal pilot (9 %) and RDS (3 %) levels, a hard 100 % deviation ceiling with overmodulation alarm, and an EBU R128 −23 LUFS ride with −1.5 dBTP headroom so the pre-emphasis treble boost can never clip the composite.",
+    tags: ["FM", "OFCOM", "R128"],
+    family: "OFCOM",
+    params: merge({
+      hpf: { on: true, freqHz: 50 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 0, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 1, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: 0, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 0.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -20, maxCutDb: 5, attackMs: 12, releaseMs: 280 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 250 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 180 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -18, maxCutDb: 5, attackMs: 6, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -22, maxCutDb: 8, attackMs: 4, releaseMs: 120 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -14, ratio: 3, attackMs: 10, releaseMs: 350, makeupDb: 2 },
+        { thresholdDb: -16, ratio: 3, attackMs: 7, releaseMs: 330, makeupDb: 2 },
+        { thresholdDb: -18, ratio: 3, attackMs: 4, releaseMs: 300, makeupDb: 1.5 },
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -18,
+        ratio: 3,
+        kneeDb: 6,
+        attackMs: 15,
+        releaseMs: 400,
+        makeupDb: 4,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, gateDb: -55, speed: "fast" },
+      stereo: { width: 1.05 },
+      limiter: { on: true, ceilingDb: -1.5, attackMs: 1, releaseMs: 100 },
+      fm: {
+        on: true,
+        emphasis: "50",
+        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+      },
+    }),
+  },
+  {
+    id: "ofcom-fm-speech",
+    name: "OFCOM · UK FM Speech & Phone-in",
+    description:
+      "Talk and phone-in programming under the UK FM licence: phase rotation smooths asymmetrical peaks, fast multiband timing controls multi-mic studios and callers, and the same legal MPX settings with −23 LUFS ride keep the transmission compliant through every interview and talk break.",
+    tags: ["Speech", "OFCOM", "Talk"],
+    family: "OFCOM",
+    params: merge({
+      hpf: { on: true, freqHz: 100 },
+      phase: { mode: "auto", freqHz: 90 },
+      gate: { on: true, thresholdDb: -50, holdMs: 700 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: -1, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 3, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: -1, q: 1.6, type: "peaking" },
+          { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 260 },
+          { freqHz: 250, q: 1.0, thresholdDb: -20, maxCutDb: 6, attackMs: 10, releaseMs: 260 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -21, maxCutDb: 5, attackMs: 6, releaseMs: 200 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -19, maxCutDb: 6, attackMs: 4, releaseMs: 160 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -20, maxCutDb: 7, attackMs: 3, releaseMs: 120 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -16, ratio: 4, attackMs: 3, releaseMs: 110, makeupDb: 3 },
+        { thresholdDb: -16, ratio: 4.5, attackMs: 2, releaseMs: 100, makeupDb: 3 },
+        { thresholdDb: -18, ratio: 5, attackMs: 1, releaseMs: 85, makeupDb: 3 },
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -20,
+        ratio: 4.5,
+        kneeDb: 3,
+        attackMs: 4,
+        releaseMs: 150,
+        makeupDb: 6,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, gateDb: -48, speed: "fast" },
+      stereo: { width: 1.02 },
+      limiter: { on: true, ceilingDb: -1.5, attackMs: 0.6, releaseMs: 60 },
+      fm: {
+        on: true,
+        emphasis: "50",
+        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+      },
+    }),
+  },
+  {
+    id: "ofcom-fm-chr",
+    name: "OFCOM · UK FM CHR / Hit Music",
+    description:
+      "Competitive contemporary radio inside the licence: density comes from deep multiband and a hot −23 LUFS ride rather than extra level, while a −2 dBTP ceiling and the 100 % composite alarm guarantee the 50 µs pre-emphasis boost never over-deviates the transmitter.",
+    tags: ["Music", "OFCOM", "Loud"],
+    family: "OFCOM",
+    params: merge({
+      hpf: { on: true, freqHz: 45 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 3, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1.5, q: 1.1, type: "peaking" },
+          { freq: 700, gainDb: 0.5, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 2.5, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: 1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 1.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -18, maxCutDb: 7, attackMs: 9, releaseMs: 250 },
+          { freqHz: 250, q: 1.0, thresholdDb: -18, maxCutDb: 6, attackMs: 9, releaseMs: 250 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 5, attackMs: 7, releaseMs: 220 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -20, maxCutDb: 5, attackMs: 6, releaseMs: 200 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -21, maxCutDb: 6, attackMs: 5, releaseMs: 180 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -20, ratio: 5, attackMs: 5, releaseMs: 180, makeupDb: 3.5 },
+        { thresholdDb: -21, ratio: 4.5, attackMs: 3, releaseMs: 160, makeupDb: 3.5 },
+        { thresholdDb: -22, ratio: 4, attackMs: 1.5, releaseMs: 140, makeupDb: 3 },
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -22,
+        ratio: 5,
+        kneeDb: 4,
+        attackMs: 6,
+        releaseMs: 200,
+        makeupDb: 7,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 9, gateDb: -50, speed: "fast" },
+      stereo: { width: 1.15 },
+      exciter: { on: true, mix: 3, freqHz: 6000 },
+      limiter: { on: true, ceilingDb: -2, attackMs: 0.5, releaseMs: 70 },
+      fm: {
+        on: true,
+        emphasis: "50",
+        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+      },
+    }),
+  },
+  {
+    id: "ofcom-fm-classical",
+    name: "OFCOM · UK FM Classical",
+    description:
+      "Wide-dynamic classical under the UK FM licence: minimal intervention with slow multiband and a long-integration loudness ride sitting just under the −23 LUFS nominal, so crescendos survive intact and the composite stays a long way inside 100 % modulation.",
+    tags: ["Music", "OFCOM", "Purist"],
+    family: "OFCOM",
+    params: merge({
+      hpf: { on: true, freqHz: 40 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 0.5, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 0, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: -0.5, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: 0, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 0.5, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: false,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -28, maxCutDb: 3, attackMs: 25, releaseMs: 500 },
+          { freqHz: 250, q: 1.0, thresholdDb: -26, maxCutDb: 3, attackMs: 22, releaseMs: 480 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -28, maxCutDb: 2, attackMs: 20, releaseMs: 450 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -26, maxCutDb: 3, attackMs: 18, releaseMs: 420 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -28, maxCutDb: 3, attackMs: 15, releaseMs: 380 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -12, ratio: 1.8, attackMs: 30, releaseMs: 700, makeupDb: 1 },
+        { thresholdDb: -14, ratio: 1.8, attackMs: 25, releaseMs: 650, makeupDb: 1 },
+        { thresholdDb: -16, ratio: 2, attackMs: 15, releaseMs: 600, makeupDb: 1 },
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -16,
+        ratio: 1.8,
+        kneeDb: 12,
+        attackMs: 40,
+        releaseMs: 900,
+        makeupDb: 2,
+      },
+      rider: { on: true, targetLufs: -24, maxRideDb: 5, gateDb: -60, speed: "slow" },
+      stereo: { width: 1.02 },
+      limiter: { on: true, ceilingDb: -1.5, attackMs: 3, releaseMs: 280 },
+      fm: {
+        on: true,
+        emphasis: "50",
+        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+      },
+    }),
+  },
+  {
+    id: "ofcom-fm-sports",
+    name: "OFCOM · UK FM Sports OB",
+    description:
+      "Outside-broadcast sports commentary for UK FM: slower multiband timing with a more active wideband gate and pause-hold so crowd surges never ride up in gaps between commentary, all under the same legal 50 µs / MPX / −23 LUFS compliance stack.",
+    tags: ["Speech", "OFCOM", "Sports"],
+    family: "OFCOM",
+    params: merge({
+      hpf: { on: true, freqHz: 100 },
+      phase: { mode: "auto", freqHz: 90 },
+      gate: { on: true, thresholdDb: -46, holdMs: 1200 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: -2, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: -1, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: 1, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 4, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: -0.5, q: 1.5, type: "peaking" },
+          { freq: 12000, gainDb: 0, q: 0.7, type: "highshelf" },
+        ],
+      },
+      deq: {
+        on: true,
+        bands: [
+          { freqHz: 80, q: 0.9, thresholdDb: -19, maxCutDb: 7, attackMs: 12, releaseMs: 300 },
+          { freqHz: 250, q: 1.0, thresholdDb: -19, maxCutDb: 6, attackMs: 12, releaseMs: 300 },
+          { freqHz: 1600, q: 1.1, thresholdDb: -20, maxCutDb: 5, attackMs: 8, releaseMs: 240 },
+          { freqHz: 5000, q: 1.2, thresholdDb: -18, maxCutDb: 6, attackMs: 6, releaseMs: 200 },
+          { freqHz: 10000, q: 1.1, thresholdDb: -20, maxCutDb: 6, attackMs: 4, releaseMs: 150 },
+        ],
+      },
+      multiband: mb6(
+        { thresholdDb: -15, ratio: 4, attackMs: 8, releaseMs: 350, makeupDb: 3 },
+        { thresholdDb: -15, ratio: 4.5, attackMs: 6, releaseMs: 330, makeupDb: 3 },
+        { thresholdDb: -17, ratio: 4.5, attackMs: 4, releaseMs: 300, makeupDb: 2.5 },
+      ),
+      agc: {
+        on: true,
+        thresholdDb: -19,
+        ratio: 4,
+        kneeDb: 4,
+        attackMs: 10,
+        releaseMs: 350,
+        makeupDb: 6,
+      },
+      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, gateDb: -44, speed: "fast" },
+      stereo: { width: 1.03 },
+      limiter: { on: true, ceilingDb: -1.5, attackMs: 0.8, releaseMs: 80 },
+      fm: {
+        on: true,
+        emphasis: "50",
+        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+      },
     }),
   },
 ];
