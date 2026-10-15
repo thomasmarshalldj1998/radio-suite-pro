@@ -28,11 +28,14 @@ linux:
   icon: build/icon.png
   synopsis: Broadcast audio processor and stream encoder
   maintainer: Signalpath <support@signalpath.app>
+  # Version-free names so /releases/latest/download/… links stay stable.
+  artifactName: Signalpath-${arch}.${ext}
 
 win:
   target:
     - nsis
   icon: build/icon.png
+  artifactName: Signalpath-Setup-${arch}.${ext}
 
 deb:
   # gzip instead of the xz default: builds on minimal systems without xz-utils
@@ -44,6 +47,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   shortcutName: Signalpath
+  artifactName: Signalpath-Setup-${arch}.${ext}
 
 mac:
   target:
@@ -51,6 +55,7 @@ mac:
     - zip
   category: public.app-category.music
   icon: build/icon.png
+  artifactName: Signalpath-${arch}-${os}.${ext}
   # Unsigned by default so anyone can build; set up signing by removing
   # `identity: null` and providing CSC_KEYFILE/CSC_LINK in CI.
   identity: null
