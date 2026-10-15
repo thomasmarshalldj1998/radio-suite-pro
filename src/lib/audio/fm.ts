@@ -44,7 +44,7 @@ let detachTap: (() => void) | null = null;
 let tapPending: Promise<void> | null = null;
 let applied: FmParams | null = null;
 let streamRequested = false;
-let streamSinks = new Set<(l: Float32Array) => void>();
+const streamSinks = new Set<(l: Float32Array) => void>();
 
 const listeners = new Set<() => void>();
 

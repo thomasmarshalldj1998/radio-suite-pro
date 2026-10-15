@@ -93,12 +93,16 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
+    // deliver the current selection once listeners are attached, off the
+    // effect's synchronous body
+    const frame = requestAnimationFrame(() => onSelect(api))
 
     return () => {
-      api?.off("select", onSelect)
+      cancelAnimationFrame(frame)
+      api.off("reInit", onSelect)
+      api.off("select", onSelect)
     }
   }, [api, onSelect])
 

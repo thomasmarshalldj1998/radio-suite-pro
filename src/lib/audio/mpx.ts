@@ -89,7 +89,6 @@ function designShapedLpf(opts: {
   const { sampleRate: fs, taps: n, shapeDb, passHz, transHz, stopbandDb } = opts;
   const mid = (n - 1) / 2;
   const m = 2048;
-  const nyq = fs / 2;
   const h = new Float64Array(m);
   for (let k = 0; k <= m / 2; k++) {
     const f = (k / m) * fs;
@@ -188,7 +187,7 @@ class PolyphaseUpsampler {
   private readonly pp: number;
   private readonly proto: Float64Array;
   private readonly hist: Float64Array;
-  private readonly scratch: Float64Array;
+  private scratch: Float64Array;
   constructor(proto: Float64Array) {
     this.proto = proto;
     this.pp = proto.length / this.l;

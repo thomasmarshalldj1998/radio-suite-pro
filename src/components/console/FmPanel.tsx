@@ -262,7 +262,13 @@ export function FmPanel({
 }) {
   const snap = useSyncExternalStore(subscribeFm, getFm);
   const [psDraft, setPsDraft] = useState(fm.mpx.rdsPs);
-  useEffect(() => setPsDraft(fm.mpx.rdsPs), [fm.mpx.rdsPs]);
+  const [lastPs, setLastPs] = useState(fm.mpx.rdsPs);
+  // keep the draft in step with external PS changes (preset loads) —
+  // adjust during render rather than resetting from an effect
+  if (fm.mpx.rdsPs !== lastPs) {
+    setLastPs(fm.mpx.rdsPs);
+    setPsDraft(fm.mpx.rdsPs);
+  }
 
   const set = (patch: Partial<FmParams>) => onChange({ ...fm, ...patch });
   const setMpx = (patch: Partial<FmParams["mpx"]>) =>
