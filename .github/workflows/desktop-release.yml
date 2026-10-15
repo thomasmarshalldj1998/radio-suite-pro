@@ -87,4 +87,4 @@ jobs:
             | macOS (Apple silicon) | `Signalpath-arm64-mac.dmg` |
             | macOS (Intel) | `Signalpath-x64-mac.dmg` |
             | Linux (universal) | `Signalpath-x86_64.AppImage` |
-            | Linux (Debian/Ubuntu) | `signalpath_1.0.0_amd64.deb` |
+            | Linux (Debian/Ubuntu) | `signalpath-amd64.deb` |

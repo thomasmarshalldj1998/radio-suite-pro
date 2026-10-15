@@ -75,11 +75,30 @@ Cross-build notes:
 - Media/fullscreen permissions are granted in the main process; microphone
   use is declared for macOS in `electron-builder.yml`.
 
+### Download links
+
+The landing page (`src/pages/Landing.tsx`) has a **Download** section with a
+per-platform installer link plus a link to all releases. Every URL derives
+from one constant — `RELEASES_URL` in `src/lib/version.ts`. Point it at your
+repository's releases page before publishing:
+
+```ts
+// src/lib/version.ts
+export const RELEASES_URL = "https://github.com/<you>/<repo>/releases";
+```
+
+The artifact names are version-free (`Signalpath-Setup-x64.exe`,
+`Signalpath-arm64-mac.dmg`, `Signalpath-x86_64.AppImage`,
+`signalpath-amd64.deb`, …) so the `/releases/latest/download/…` URLs never
+go stale between versions.
+
 ### CI
 
 `.github/workflows/desktop-release.yml` builds all three platforms natively
-(Ubuntu/Windows/macOS runners) and uploads the installers as artifacts on
-every `v*` tag.
+(Ubuntu/Windows/macOS runners) on every `v*` tag, then publishes them all on
+one GitHub Release (the `release` job). That is what the landing page's
+download links resolve against. The same installers are also kept as workflow
+artifacts for non-tag builds.
 
 
 # Using Authentication (Important!)

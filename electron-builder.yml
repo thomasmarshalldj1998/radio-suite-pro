@@ -40,6 +40,8 @@ win:
 deb:
   # gzip instead of the xz default: builds on minimal systems without xz-utils
   compression: gz
+  # Version-free name so the /releases/latest/download/… link stays stable.
+  artifactName: signalpath-${arch}.deb
 
 nsis:
   oneClick: false
