@@ -2,6 +2,11 @@
 # artifact is produced with the platform's own toolchain (no wine/cross hacks).
 name: desktop-release
 
+# Every run is labelled with the workflow revision, so the Actions list shows
+# at a glance whether a run used the current YAML or a stale re-run ("re-run
+# jobs" replays the ORIGINAL commit and can never pick up a later fix).
+run-name: desktop-release rev 7 · ${{ github.ref_name }}
+
 permissions:
   contents: read
 
@@ -55,6 +60,31 @@ jobs:
         with:
           bun-version: latest
 
+      # First thing after setup, print the facts that decide whether this run
+      # can possibly pass: which commit/ref/event it is building, whether the
+      # runner actually got the current workflow YAML, and the toolchain.
+      # Never fails the build - it only records evidence into the log and the
+      # run's Summary tab.
+      - name: Run diagnostics
+        shell: bash
+        run: |
+          bun_v="$(bun --version 2>/dev/null || echo unknown)"
+          node_v="$(node --version 2>/dev/null || echo unknown)"
+          {
+            echo "workflow revision : 7"
+            echo "commit            : ${{ github.sha }}"
+            echo "ref               : ${{ github.ref }}"
+            echo "event             : ${{ github.event_name }} (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"
+            echo "targets input     : '${{ inputs.targets }}'"
+            echo "runner            : ${{ runner.os }} / ${{ runner.arch }}"
+            echo "build args        : ${{ matrix.args }}"
+            echo "bun / node        : $bun_v / $node_v"
+            echo "checked-out HEAD  : $(git rev-parse --short HEAD 2>/dev/null || echo no-git)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo '::notice::manual run - inputs above decide which platforms build; re-running THIS run always reuses commit ${{ github.sha }}.'
+          fi
+
       # --frozen-lockfile installs exactly the locked tree (and fails loudly
       # if bun.lock is missing) instead of silently floating versions, which
       # is a classic source of "green locally, red in CI" tsc failures.
@@ -75,7 +105,7 @@ jobs:
         id: verify
         shell: bash
         run: |
-          echo "desktop-release workflow rev 6 (self-healing types, verify-all-files, cost-aware matrix)"
+          echo "desktop-release workflow rev 7 (self-healing types, verify-all-files, cost-aware matrix, run diagnostics)"
           echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
           echo "checked-in _generated contents:"
           ls -la src/convex/_generated/ 2>/dev/null || echo "  (directory absent)"
@@ -152,8 +182,28 @@ jobs:
       - name: Build renderer
         run: bun run desktop:build:renderer
 
+      # shell: bash on purpose - windows runners default to pwsh, and the
+      # pipefail + tee below need bash so a failing electron-builder still
+      # fails the step (a filtered pipeline must not swallow its status).
       - name: Package installers
-        run: bunx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish never
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p release
+          bunx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish never 2>&1 \
+            | tee release/electron-builder.log
+
+      # Only on failure: the packaging log and electron-builder's debug dump
+      # are what let a red run be diagnosed from the artifacts page alone.
+      - name: Upload packaging log (failed run)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signalpath-${{ matrix.os }}-logs
+          path: |
+            release/electron-builder.log
+            release/builder-debug.yml
+          if-no-files-found: warn
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

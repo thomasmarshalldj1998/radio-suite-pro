@@ -100,6 +100,19 @@ one GitHub Release (the `release` job). That is what the landing page's
 download links resolve against. The same installers are also kept as workflow
 artifacts for non-tag builds.
 
+To test the build without cutting a release: **Actions → desktop-release →
+Run workflow → `targets: linux`** (one cheap runner; `all` builds
+Windows + macOS too).
+
+**Never diagnose a red run with "Re-run jobs".** A re-run replays the *original
+commit* of that run, so it can never pick up a later fix — it just goes red the
+same way. Always start a **new** run (Run workflow, a fresh push, or a new
+`v*` tag). Each run is labelled `desktop-release rev N` and its first step
+prints the commit, ref, event, runner and toolchain (also on the run's Summary
+tab), so you can confirm at a glance which revision and commit a run actually
+used. When a packaging leg fails, its `electron-builder.log` is uploaded as a
+`signalpath-<os>-logs` artifact.
+
 
 # Using Authentication (Important!)
 
