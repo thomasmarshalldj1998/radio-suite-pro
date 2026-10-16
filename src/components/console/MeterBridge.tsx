@@ -190,10 +190,10 @@ export function MeterBridge({
       </div>
 
       <div className="scrollbar-slim overflow-x-auto">
-        {/* phones: sections wrap into centred rows so the whole deck is
-            visible without sideways scrolling; sm+ keeps the single
-            scrollable meter row */}
-        <div className="mx-auto flex w-full max-w-[1560px] flex-wrap items-stretch justify-center gap-x-4 gap-y-3 px-3 py-2.5 sm:w-max sm:min-w-full sm:flex-nowrap sm:justify-start sm:px-4">
+        {/* centred meter row on every breakpoint: phones wrap into centred
+            rows; sm+ keeps one row that safe-centres when it fits and
+            stays fully scrollable when it overflows */}
+        <div className="mx-auto flex w-full max-w-[1560px] flex-wrap items-stretch justify-center gap-x-4 gap-y-3 px-3 py-2.5 sm:w-max sm:min-w-full sm:flex-nowrap sm:px-4 sm:[justify-content:safe_center]">
           {/* ── input peaks ── */}
           <div className="flex shrink-0 items-start gap-2">
             <span className="flex flex-col items-center gap-1.5 pt-1">
@@ -339,7 +339,7 @@ export function MeterBridge({
           <DeckDivider />
 
           {/* ── loudness readout cluster ── */}
-          <div className="flex min-w-[228px] flex-1 items-end justify-center gap-x-5 gap-y-2 rounded-lg px-1 py-0.5 sm:justify-start">
+          <div className="flex w-full min-w-[228px] items-end justify-center gap-x-5 gap-y-2 rounded-lg px-1 py-0.5 sm:w-auto sm:flex-none">
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
