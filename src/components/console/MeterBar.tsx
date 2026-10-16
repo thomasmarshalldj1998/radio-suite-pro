@@ -132,41 +132,57 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
 
   return (
     <div className="border-b border-rack-line bg-[#15181d]">
-      <div className="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-5 gap-y-3 px-4 py-2.5">
-        {/* ── input meters ── */}
-        <div className="flex items-center gap-2">
-          <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
-            In
-          </span>
-          <StereoLevelMeter
-            kind="in"
-            height={40}
-            holdMs={holdMs}
-            decay={decay}
-            showState
+      {/* instrument-panel module strip — names the section on phones and
+          tablets, where the desktop page rail is hidden */}
+      <div className="rack-rail flex items-center justify-between gap-3 px-3 py-1.5 sm:px-4 lg:hidden">
+        <span className="flex items-center gap-2 text-[9px] font-bold tracking-[0.22em] text-panel-mut uppercase">
+          <span
+            className={cn("led size-1.5", powered && "led-on")}
+            aria-hidden
           />
-        </div>
+          Metering
+        </span>
+        <span className="text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
+          {powered ? "BS.1770-4 · live" : "Engine off"}
+        </span>
+      </div>
+      <div className="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 sm:gap-x-5 sm:px-4 sm:py-2.5">
+        {/* ── input + output meters: one compact block on phones ── */}
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+          <div className="flex items-center gap-2">
+            <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+              In
+            </span>
+            <StereoLevelMeter
+              kind="in"
+              height={40}
+              holdMs={holdMs}
+              decay={decay}
+              showState
+            />
+          </div>
 
-        <div className="hidden h-16 w-px bg-rack-line sm:block" />
+          <div className="hidden h-16 w-px bg-rack-line sm:block" />
 
-        {/* ── output meters ── */}
-        <div className="flex items-center gap-2">
-          <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
-            Out
-          </span>
-          <StereoLevelMeter
-            kind="out"
-            height={40}
-            holdMs={holdMs}
-            decay={decay}
-            showState
-          />
+          {/* ── output meters ── */}
+          <div className="flex items-center gap-2">
+            <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+              Out
+            </span>
+            <StereoLevelMeter
+              kind="out"
+              height={40}
+              holdMs={holdMs}
+              decay={decay}
+              showState
+            />
+          </div>
         </div>
 
         <div className="hidden h-16 w-px bg-rack-line sm:block" />
 
         {/* ── loudness panel ── */}
-        <div className="status-plate flex min-w-[268px] flex-1 flex-wrap items-end gap-x-6 gap-y-2 rounded-lg px-3.5 py-2">
+        <div className="status-plate flex min-w-[268px] flex-1 flex-wrap items-end gap-x-4 gap-y-1.5 rounded-lg px-3 py-1.5 sm:gap-x-6 sm:gap-y-2 sm:px-3.5 sm:py-2">
           <div>
             <div className="flex items-center gap-1.5">
               <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
@@ -312,7 +328,7 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
         </div>
 
         {/* ── gain reduction ── */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-x-4 sm:gap-y-3">
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               Lim GR

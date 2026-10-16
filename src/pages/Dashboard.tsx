@@ -46,6 +46,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
 } from "react";
 import { toast } from "sonner";
 
@@ -340,7 +341,7 @@ function QuickStatus({
       {cells.map((c) => (
         <div
           key={c.label}
-          className="status-plate min-w-0 rounded-lg px-3 py-2"
+          className="status-plate min-w-0 rounded-lg px-2.5 py-1.5 sm:px-3 sm:py-2"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="truncate text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
@@ -742,7 +743,7 @@ export default function Dashboard() {
     <div className="dark rack-surface flex min-h-screen flex-col text-foreground">
       {/* ── engine header ── */}
       <header ref={headerRef} className="engine-plate sticky top-0 z-40">
-        <div className="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2.5 sm:px-4">
+        <div className="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2 sm:gap-x-4 sm:gap-y-2 sm:px-4 sm:py-2.5">
           {/* left: logo + engine phase */}
           <div className="flex shrink-0 items-center gap-3">
             <Brand size={26} />
@@ -901,8 +902,16 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* ── always-on metering section — pinned under the header on ≥lg ── */}
-      <div style={{ top: headerH }} className="relative z-30 lg:sticky">
+      {/* ── always-on metering section — pinned under the header on ≥lg.
+          The header offset must only apply while sticky: on phones this
+          wrapper is `relative`, where an inline `top` would shift the whole
+          strip down and leave an empty band under the header. */}
+      <div
+        style={
+          { "--header-h": `${headerH}px` } as CSSProperties
+        }
+        className="relative z-30 lg:sticky lg:top-[var(--header-h)]"
+      >
         <MeterBar targetLufs={params.rider.targetLufs} />
       </div>
 
