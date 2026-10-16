@@ -1,11 +1,13 @@
 import { Brand } from "@/components/Brand";
 import { LogoDropdown } from "@/components/LogoDropdown";
-import { EncoderPanel } from "@/components/console/EncoderPanel";
+import { ConsoleSidebar } from "@/components/console/ConsoleSidebar";
 import { InputTab } from "@/components/console/InputTab";
-import { MeterBar } from "@/components/console/MeterBar";
+import { MeterBridge } from "@/components/console/MeterBridge";
 import { PresetPanel } from "@/components/console/PresetPanel";
-import { ProcessingTab } from "@/components/console/ProcessingTab";
-import { SignalFlow } from "@/components/console/SignalFlow";
+import {
+  ProcessingTab,
+  type DspSection,
+} from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,7 +21,7 @@ import {
 } from "@/lib/audio/alarms";
 import { getEngine } from "@/lib/audio/engine";
 import { getFm, stopFm, syncFm } from "@/lib/audio/fm";
-import { getOutputs, isConfigured, useOutputs } from "@/lib/audio/outputs";
+import { getOutputs, isConfigured } from "@/lib/audio/outputs";
 import {
   DEFAULT_PARAMS,
   cloneParams,
@@ -27,13 +29,12 @@ import {
   sourceParams,
   type ProcessorParams,
 } from "@/lib/audio/params";
-import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
+import { getRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
 import { APP_NAME, APP_VERSION } from "@/lib/version";
 import {
   Activity,
-  Antenna,
-  Mic,
+  LayoutDashboard,
   Power,
   RotateCcw,
   SlidersHorizontal,
@@ -54,21 +55,20 @@ const STORAGE_KEY = "signalpath.params.v2";
 const LEGACY_STORAGE_KEY = "signalpath.params.v1";
 const START_TIMEOUT_MS = 12_000;
 
-type TabId = "input" | "processing" | "encoder" | "presets" | "telemetry";
+export type TabId = "overview" | "dsp" | "presets" | "telemetry";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
-  { id: "input", label: "Input", icon: Mic, hint: "Source · preamp · analysis" },
   {
-    id: "processing",
-    label: "Processing",
-    icon: SlidersHorizontal,
-    hint: "EQ → Dyn-EQ → AGC → MB → Limit",
+    id: "overview",
+    label: "Overview",
+    icon: LayoutDashboard,
+    hint: "Source · preamp · analysis",
   },
   {
-    id: "encoder",
-    label: "Stream TX",
-    icon: Antenna,
-    hint: "Transmitter · mounts · metadata",
+    id: "dsp",
+    label: "DSP",
+    icon: SlidersHorizontal,
+    hint: "Preamp → AGC → MB → Limit · TX",
   },
   { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
   { id: "telemetry", label: "Telemetry", icon: Activity, hint: "Compliance · diagnostics · health" },
@@ -164,222 +164,6 @@ function PhaseBadge({ phase }: { phase: EnginePhase }) {
   );
 }
 
-/* ── quick operational summary (a few seconds to read the station) ─────── */
-
-function QuickStatus({
-  phase,
-  params,
-  activePreset,
-  dirty,
-  engineError,
-}: {
-  phase: EnginePhase;
-  params: ProcessorParams;
-  activePreset: string;
-  dirty: boolean;
-  engineError: string | null;
-}) {
-  const [s, setS] = useState(() => getEngine().snapshot());
-  const [fm, setFm] = useState(() => getFm());
-  useEffect(() => {
-    let last = 0;
-    return getEngine().subscribe((snap) => {
-      const now = performance.now();
-      if (now - last >= 500) {
-        last = now;
-        setS(snap);
-        setFm(getFm());
-      }
-    });
-  }, []);
-
-  const [rt, setRt] = useState(() => ({
-    onAir: getRuntime().onAir,
-    kbps: getRuntime().stats.kbps,
-  }));
-  useEffect(
-    () =>
-      subscribeRuntime(() => {
-        const r = getRuntime();
-        setRt({ onAir: r.onAir, kbps: r.stats.kbps });
-      }),
-    [],
-  );
-
-  const { slots, liveSlot } = useOutputs();
-  const configuredIdx = slots.findIndex(isConfigured);
-  const alarms = useSyncExternalStore(subscribeAlarms, getAlarms);
-
-  const powered = s.powered;
-  const target = params.rider.targetLufs;
-  const loudVal = s.lufsI ?? (powered ? s.lufsS : null);
-  const delta = loudVal !== null ? loudVal - target : null;
-  const inLive = powered && Math.max(s.inPeakL, s.inPeakR) > -60;
-  const outLive = powered && Math.max(s.outPeakL, s.outPeakR) > -60;
-  const tpOver = powered && s.truePeak > -1 + 0.05;
-  const fmt = (v: number) => v.toFixed(1).replace("-", "−");
-
-  const cells: {
-    label: string;
-    value: string;
-    sub?: string;
-    tone?: "ok" | "warn" | "hot" | "info" | "fg";
-    led?: "on" | "warn" | "hot" | "";
-  }[] = [
-    {
-      label: "Engine",
-      value: PHASE_META[phase].label,
-      sub: powered
-        ? `${(getEngine().sampleRate / 1000).toFixed(1)} kHz graph`
-        : "graph down",
-      tone:
-        phase === "running"
-          ? "ok"
-          : phase === "error"
-            ? "hot"
-            : phase === "offline"
-              ? "fg"
-              : "warn",
-      led: phase === "running" ? "on" : phase === "error" ? "hot" : phase === "offline" ? "" : "warn",
-    },
-    {
-      label: "Input",
-      value: !powered ? "—" : s.clipIn ? "CLIP" : inLive ? "Signal" : "No signal",
-      sub: params.hpf.on ? `HPF on · trim ${params.inputGainDb.toFixed(1)} dB` : "HPF off",
-      tone: s.clipIn && powered ? "hot" : inLive ? "ok" : "fg",
-      led: s.clipIn && powered ? "hot" : inLive ? "on" : "",
-    },
-    {
-      label: "Output",
-      value: !powered ? "—" : s.clipOut ? "CLIP" : outLive ? "Signal" : "No signal",
-      sub: `ceiling ${params.limiter.ceilingDb.toFixed(2).replace("-", "−")} dBTP`,
-      tone: s.clipOut && powered ? "hot" : outLive ? "ok" : "fg",
-      led: s.clipOut && powered ? "hot" : outLive ? "on" : "",
-    },
-    {
-      label: loudVal === null ? "Loudness" : `Loudness ${s.lufsI !== null ? "I" : "S"}`,
-      value: loudVal === null ? "Measuring" : `${fmt(loudVal)} LUFS`,
-      sub:
-        delta === null
-          ? `target ${target.toFixed(1)} LU`
-          : `${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)} LU vs ${target.toFixed(1)} target`,
-      tone:
-        delta === null
-          ? "fg"
-          : Math.abs(delta) <= 1
-            ? "ok"
-            : delta > 1
-              ? "warn"
-              : "info",
-    },
-    {
-      label: "True peak",
-      value: powered ? `${fmt(s.truePeak)} dBTP` : "—",
-      sub: tpOver ? "over ceiling" : "within ceiling",
-      tone: tpOver ? "hot" : "fg",
-      led: tpOver ? "hot" : "",
-    },
-    {
-      label: "Modulation",
-      value: params.fm.on
-        ? `${(fm.stats?.modPct ?? 0).toFixed(0)} %MOD`
-        : "—",
-      sub: params.fm.on
-        ? fm.stats?.sustainedOver
-          ? `over ${fm.stats.alarmPct}% for 5 s — reduce drive`
-          : `${fm.stats?.ceilingPct.toFixed(0) ?? "100"}% ceiling · ${params.fm.emphasis === "off" ? "flat" : `${params.fm.emphasis} µs`}`
-        : "FM branch bypassed",
-      tone: !params.fm.on
-        ? "fg"
-        : fm.stats?.sustainedOver
-          ? "hot"
-          : "ok",
-      led: !params.fm.on ? "" : fm.stats?.sustainedOver ? "hot" : "on",
-    },
-    {
-      label: "Preset",
-      value: activePreset,
-      sub: dirty ? "modified — not reloaded" : "matches engine",
-      tone: dirty ? "warn" : "fg",
-      led: dirty ? "warn" : "on",
-    },
-    {
-      label: "Stream",
-      value: rt.onAir
-        ? `${rt.kbps.toFixed(1)} kbps`
-        : configuredIdx >= 0
-          ? "Ready"
-          : "Not configured",
-      sub:
-        rt.onAir && liveSlot >= 0
-          ? `output ${liveSlot + 1} on air`
-          : configuredIdx >= 0
-            ? `output ${configuredIdx + 1} idle`
-            : "open Stream TX to configure",
-      tone: rt.onAir ? "hot" : configuredIdx >= 0 ? "ok" : "fg",
-      led: rt.onAir ? "hot" : configuredIdx >= 0 ? "on" : "",
-    },
-    {
-      label: "Warnings",
-      value: engineError
-        ? "Engine error"
-        : alarms.length > 0
-          ? alarms[0].title
-          : "None",
-      sub: engineError
-        ? engineError.slice(0, 60)
-        : alarms.length > 0
-          ? new Date(alarms[0].at).toLocaleTimeString()
-          : "all tolerances holding",
-      tone: engineError ? "hot" : alarms.length > 0 ? "warn" : "ok",
-      led: engineError ? "hot" : alarms.length > 0 ? "warn" : "on",
-    },
-  ];
-
-  return (
-    <section aria-label="Quick status" className="grid grid-cols-2 gap-2 sm:grid-cols-4 2xl:grid-cols-8">
-      {cells.map((c) => (
-        <div
-          key={c.label}
-          className="status-plate min-w-0 rounded-lg px-2.5 py-1.5 sm:px-3 sm:py-2"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
-              {c.label}
-            </span>
-            <span
-              className={cn(
-                "led size-1.5 shrink-0",
-                c.led === "on" && "led-on",
-                c.led === "warn" && "led-warn",
-                c.led === "hot" && "led-hot",
-              )}
-              aria-hidden
-            />
-          </div>
-          <p
-            className={cn(
-              "mt-1 truncate text-[13px] leading-4 font-semibold",
-              c.tone === "ok" && "text-meter-ok",
-              c.tone === "warn" && "text-meter-warn",
-              c.tone === "hot" && "text-meter-hot",
-              c.tone === "info" && "text-signal",
-              (c.tone === "fg" || !c.tone) && "text-white",
-            )}
-            title={c.value}
-          >
-            {c.value}
-          </p>
-          {c.sub && (
-            <p className="mt-0.5 truncate text-[9px] text-panel-mut" title={c.sub}>
-              {c.sub}
-            </p>
-          )}
-        </div>
-      ))}
-    </section>
-  );
-}
 
 /* ── footer status bar ─────────────────────────────────────────────────── */
 
@@ -443,7 +227,9 @@ export default function Dashboard() {
     }
     return cloneParams(DEFAULT_PARAMS);
   });
-  const [tab, setTab] = useState<TabId>("input");
+  const [tab, setTab] = useState<TabId>("dsp");
+  const [dspSection, setDspSection] = useState<DspSection>("preamp");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [powerBusy, setPowerBusy] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [activePreset, setActivePreset] = useState("Omnia · General");
@@ -912,95 +698,44 @@ export default function Dashboard() {
         }
         className="relative z-30 lg:sticky lg:top-[var(--header-h)]"
       >
-        <MeterBar targetLufs={params.rider.targetLufs} />
-      </div>
-
-      {/* ── quick status + signal path (visible on every page) ── */}
-      <div className="mx-auto w-full max-w-[1560px] px-3 pt-3 sm:px-4">
-        <QuickStatus
-          phase={phase}
+        <MeterBridge
           params={params}
           activePreset={activePreset}
           dirty={dirty}
-          engineError={engineError}
+          onConfigureStream={() => {
+            setTab("dsp");
+            setDspSection("stream");
+          }}
         />
-        <SignalFlow params={params} onSelect={(t) => setTab(t)} />
       </div>
+
+
 
       {/* ── body: left page rail + page ── */}
       <div className="mx-auto flex w-full max-w-[1560px] flex-1 items-start">
-        {/* page navigation rail */}
-        <nav
-          aria-label="Console pages"
-          style={{ top: headerH + 12 }}
-          className="sticky hidden w-52 shrink-0 self-start border-r border-rack-line pt-4 pb-8 lg:block"
-        >
-          <p className="px-4 pb-2 text-[9px] font-semibold tracking-[0.2em] text-rack-mut uppercase">
-            Pages
-          </p>
-          <ul className="flex flex-col gap-0.5 px-2">
-            {TABS.map((t) => {
-              const Icon = t.icon;
-              const active = tab === t.id;
-              return (
-                <li key={t.id}>
-                  <button
-                    type="button"
-                    onClick={() => setTab(t.id)}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "group flex w-full cursor-pointer items-start gap-2.5 rounded px-2.5 py-2 text-left transition-colors",
-                      active
-                        ? "bg-signal/12 text-signal"
-                        : "text-rack-mut hover:bg-white/5 hover:text-rack-fg",
-                    )}
-                  >
-                    <Icon className="mt-0.5 size-4 shrink-0" />
-                    <span className="min-w-0">
-                      <span className="block text-[11px] font-semibold tracking-[0.12em] uppercase">
-                        {t.label}
-                      </span>
-                      <span className="mt-0.5 block truncate text-[9px] leading-3.5 text-rack-mut group-hover:text-rack-fg">
-                        {t.hint}
-                      </span>
-                    </span>
-                    {active && (
-                      <span className="mt-1.5 ml-auto size-1.5 shrink-0 rounded-full bg-signal shadow-[0_0_8px_rgba(74,144,226,0.8)]" />
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-
-          <div className="mt-4 mx-2 rounded border border-rack-line bg-[#15181d] px-3 py-2.5">
-            <p className="text-[9px] font-semibold tracking-[0.16em] text-rack-mut uppercase">
-              Chain status
-            </p>
-            <p className="mt-1.5 flex items-center gap-2 text-[11px] font-semibold text-white">
-              <span
-                className={cn(
-                  "led size-1.5",
-                  phase === "running" && "led-on",
-                  phase === "degraded" && "led-warn",
-                  phase === "starting" && "led-warn animate-pulse-live",
-                  phase === "error" && "led-hot",
-                )}
-                aria-hidden
-              />
-              {PHASE_META[phase].label}
-            </p>
-            <p className="mt-1 truncate text-[10px] text-rack-mut">
-              {activePreset}
-            </p>
-            <p className="text-readout mt-1 text-[9px] text-rack-mut/80">
-              {hud.powered && engine.sampleRate
-                ? `${(engine.sampleRate / 1000).toFixed(1)} kHz`
-                : "—"}{" "}
-              · 6-band LR4 · 4× guard
-            </p>
-          </div>
-        </nav>
+        {/* station sidebar (desktop — collapsible, sticky under the header) */}
+        <ConsoleSidebar
+          tab={tab}
+          items={TABS}
+          onSelect={setTab}
+          phaseLabel={PHASE_META[phase].label}
+          phaseLed={
+            phase === "running"
+              ? "led-on"
+              : phase === "degraded"
+                ? "led-warn"
+                : phase === "starting"
+                  ? "led-warn animate-pulse-live"
+                  : phase === "error"
+                    ? "led-hot"
+                    : ""
+          }
+          activePreset={activePreset}
+          dirty={dirty}
+          top={headerH + 12}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+        />
 
         {/* mobile page tabs (rail hidden below lg) — one scrollable row */}
         <div className="min-w-0 flex-1 px-3 py-4 sm:px-4">
@@ -1024,17 +759,18 @@ export default function Dashboard() {
           </div>
 
           <div key={tab} className="tab-enter">
-            {tab === "input" && <InputTab params={params} setParams={setParams} />}
-            {tab === "processing" && (
+            {tab === "overview" && (
+              <InputTab params={params} setParams={setParams} />
+            )}
+            {tab === "dsp" && (
               <ProcessingTab
                 params={params}
                 setParams={setParams}
                 compare={compare}
                 setCompare={setCompare}
+                section={dspSection}
+                onSectionChange={setDspSection}
               />
-            )}
-            {tab === "encoder" && (
-              <EncoderPanel params={params} setParams={setParams} />
             )}
             {tab === "presets" && (
               <PresetPanel
@@ -1046,7 +782,12 @@ export default function Dashboard() {
               />
             )}
             {tab === "telemetry" && (
-              <TelemetryTab onConfigureStream={() => setTab("encoder")} />
+              <TelemetryTab
+                onConfigureStream={() => {
+                  setTab("dsp");
+                  setDspSection("stream");
+                }}
+              />
             )}
           </div>
         </div>

@@ -63,7 +63,7 @@ interface SegmentBarProps {
   className?: string;
 }
 
-function SegmentBar({
+export function SegmentBar({
   get,
   minDb,
   maxDb,
@@ -145,9 +145,9 @@ function SegmentBar({
 }
 
 /* Broadcast PPM colouring: < −20 slate · −20…−6 green · −6…−3 amber · −3…0 red */
-const levelZone = (db: number) =>
+export const levelZone = (db: number) =>
   db >= -3 ? COLORS.hot : db >= -6 ? COLORS.warn : db >= -20 ? COLORS.ok : COLORS.slate;
-const grZone = () => COLORS.warn;
+export const grZone = () => COLORS.warn;
 
 /* ── numeric readouts driven by rAF (no re-renders) ─────────────────────── */
 

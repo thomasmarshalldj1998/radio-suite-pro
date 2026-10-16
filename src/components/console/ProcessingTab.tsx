@@ -1,3 +1,4 @@
+import { EncoderPanel } from "@/components/console/EncoderPanel";
 import { BandGrBar, StereoLevelMeter, GainReductionMeter } from "@/components/console/Meters";
 import { Fader } from "@/components/console/Fader";
 import { Knob } from "@/components/console/Knob";
@@ -203,18 +204,6 @@ function ChainBlock({
   );
 }
 
-/** Signal-flow arrow between chain blocks. */
-function ChainArrow() {
-  return (
-    <span
-      aria-hidden
-      className="hidden shrink-0 self-center text-[10px] text-rack-mut 2xl:flex"
-    >
-      ▶
-    </span>
-  );
-}
-
 /** Compact labelled horizontal slider row. */
 function SliderRow({
   min,
@@ -246,10 +235,32 @@ function SliderRow({
   );
 }
 
+/** DSP console section (sub-navigation tab). */
+export type DspSection =
+  | "preamp"
+  | "agc"
+  | "eq"
+  | "stereo"
+  | "multiband"
+  | "limiter"
+  | "output"
+  | "stream";
+
+const DSP_SECTIONS: { id: DspSection; label: string }[] = [
+  { id: "preamp", label: "Preamp" },
+  { id: "agc", label: "AGC" },
+  { id: "eq", label: "EQ" },
+  { id: "stereo", label: "Stereo" },
+  { id: "multiband", label: "Multiband" },
+  { id: "limiter", label: "Limiter" },
+  { id: "output", label: "Output" },
+  { id: "stream", label: "Stream TX" },
+];
+
 /**
- * PROCESSING — the chain laid out left-to-right in signal order the way a
- * StereoTool page reads: Equalizer → Dynamic EQ → AGC → Multiband →
- * Composite limit → Stereo & output, each a numbered stage with its own
+ * PROCESSING — the DSP console: one sub-navigation section renders at a
+ * time in signal order (Preamp → AGC → EQ → Stereo → Multiband → Limiter
+ * → Output → Stream TX), each a set of numbered stage cards with its own
  * bypass LED. The multiband stage uses one threshold fader + live GR bar
  * per band.
  */
@@ -258,12 +269,17 @@ export function ProcessingTab({
   setParams,
   compare,
   setCompare,
+  section,
+  onSectionChange,
 }: {
   params: ProcessorParams;
   setParams: React.Dispatch<React.SetStateAction<ProcessorParams>>;
   /** A/B: true = monitoring the unprocessed source (chain bypassed). */
   compare: boolean;
   setCompare: (v: boolean) => void;
+  /** Active DSP section — controlled by the console shell (deep-linkable). */
+  section: DspSection;
+  onSectionChange: (s: DspSection) => void;
 }) {
   const engine = getEngine();
   const snap = useMeterSnapshot();
@@ -285,23 +301,34 @@ export function ProcessingTab({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* ── signal path breadcrumb ── */}
-      <div className="panel flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-3 py-2 text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
-        <span className="text-panel-fg">In</span>
-        {["Eq", "Dyn-eq", "AGC", "Multiband", "Limit", "Stereo"].map((s) => (
-          <span key={s} className="flex items-center gap-2">
-            <span aria-hidden>▶</span>
-            <span
-              className={cn(
-                s === "Multiband" ? "text-signal" : "text-panel-mut",
-              )}
-            >
-              {s}
-            </span>
-          </span>
-        ))}
-        <span aria-hidden>▶</span>
-        <span className="text-panel-fg">Out</span>
+      {/* ── DSP sub-navigation ── */}
+      <div className="panel flex flex-wrap items-center gap-2 rounded-lg px-2 py-1.5">
+        <div
+          role="tablist"
+          aria-label="DSP sections"
+          className="scrollbar-slim flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+        >
+          {DSP_SECTIONS.map((t) => {
+            const active = section === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onSectionChange(t.id)}
+                className={cn(
+                  "shrink-0 cursor-pointer rounded-md px-3 py-2 text-[11px] font-bold tracking-[0.12em] uppercase transition-colors",
+                  active
+                    ? "bg-cyan-400/15 text-cyan-300 shadow-[inset_0_-2px_0_0_#22d3ee]"
+                    : "text-rack-mut hover:bg-white/5 hover:text-rack-fg",
+                )}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
         <span className="ml-auto flex items-center gap-2 pl-3">
           {compare && (
             <span className="rounded border border-amber-led/45 bg-amber-led/10 px-2 py-1 text-[8px] font-bold tracking-[0.16em] text-amber-led uppercase">
@@ -320,7 +347,8 @@ export function ProcessingTab({
         </span>
       </div>
 
-      {/* ── composite response analyzer ── */}
+      {/* ── composite response analyzer (EQ section) ── */}
+      {section === "eq" && (
       <div className="panel rounded-lg p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
@@ -363,9 +391,12 @@ export function ProcessingTab({
           level-dependent and aren't drawn.
         </p>
       </div>
+      )}
 
-      {/* ── the chain ── */}
+      {/* ── the chain (one DSP section renders at a time) ── */}
       <div className="flex flex-wrap items-stretch gap-3">
+        {section === "preamp" && (
+          <>
         {/* 00 — input stage */}
         <ChainBlock
           index={0}
@@ -476,9 +507,10 @@ export function ProcessingTab({
             </CtrlRow>
           </div>
         </ChainBlock>
-
-        <ChainArrow />
-
+          </>
+        )}
+        {section === "eq" && (
+          <>
         {/* 01 — equalizer */}
         <ChainBlock
           index={1}
@@ -531,8 +563,6 @@ export function ProcessingTab({
             ))}
           </div>
         </ChainBlock>
-
-        <ChainArrow />
 
         {/* 02 — dynamic EQ */}
         <ChainBlock
@@ -594,9 +624,10 @@ export function ProcessingTab({
             ))}
           </div>
         </ChainBlock>
-
-        <ChainArrow />
-
+          </>
+        )}
+        {section === "agc" && (
+          <>
         {/* 03 — program AGC (pre-multiband leveller) */}
         <ChainBlock
           index={3}
@@ -735,9 +766,10 @@ export function ProcessingTab({
             </CtrlRow>
           </div>
         </ChainBlock>
-
-        <ChainArrow />
-
+          </>
+        )}
+        {section === "multiband" && (
+          <>
         {/* 04 — multiband compressor (driven by the leveled AGC output) */}
         <ChainBlock
           index={4}
@@ -815,9 +847,10 @@ export function ProcessingTab({
             threshold is working too hard.
           </p>
         </ChainBlock>
-
-        <ChainArrow />
-
+          </>
+        )}
+        {section === "limiter" && (
+          <>
         {/* 05 — composite limiter */}
         <ChainBlock
           index={5}
@@ -928,9 +961,10 @@ export function ProcessingTab({
             a hard promise on the composite bus.
           </p>
         </ChainBlock>
-
-        <ChainArrow />
-
+          </>
+        )}
+        {section === "stereo" && (
+          <>
         {/* 06 — density & enhancement */}
         <ChainBlock
           index={6}
@@ -983,13 +1017,11 @@ export function ProcessingTab({
           </p>
         </ChainBlock>
 
-        <ChainArrow />
-
-        {/* 07 — stereo & output */}
+        {/* 07 — stereo image */}
         <ChainBlock
           index={7}
-          title="Stereo & output"
-          subtitle="Width · trim · monitor"
+          title="Stereo image"
+          subtitle="Width · correlation"
         >
           <div className="flex items-start justify-around gap-2">
             <Knob
@@ -1004,6 +1036,35 @@ export function ProcessingTab({
               onChange={(v) => setParams((p) => ({ ...p, stereo: { width: v } }))}
               onReset={() => setParams((p) => ({ ...p, stereo: { width: 1 } }))}
             />
+          </div>
+
+          <div className="panel-well mt-2 rounded px-2.5 py-1.5">
+            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
+              Correlation
+            </p>
+            <p className="text-readout mt-0.5 text-[11px] font-medium text-white">
+              {(snap?.correlation ?? 1).toFixed(2)}
+              <span className="ml-2 text-[9px] text-panel-mut">
+                {params.stereo.width > 1.4
+                  ? "wide — watch multipath"
+                  : params.stereo.width < 0.8
+                    ? "collapsing toward mono"
+                    : "healthy"}
+              </span>
+            </p>
+          </div>
+        </ChainBlock>
+          </>
+        )}
+        {section === "output" && (
+          <>
+        {/* 08 — output & monitor */}
+        <ChainBlock
+          index={8}
+          title="Output & monitor"
+          subtitle="Trim · monitor · out meter"
+        >
+          <div className="flex items-start justify-around gap-2">
             <Knob
               label="Trim"
               size={52}
@@ -1061,26 +1122,17 @@ export function ProcessingTab({
             </Button>
           </div>
 
-          <div className="panel-well mt-2 rounded px-2.5 py-1.5">
-            <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-              Correlation
-            </p>
-            <p className="text-readout mt-0.5 text-[11px] font-medium text-white">
-              {(snap?.correlation ?? 1).toFixed(2)}
-              <span className="ml-2 text-[9px] text-panel-mut">
-                {params.stereo.width > 1.4
-                  ? "wide — watch multipath"
-                  : params.stereo.width < 0.8
-                    ? "collapsing toward mono"
-                    : "healthy"}
-              </span>
-            </p>
-          </div>
-
           <div className="mt-2 flex justify-center">
             <StereoLevelMeter kind="out" height={120} />
           </div>
         </ChainBlock>
+          </>
+        )}
+        {section === "stream" && (
+          <div className="min-w-0 flex-1">
+            <EncoderPanel params={params} setParams={setParams} />
+          </div>
+        )}
       </div>
     </div>
   );

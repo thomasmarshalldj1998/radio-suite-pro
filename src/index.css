@@ -80,12 +80,12 @@
 }
 
 .dark {
-  /* broadcast dark theme — deep charcoal / cool grey panels */
-  --background: #121417;
+  /* broadcast dark theme — ultra-dark console / rack card containers */
+  --background: #101216;
   --foreground: #e8eaef;
-  --card: #1c1f24;
+  --card: #1a1d24;
   --card-foreground: #e8eaef;
-  --popover: #1c1f24;
+  --popover: #1a1d24;
   --popover-foreground: #e8eaef;
   --primary: #4a90e2;
   --primary-foreground: #ffffff;
@@ -104,7 +104,7 @@
   --chart-3: #ffcc00;
   --chart-4: #ff3b30;
   --chart-5: #b0b6c0;
-  --sidebar: #17191d;
+  --sidebar: #14161b;
   --sidebar-foreground: #e8eaef;
   --sidebar-primary: #4a90e2;
   --sidebar-primary-foreground: #ffffff;
@@ -220,7 +220,7 @@
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 5%);
   }
 
-  /* deep rack surface — deep charcoal with a faint top falloff */
+  /* deep rack surface — ultra-dark console with a faint top falloff */
   .rack-surface {
     background:
       radial-gradient(
@@ -228,7 +228,7 @@
         rgb(255 255 255 / 4%) 0%,
         transparent 62%
       ),
-      #121417;
+      #101216;
   }
 
   /* brushed rack strip (tab bar, header rails) */
