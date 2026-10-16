@@ -798,7 +798,7 @@ export default function Dashboard() {
                   aria-hidden
                 />
                 {hud.alarm ? "Over limit" : hud.audioLive ? "Audio live" : "Running"}
-                <span className="text-readout font-medium">
+                <span className="hidden text-readout font-medium sm:inline">
                   {formatHms(hud.uptimeMs)}
                 </span>
               </span>
@@ -810,7 +810,8 @@ export default function Dashboard() {
                 variant="outline"
                 onClick={stopEngine}
                 disabled={powerBusy}
-                className="h-9 cursor-pointer gap-1.5 text-[11px] font-semibold tracking-[0.1em] uppercase"
+                aria-label="Stop the audio engine"
+                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-semibold tracking-[0.1em] uppercase sm:px-3"
               >
                 <Power className="size-3.5" />
                 Stop
@@ -821,10 +822,17 @@ export default function Dashboard() {
                 variant="default"
                 onClick={() => void startEngine("start")}
                 disabled={powerBusy}
-                className="h-9 cursor-pointer gap-1.5 text-[11px] font-semibold tracking-[0.1em] uppercase"
+                aria-label="Start the audio engine"
+                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-semibold tracking-[0.1em] uppercase sm:px-3"
               >
                 <Power className="size-3.5" />
-                {powerBusy ? "Starting…" : "Start engine"}
+                {/* phones keep the transport on one row — icon + short label */}
+                <span className="hidden sm:inline">
+                  {powerBusy ? "Starting…" : "Start engine"}
+                </span>
+                <span className="sm:hidden">
+                  {powerBusy ? "Starting" : "Start"}
+                </span>
               </Button>
             )}
 
@@ -835,10 +843,11 @@ export default function Dashboard() {
                 onClick={() => void startEngine("restart")}
                 disabled={powerBusy}
                 title="Stop and start the audio engine"
-                className="h-9 cursor-pointer gap-1.5 text-[11px] font-semibold tracking-[0.1em] uppercase"
+                aria-label="Restart the audio engine"
+                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-semibold tracking-[0.1em] uppercase sm:px-3"
               >
                 <RotateCcw className="size-3.5" />
-                Restart
+                <span className="hidden sm:inline">Restart</span>
               </Button>
             )}
 
@@ -984,9 +993,9 @@ export default function Dashboard() {
           </div>
         </nav>
 
-        {/* mobile page tabs (rail hidden below lg) */}
+        {/* mobile page tabs (rail hidden below lg) — one scrollable row */}
         <div className="min-w-0 flex-1 px-3 py-4 sm:px-4">
-          <div className="mb-4 flex flex-wrap gap-1 pb-1 lg:hidden">
+          <div className="scrollbar-slim -mx-3 mb-4 flex gap-1 overflow-x-auto px-3 pb-1 sm:-mx-4 sm:px-4 lg:hidden">
             {TABS.map((t) => (
               <button
                 key={t.id}

@@ -1319,7 +1319,7 @@ function OutputTable({
   onSelect: (i: number) => void;
 }) {
   return (
-    <div className="px-4 pb-4">
+    <div className="scrollbar-slim overflow-x-auto px-4 pb-4">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border/60 text-left text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">

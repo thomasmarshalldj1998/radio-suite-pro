@@ -63,14 +63,16 @@ export function CtrlRow({
   return (
     <div
       className={cn(
-        "flex items-center justify-between gap-3 px-3 py-2",
+        // phones: label above, controls wrap beneath so dense rows never
+        // push the card wider than the viewport; ≥sm restores the inline strip
+        "flex flex-col gap-1 px-3 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3",
         className,
       )}
     >
-      <span className="w-24 shrink-0 text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+      <span className="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase sm:w-24 sm:shrink-0">
         {label}
       </span>
-      <div className="flex min-w-0 flex-1 items-center justify-end gap-3">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5 sm:justify-end">
         {children}
       </div>
     </div>

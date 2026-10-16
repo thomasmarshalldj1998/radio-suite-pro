@@ -234,7 +234,9 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
             </span>
           </div>
 
-          <div className="flex flex-wrap items-end gap-x-5 gap-y-2">
+          {/* phones: readouts scroll sideways instead of stacking five rows;
+              ≥sm keeps the original wrap behaviour */}
+          <div className="scrollbar-slim flex items-end gap-x-5 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-x-visible">
             <Stat
               label="LUFS-S"
               value={powered ? fmt(s.lufsS) : "—"}

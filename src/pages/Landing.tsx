@@ -230,11 +230,13 @@ export default function Landing() {
               Download
             </a>
           </nav>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" asChild>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* below sm the header carries the single primary CTA so the
+                brand + button never overflow a 320–360 px viewport */}
+            <Button variant="ghost" asChild className="hidden sm:inline-flex">
               <Link to="/auth?returnTo=/dashboard">Sign in</Link>
             </Button>
-            <Button asChild>
+            <Button asChild className="shrink-0">
               <Link to="/auth?returnTo=/dashboard">
                 Open console
                 <ArrowRight className="ml-1.5 size-4" />

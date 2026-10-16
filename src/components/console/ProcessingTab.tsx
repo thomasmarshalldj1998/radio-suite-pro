@@ -129,32 +129,36 @@ function ChainBlock({
     >
       <header
         className={cn(
-          "flex items-center gap-2.5 border-b px-3 py-2.5 transition-colors",
+          // phones: the stage title owns the first row and the bypass/GR/
+          // switch cluster wraps underneath; ≥sm returns to one inline strip
+          "flex flex-wrap items-center gap-2.5 border-b px-3 py-2.5 transition-colors",
           bypassed ? "border-border/40 bg-muted/30" : "border-border/60",
         )}
       >
-        <span
-          className={cn(
-            "text-readout flex size-6 shrink-0 items-center justify-center rounded border border-rack-line bg-[#121417] text-[11px] font-bold transition-colors",
-            bypassed ? "text-panel-mut" : "text-signal",
-          )}
-        >
-          {String(index).padStart(2, "0")}
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3
+        <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-auto sm:flex-1">
+          <span
             className={cn(
-              "truncate text-[11px] font-semibold tracking-[0.12em] uppercase",
-              bypassed ? "text-muted-foreground" : "text-foreground/90",
+              "text-readout flex size-6 shrink-0 items-center justify-center rounded border border-rack-line bg-[#121417] text-[11px] font-bold transition-colors",
+              bypassed ? "text-panel-mut" : "text-signal",
             )}
           >
-            {title}
-          </h3>
-          {subtitle && (
-            <p className="truncate text-[9px] text-muted-foreground">
-              {subtitle}
-            </p>
-          )}
+            {String(index).padStart(2, "0")}
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3
+              className={cn(
+                "truncate text-[11px] font-semibold tracking-[0.12em] uppercase",
+                bypassed ? "text-muted-foreground" : "text-foreground/90",
+              )}
+            >
+              {title}
+            </h3>
+            {subtitle && (
+              <p className="truncate text-[9px] text-muted-foreground">
+                {subtitle}
+              </p>
+            )}
+          </div>
         </div>
         {bypassed && (
           <span className="rounded border border-amber-led/40 bg-amber-led/10 px-1.5 py-0.5 text-[8px] font-bold tracking-[0.14em] text-amber-led uppercase">
