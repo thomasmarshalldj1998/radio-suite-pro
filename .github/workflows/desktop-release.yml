@@ -54,6 +54,9 @@ jobs:
         shell: bash
         run: |
           echo "desktop-release workflow rev 5 (self-healing types + verify-all-files)"
+          echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
+          echo "checked-in _generated contents:"
+          ls -la src/convex/_generated/ 2>/dev/null || echo "  (directory absent)"
           gen_missing=0
           for f in \
             src/convex/_generated/api.d.ts \
