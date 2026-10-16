@@ -190,7 +190,10 @@ export function MeterBridge({
       </div>
 
       <div className="scrollbar-slim overflow-x-auto">
-        <div className="mx-auto flex w-max min-w-full max-w-[1560px] items-stretch gap-x-4 gap-y-3 px-3 py-2.5 sm:px-4">
+        {/* phones: sections wrap into centred rows so the whole deck is
+            visible without sideways scrolling; sm+ keeps the single
+            scrollable meter row */}
+        <div className="mx-auto flex w-full max-w-[1560px] flex-wrap items-stretch justify-center gap-x-4 gap-y-3 px-3 py-2.5 sm:w-max sm:min-w-full sm:flex-nowrap sm:justify-start sm:px-4">
           {/* ── input peaks ── */}
           <div className="flex shrink-0 items-start gap-2">
             <span className="flex flex-col items-center gap-1.5 pt-1">
@@ -336,7 +339,7 @@ export function MeterBridge({
           <DeckDivider />
 
           {/* ── loudness readout cluster ── */}
-          <div className="flex min-w-[228px] flex-1 items-end gap-x-5 gap-y-2 rounded-lg px-1 py-0.5">
+          <div className="flex min-w-[228px] flex-1 items-end justify-center gap-x-5 gap-y-2 rounded-lg px-1 py-0.5 sm:justify-start">
             <div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
