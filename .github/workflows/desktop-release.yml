@@ -33,8 +33,11 @@ jobs:
         with:
           bun-version: latest
 
+      # --frozen-lockfile installs exactly the locked tree (and fails loudly
+      # if bun.lock is missing) instead of silently floating versions, which
+      # is a classic source of "green locally, red in CI" tsc failures.
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       # Fail fast with one clear line instead of a cryptic mid-build failure
       # if the checkout is incomplete. tsc only reads the .d.ts files
@@ -42,7 +45,8 @@ jobs:
       # (e.g. api.js present but server.d.ts missing) sails through a naive
       # existence check and then fails the build with tsc exit code 2. The
       # same guard covers the other build-critical files (toolbar import,
-      # desktop vite config, electron shell, icon script).
+      # desktop vite config, electron shell, icon script) plus the lockfile
+      # that pins CI to the exact local dependency tree.
       # Block scalar + shell: bash keeps quoting identical on all three OSes
       # (windows runners default to pwsh, which mangles inline quotes).
       - name: Verify versioned sources
@@ -60,6 +64,8 @@ jobs:
             vite.desktop.config.ts \
             electron/main.cjs \
             scripts/make-icon.mjs \
+            package.json \
+            bun.lock \
           ; do
             if [ ! -f "$f" ]; then
               echo "::error::$f is missing from the checkout - push it to the repo; the desktop build needs every listed file."
