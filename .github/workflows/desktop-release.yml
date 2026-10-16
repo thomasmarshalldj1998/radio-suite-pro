@@ -36,21 +36,32 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      # Fail fast with one clear line instead of a wall of tsc errors if the
-      # versioned Convex types are missing from the checkout. tsc only reads
-      # the .d.ts files (no allowJs), so every generated file is checked: a
-      # partial commit (e.g. api.js present but server.d.ts missing) sails
-      # through a naive existence check and then fails the build with tsc
-      # exit code 2.
+      # Fail fast with one clear line instead of a cryptic mid-build failure
+      # if the checkout is incomplete. tsc only reads the .d.ts files
+      # (no allowJs), so every generated file is checked: a partial commit
+      # (e.g. api.js present but server.d.ts missing) sails through a naive
+      # existence check and then fails the build with tsc exit code 2. The
+      # same guard covers the other build-critical files (toolbar import,
+      # desktop vite config, electron shell, icon script).
       # Block scalar + shell: bash keeps quoting identical on all three OSes
       # (windows runners default to pwsh, which mangles inline quotes).
       - name: Verify versioned sources
         shell: bash
         run: |
           missing=0
-          for f in src/convex/_generated/api.d.ts src/convex/_generated/api.js src/convex/_generated/dataModel.d.ts src/convex/_generated/server.d.ts src/convex/_generated/server.js; do
+          for f in \
+            src/convex/_generated/api.d.ts \
+            src/convex/_generated/api.js \
+            src/convex/_generated/dataModel.d.ts \
+            src/convex/_generated/server.d.ts \
+            src/convex/_generated/server.js \
+            vly-toolbar-readonly.tsx \
+            vite.desktop.config.ts \
+            electron/main.cjs \
+            scripts/make-icon.mjs \
+          ; do
             if [ ! -f "$f" ]; then
-              echo "::error::$f is missing from the repo - commit the generated Convex types (do not gitignore them); CI typechecks from a fresh checkout."
+              echo "::error::$f is missing from the checkout - push it to the repo; the desktop build needs every listed file."
               missing=1
             fi
           done
