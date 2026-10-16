@@ -48,6 +48,7 @@ jobs:
       - name: Verify versioned sources
         shell: bash
         run: |
+          echo "desktop-release workflow rev 4 (verify-all-files, bash, dual-arch-mac)"
           missing=0
           for f in \
             src/convex/_generated/api.d.ts \
@@ -65,6 +66,7 @@ jobs:
               missing=1
             fi
           done
+          if [ "$missing" -ne 0 ]; then ls -la src/convex/_generated/ || true; fi
           exit $missing
 
       - name: Generate icon
