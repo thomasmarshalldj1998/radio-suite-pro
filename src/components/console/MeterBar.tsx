@@ -6,6 +6,7 @@ import {
 } from "@/components/console/Meters";
 import { Seg } from "@/components/console/controls";
 import { getEngine } from "@/lib/audio/engine";
+import { MB_SHORT_LABELS } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -149,8 +150,8 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
       <div className="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 sm:gap-x-5 sm:px-4 sm:py-2.5">
         {/* ── input + output meters: one compact block on phones ── */}
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
-          <div className="flex items-center gap-2">
-            <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+          <div className="flex items-start gap-2">
+            <span className="pt-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               In
             </span>
             <StereoLevelMeter
@@ -165,8 +166,8 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
           <div className="hidden h-16 w-px bg-rack-line sm:block" />
 
           {/* ── output meters ── */}
-          <div className="flex items-center gap-2">
-            <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+          <div className="flex items-start gap-2">
+            <span className="pt-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               Out
             </span>
             <StereoLevelMeter
@@ -327,10 +328,10 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
           </div>
         </div>
 
-        {/* ── gain reduction ── */}
+        {/* ── gain reduction (captions top-aligned with the meter wells) ── */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:gap-x-4 sm:gap-y-3">
-          <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+          <div className="flex items-start gap-2">
+            <span className="flex items-center gap-1 pt-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               Lim GR
               <TermTip
                 term="GR"
@@ -345,17 +346,18 @@ export function MeterBar({ targetLufs }: { targetLufs: number }) {
             />
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+          <div className="flex items-start gap-2">
+            <span className="pt-1 text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
               MB GR
             </span>
-            <div className="flex items-end gap-[3px]">
+            <div className="flex items-start gap-[3px]">
               {[0, 1, 2, 3, 4, 5].map((i) => (
                 <BandGrBar
                   key={i}
                   get={() => getEngine().snapshot().gr.bands[i] ?? 0}
                   maxDb={15}
-                  height={30}
+                  height={34}
+                  label={MB_SHORT_LABELS[i]}
                 />
               ))}
             </div>

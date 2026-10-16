@@ -62,7 +62,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     id: "processing",
     label: "Processing",
     icon: SlidersHorizontal,
-    hint: "EQ → Dyn-EQ → MB → AGC → Limit",
+    hint: "EQ → Dyn-EQ → AGC → MB → Limit",
   },
   {
     id: "encoder",
@@ -1045,7 +1045,9 @@ export default function Dashboard() {
                 onRevert={revertPreset}
               />
             )}
-            {tab === "telemetry" && <TelemetryTab />}
+            {tab === "telemetry" && (
+              <TelemetryTab onConfigureStream={() => setTab("encoder")} />
+            )}
           </div>
         </div>
       </div>

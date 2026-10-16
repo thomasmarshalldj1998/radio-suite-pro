@@ -27,8 +27,10 @@ interface Stage {
 const grMax = (arr: number[]) => arr.reduce((m, v) => Math.max(m, v), 0);
 
 /**
- * SIGNAL PATH — Input → Preamp → EQ → Dyn-EQ → Multiband → AGC → Limiter →
- * Output → Stream TX. Configuration status always comes from the real
+ * SIGNAL PATH — Input → Preamp → EQ → Dyn-EQ → AGC → Multiband → Limiter →
+ * Output → Stream TX. The AGC leveller sits ahead of the multiband stage
+ * so its leveled output is the multiband input reference. Configuration
+ * status always comes from the real
  * params; activity and gain reduction are only shown while the engine is
  * actually running, so a lit stage always means measured signal.
  */
@@ -120,22 +122,22 @@ export function SignalFlow({
       target: "processing",
     },
     {
-      id: "mb",
-      name: "Multiband",
-      detail: "6-band · LR4",
-      enabled: params.multiband.on,
-      grDb: powered ? grMax(s.gr.bands) : null,
-      active: powered && params.multiband.on && grMax(s.gr.bands) > 0.1,
-      warn: false,
-      target: "processing",
-    },
-    {
       id: "agc",
       name: "AGC",
       detail: params.rider.on ? "leveller + rider" : "leveller",
       enabled: params.agc.on,
       grDb: powered ? s.gr.agc : null,
       active: powered && params.agc.on && s.gr.agc > 0.1,
+      warn: false,
+      target: "processing",
+    },
+    {
+      id: "mb",
+      name: "Multiband",
+      detail: "6-band · LR4",
+      enabled: params.multiband.on,
+      grDb: powered ? grMax(s.gr.bands) : null,
+      active: powered && params.multiband.on && grMax(s.gr.bands) > 0.1,
       warn: false,
       target: "processing",
     },

@@ -2,9 +2,9 @@
  * Processor parameter model for the Signalpath broadcast chain:
  *
  *   input gain → HPF → 6-band EQ → dynamic EQ (3 subtractive bands) →
- *   6-band multiband compressor (LR4 crossovers) → program AGC →
- *   composite limiter (fast peak stage + per-sample ceiling guard) →
- *   output gain → (monitor + encoder send)
+ *   program AGC (pre-multiband leveller) → 6-band multiband compressor
+ *   (LR4 crossovers) → composite limiter (fast peak stage + per-sample
+ *   ceiling guard) → output gain → (monitor + encoder send)
  *
  * The FM branch taps the program bus after the chain and builds the
  * composite (MPX) signal for an FM exciter: pre-emphasis → 15 kHz brickwall
@@ -151,8 +151,23 @@ export const MB_LABELS = [
   "Presence",
   "Hf rolloff",
 ] as const;
+/** Compact per-band captions for the MB gain-reduction meter strip. */
+export const MB_SHORT_LABELS = [
+  "SUB",
+  "BASS",
+  "L-MID",
+  "H-MID",
+  "PRES",
+  "AIR",
+] as const;
 export const DEQ_LABELS = ["Sub", "Mud", "Mid", "Presence", "Air"] as const;
-export const LUFS_TARGET = -23;
+/**
+ * Default streaming loudness target (AES-71 web-streaming practice).
+ * Curated broadcast presets that must stay put — the OFCOM compliance
+ * family at −23 LUFS, classical, jazz, etc. — carry explicit targets and
+ * are unaffected by this default.
+ */
+export const LUFS_TARGET = -14;
 export const TRUE_PEAK_TARGET = -1;
 
 /** Default crossover split points for the 6-band matrix (Hz). */
@@ -169,7 +184,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
   hpf: { on: true, freqHz: 80 },
   phase: { mode: "auto", freqHz: 300 },
-  gate: { on: true, thresholdDb: -52, holdMs: 500 },
+  gate: { on: true, thresholdDb: -52, holdMs: 1500 },
   eq: {
     on: true,
     bands: [
@@ -346,7 +361,7 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     name: "Omnia · General",
     description:
       "Balanced house chain in the Omnia mold: gentle levelling, musical 6-band dynamics on the ONE-style crossovers, dynamic-EQ hygiene, −1 dBTP ceiling.",
-    tags: ["General", "Omnia", "−23 LUFS"],
+    tags: ["General", "Omnia", "−14 LUFS"],
     family: "Omnia",
     params: structuredClone(DEFAULT_PARAMS),
   },
@@ -3004,7 +3019,8 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 400,
         makeupDb: 4,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, gateDb: -55, speed: "fast" },
+      // pinned: OFCOM compliance requires the −23 LUFS ride
+      rider: { on: true, targetLufs: -23, maxRideDb: 8, gateDb: -55, speed: "fast" },
       stereo: { width: 1.05 },
       limiter: { on: true, ceilingDb: -1.5, attackMs: 1, releaseMs: 100 },
       fm: {
@@ -3060,7 +3076,8 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 150,
         makeupDb: 6,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 10, gateDb: -48, speed: "fast" },
+      // pinned: OFCOM compliance requires the −23 LUFS ride
+      rider: { on: true, targetLufs: -23, maxRideDb: 10, gateDb: -48, speed: "fast" },
       stereo: { width: 1.02 },
       limiter: { on: true, ceilingDb: -1.5, attackMs: 0.6, releaseMs: 60 },
       fm: {
@@ -3114,7 +3131,8 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 200,
         makeupDb: 7,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 9, gateDb: -50, speed: "fast" },
+      // pinned: OFCOM compliance requires the −23 LUFS ride
+      rider: { on: true, targetLufs: -23, maxRideDb: 9, gateDb: -50, speed: "fast" },
       stereo: { width: 1.15 },
       exciter: { on: true, mix: 3, freqHz: 6000 },
       limiter: { on: true, ceilingDb: -2, attackMs: 0.5, releaseMs: 70 },
@@ -3225,7 +3243,8 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
         releaseMs: 350,
         makeupDb: 6,
       },
-      rider: { on: true, targetLufs: LUFS_TARGET, maxRideDb: 8, gateDb: -44, speed: "fast" },
+      // pinned: OFCOM compliance requires the −23 LUFS ride
+      rider: { on: true, targetLufs: -23, maxRideDb: 8, gateDb: -44, speed: "fast" },
       stereo: { width: 1.03 },
       limiter: { on: true, ceilingDb: -1.5, attackMs: 0.8, releaseMs: 80 },
       fm: {

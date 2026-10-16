@@ -6,8 +6,9 @@
  *                              ├─ spectrum (pre)
  *                              └─ 6-band EQ → harmonic exciter (parallel)
  *                                 → dynamic EQ (3 subtractive bands)
+ *                                 → program AGC (pre-multiband leveller)
  *                                 → 6-band multiband compressor (LR4)
- *                                 → program AGC → loudness rider
+ *                                 → loudness rider
  *                                 → composite limiter → output gain
  *                                 → ceiling guard → M/S stereo width → duck
  *                                  ├─ monitor out (speakers)
@@ -427,11 +428,31 @@ export class AudioEngine {
     this.exBp2.connect(this.exMix);
     this.exMix.connect(deqSum); // harmonics join the program here
 
-    // ── 6-band multiband compressor (LR4 crossovers) ──
+    // ── program AGC (pre-multiband leveller — its leveled output feeds
+    //    the multiband stage as the input reference level) ──
+    this.agcWetPre = g(1);
+    this.agcDry = g(0);
+    this.agcComp = ctx.createDynamicsCompressor();
+    this.agcComp.threshold.value = -18;
+    this.agcComp.ratio.value = 3;
+    this.agcComp.knee.value = 6;
+    this.agcComp.attack.value = 0.015;
+    this.agcComp.release.value = 0.4;
+    this.agcMakeup = g(dbToGain(4));
+    const agcOut = g(1);
+    deqSum.connect(this.agcWetPre);
+    deqSum.connect(this.agcDry);
+    this.agcWetPre.connect(this.agcComp);
+    this.agcComp.connect(this.agcMakeup);
+    this.agcMakeup.connect(agcOut);
+    this.agcDry.connect(agcOut);
+
+    // ── 6-band multiband compressor (LR4 crossovers), driven by the
+    //    leveled AGC output ──
     this.mbWetPre = g(1);
     this.mbDry = g(0);
-    deqSum.connect(this.mbWetPre);
-    deqSum.connect(this.mbDry);
+    agcOut.connect(this.mbWetPre);
+    agcOut.connect(this.mbDry);
     const mbSum = g(1);
     this.mbDry.connect(mbSum);
 
@@ -479,28 +500,11 @@ export class AudioEngine {
     });
     for (const start of mbStarts) this.mbWetPre.connect(start);
 
-    // ── program AGC ──
-    this.agcWetPre = g(1);
-    this.agcDry = g(0);
-    this.agcComp = ctx.createDynamicsCompressor();
-    this.agcComp.threshold.value = -18;
-    this.agcComp.ratio.value = 3;
-    this.agcComp.knee.value = 6;
-    this.agcComp.attack.value = 0.015;
-    this.agcComp.release.value = 0.4;
-    this.agcMakeup = g(dbToGain(4));
-    const agcOut = g(1);
-    mbSum.connect(this.agcWetPre);
-    mbSum.connect(this.agcDry);
-    this.agcWetPre.connect(this.agcComp);
-    this.agcComp.connect(this.agcMakeup);
-    this.agcMakeup.connect(agcOut);
-    this.agcDry.connect(agcOut);
-
     // ── loudness rider: slow K-weighted gain ride (Compellor leveler /
     //    AERO.lite long-term controller); driven from the meter loop ──
     this.riderGain = g(1);
-    agcOut.connect(this.riderGain);
+    // multiband sum carries the AGC-leveled program into the rider
+    mbSum.connect(this.riderGain);
 
     // ── brickwall limiter ──
     this.limWetPre = g(1);

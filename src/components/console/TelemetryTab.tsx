@@ -20,6 +20,7 @@ import { LUFS_TARGET, TRUE_PEAK_TARGET } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
+import { Antenna } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
@@ -201,7 +202,12 @@ const statusCls = (kind: OutputStatusKind) =>
  * TELEMETRY — compliance monitoring, band reduction, stream status and the
  * station's event log.
  */
-export function TelemetryTab() {
+export function TelemetryTab({
+  onConfigureStream,
+}: {
+  /** Jump to the Stream TX page (wired to the console tab state). */
+  onConfigureStream?: () => void;
+}) {
   const snap = useMeterSnapshot();
   const { slots } = useOutputs();
 
@@ -462,6 +468,17 @@ export function TelemetryTab() {
           {" · "}
           {formatBytes(rt.stats.bytes)} sent this session
         </p>
+        {!rt.onAir && onConfigureStream && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onConfigureStream}
+            className="mt-3 h-9 cursor-pointer gap-1.5 text-[11px] font-semibold tracking-[0.1em] uppercase"
+          >
+            <Antenna className="size-3.5" />
+            Configure Stream
+          </Button>
+        )}
       </ModuleCard>
 
       {/* ── automatic alarms ── */}

@@ -377,10 +377,13 @@ export function BandGrBar({
   get,
   maxDb = 15,
   height = 44,
+  label,
 }: {
   get: () => number;
   maxDb?: number;
   height?: number;
+  /** Compact band caption (e.g. "SUB") — replaces the generic peak caption. */
+  label?: string;
 }) {
   const mapped = () => -Math.min(maxDb, Math.max(0, get()));
   const peak = useGrPeak(get, 3);
@@ -403,8 +406,8 @@ export function BandGrBar({
         suffix=""
         className="text-[9px] text-panel-fg"
       />
-      <span className="text-readout text-[7px] leading-none text-panel-mut">
-        pk {peak < 0.05 ? "0" : peak.toFixed(1)}
+      <span className="text-readout text-[7px] leading-none whitespace-nowrap text-panel-mut uppercase">
+        {label ?? `pk ${peak < 0.05 ? "0" : peak.toFixed(1)}`}
       </span>
     </div>
   );

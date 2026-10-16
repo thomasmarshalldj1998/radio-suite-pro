@@ -248,7 +248,7 @@ function SliderRow({
 
 /**
  * PROCESSING — the chain laid out left-to-right in signal order the way a
- * StereoTool page reads: Equalizer → Dynamic EQ → Multiband → AGC →
+ * StereoTool page reads: Equalizer → Dynamic EQ → AGC → Multiband →
  * Composite limit → Stereo & output, each a numbered stage with its own
  * bypass LED. The multiband stage uses one threshold fader + live GR bar
  * per band.
@@ -288,12 +288,12 @@ export function ProcessingTab({
       {/* ── signal path breadcrumb ── */}
       <div className="panel flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-3 py-2 text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
         <span className="text-panel-fg">In</span>
-        {["Eq", "Dyn-eq", "Multiband", "AGC", "Limit", "Stereo"].map((s, i) => (
+        {["Eq", "Dyn-eq", "AGC", "Multiband", "Limit", "Stereo"].map((s) => (
           <span key={s} className="flex items-center gap-2">
             <span aria-hidden>▶</span>
             <span
               className={cn(
-                i === 2 ? "text-signal" : "text-panel-mut",
+                s === "Multiband" ? "text-signal" : "text-panel-mut",
               )}
             >
               {s}
@@ -597,89 +597,9 @@ export function ProcessingTab({
 
         <ChainArrow />
 
-        {/* 03 — multiband compressor */}
+        {/* 03 — program AGC (pre-multiband leveller) */}
         <ChainBlock
           index={3}
-          title="Multiband"
-          subtitle="6-band · LR4 crossovers · per-band threshold"
-          wide
-          gr={{
-            label: "MB",
-            get: () => Math.max(0, ...getEngine().snapshot().gr.bands),
-          }}
-          enabled={params.multiband.on}
-          onToggle={() =>
-            setParams((p) => ({
-              ...p,
-              multiband: { ...p.multiband, on: !p.multiband.on },
-            }))
-          }
-        >
-          <div className="flex items-start justify-between gap-1 overflow-x-auto pb-1">
-            {MB_LABELS.map((label, i) => {
-              const band = params.multiband.bands[i];
-              return (
-                <div
-                  key={label}
-                  className="flex w-14 shrink-0 flex-col items-center gap-1"
-                >
-                  <span className="text-readout text-[10px] font-semibold text-white">
-                    {sgn(band.thresholdDb)}
-                  </span>
-                  <Fader
-                    label="thr"
-                    value={band.thresholdDb}
-                    min={-50}
-                    max={0}
-                    step={0.5}
-                    height={112}
-                    ticks={false}
-                    format={() => ""}
-                    onChange={(v) =>
-                      setParams((p) => ({
-                        ...p,
-                        multiband: {
-                          ...p.multiband,
-                          bands: p.multiband.bands.map((b, j) =>
-                            j === i ? { ...b, thresholdDb: v } : b,
-                          ) as MultibandBands,
-                        },
-                      }))
-                    }
-                  />
-                  <BandGrBar
-                    get={() => getEngine().snapshot().gr.bands[i] ?? 0}
-                    maxDb={15}
-                    height={40}
-                  />
-                  <span className="text-[9px] font-semibold tracking-[0.06em] text-foreground/80 uppercase">
-                    {label}
-                  </span>
-                  <span className="text-readout text-[8px] text-panel-mut">
-                    {bandRange(i, params.multiband.splitsHz)}
-                  </span>
-                  <span className="text-readout text-[8px] text-panel-mut">
-                    AT {band.attackMs.toFixed(2)} · RL {band.releaseMs.toFixed(2)}
-                  </span>
-                  <span className="text-readout text-[8px] text-signal/80">
-                    R{band.ratio.toFixed(2)} · MK {band.makeupDb.toFixed(2)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
-            One threshold per band — ratio, timing and makeup ride with the
-            loaded preset. Sustained GR over 6 dB on a band means its
-            threshold is working too hard.
-          </p>
-        </ChainBlock>
-
-        <ChainArrow />
-
-        {/* 04 — program AGC */}
-        <ChainBlock
-          index={4}
           title="AGC"
           subtitle="Program leveller · loudness rider"
           gr={{ label: "AGC", get: () => getEngine().snapshot().gr.agc }}
@@ -814,6 +734,86 @@ export function ProcessingTab({
               />
             </CtrlRow>
           </div>
+        </ChainBlock>
+
+        <ChainArrow />
+
+        {/* 04 — multiband compressor (driven by the leveled AGC output) */}
+        <ChainBlock
+          index={4}
+          title="Multiband"
+          subtitle="6-band · LR4 crossovers · per-band threshold"
+          wide
+          gr={{
+            label: "MB",
+            get: () => Math.max(0, ...getEngine().snapshot().gr.bands),
+          }}
+          enabled={params.multiband.on}
+          onToggle={() =>
+            setParams((p) => ({
+              ...p,
+              multiband: { ...p.multiband, on: !p.multiband.on },
+            }))
+          }
+        >
+          <div className="flex items-start justify-between gap-1 overflow-x-auto pb-1">
+            {MB_LABELS.map((label, i) => {
+              const band = params.multiband.bands[i];
+              return (
+                <div
+                  key={label}
+                  className="flex w-14 shrink-0 flex-col items-center gap-1"
+                >
+                  <span className="text-readout text-[10px] font-semibold text-white">
+                    {sgn(band.thresholdDb)}
+                  </span>
+                  <Fader
+                    label="thr"
+                    value={band.thresholdDb}
+                    min={-50}
+                    max={0}
+                    step={0.5}
+                    height={112}
+                    ticks={false}
+                    format={() => ""}
+                    onChange={(v) =>
+                      setParams((p) => ({
+                        ...p,
+                        multiband: {
+                          ...p.multiband,
+                          bands: p.multiband.bands.map((b, j) =>
+                            j === i ? { ...b, thresholdDb: v } : b,
+                          ) as MultibandBands,
+                        },
+                      }))
+                    }
+                  />
+                  <BandGrBar
+                    get={() => getEngine().snapshot().gr.bands[i] ?? 0}
+                    maxDb={15}
+                    height={40}
+                  />
+                  <span className="text-[9px] font-semibold tracking-[0.06em] text-foreground/80 uppercase">
+                    {label}
+                  </span>
+                  <span className="text-readout text-[8px] text-panel-mut">
+                    {bandRange(i, params.multiband.splitsHz)}
+                  </span>
+                  <span className="text-readout text-[8px] text-panel-mut">
+                    AT {band.attackMs.toFixed(2)} · RL {band.releaseMs.toFixed(2)}
+                  </span>
+                  <span className="text-readout text-[8px] text-signal/80">
+                    R{band.ratio.toFixed(2)} · MK {band.makeupDb.toFixed(2)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+            One threshold per band — ratio, timing and makeup ride with the
+            loaded preset. Sustained GR over 6 dB on a band means its
+            threshold is working too hard.
+          </p>
         </ChainBlock>
 
         <ChainArrow />
