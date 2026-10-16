@@ -9,22 +9,44 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      # Private-repo minutes are metered (linux 1x, windows 2x, macOS 10x),
+      # so a manual run defaults to the cheap, proven Linux leg. Choose
+      # "all" only when you actually need the Windows/macOS installers.
+      # Tag pushes always build every platform (that is a real release).
+      targets:
+        description: "Installers to build"
+        type: choice
+        options:
+          - linux
+          - all
+        default: linux
 
 jobs:
+  # Builds the matrix JSON from the dispatch input so a cheap test run only
+  # schedules one runner instead of three.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.targets }}" = "linux" ]; then
+            echo 'matrix={"include":[{"os":"ubuntu-latest","args":"--linux"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"os":"ubuntu-latest","args":"--linux"},{"os":"windows-latest","args":"--win"},{"os":"macos-latest","args":"--mac --arm64 --x64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            args: --linux
-          - os: windows-latest
-            args: --win
-          - os: macos-latest
-            # macos-latest is Apple silicon; name both archs explicitly or
-            # only arm64 would build (defaults to process.arch) and the
-            # Intel DMG link on the site would 404.
-            args: --mac --arm64 --x64
+      # macos-latest is Apple silicon; name both archs explicitly or only
+      # arm64 would build (defaults to process.arch) and the Intel DMG link
+      # on the site would 404.
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +75,7 @@ jobs:
         id: verify
         shell: bash
         run: |
-          echo "desktop-release workflow rev 5 (self-healing types + verify-all-files)"
+          echo "desktop-release workflow rev 6 (self-healing types, verify-all-files, cost-aware matrix)"
           echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
           echo "checked-in _generated contents:"
           ls -la src/convex/_generated/ 2>/dev/null || echo "  (directory absent)"
