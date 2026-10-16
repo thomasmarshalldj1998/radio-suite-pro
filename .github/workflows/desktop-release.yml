@@ -37,16 +37,24 @@ jobs:
         run: bun install
 
       # Fail fast with one clear line instead of a wall of tsc errors if the
-      # versioned Convex types are missing from the checkout.
+      # versioned Convex types are missing from the checkout. tsc only reads
+      # the .d.ts files (no allowJs), so every generated file is checked: a
+      # partial commit (e.g. api.js present but server.d.ts missing) sails
+      # through a naive existence check and then fails the build with tsc
+      # exit code 2.
       # Block scalar + shell: bash keeps quoting identical on all three OSes
       # (windows runners default to pwsh, which mangles inline quotes).
       - name: Verify versioned sources
         shell: bash
         run: |
-          if [ ! -f src/convex/_generated/api.js ]; then
-            echo '::error::src/convex/_generated is missing from the repo - commit the generated Convex types (do not gitignore them); CI typechecks from a fresh checkout.'
-            exit 1
-          fi
+          missing=0
+          for f in src/convex/_generated/api.d.ts src/convex/_generated/api.js src/convex/_generated/dataModel.d.ts src/convex/_generated/server.d.ts src/convex/_generated/server.js; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is missing from the repo - commit the generated Convex types (do not gitignore them); CI typechecks from a fresh checkout."
+              missing=1
+            fi
+          done
+          exit $missing
 
       - name: Generate icon
         run: bun run desktop:icon
