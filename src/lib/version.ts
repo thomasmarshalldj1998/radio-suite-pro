@@ -8,11 +8,12 @@ export const APP_VERSION = "1.0.0";
  * publishes them under version-free artifact names, so these /latest/
  * download URLs always point at the newest release.
  *
- * NOTE: point this at your own repository before publishing — it is the
- * single place the download links are derived from.
+ * This is the single place the download links are derived from, so it must
+ * name the repository that actually runs the release workflow — a placeholder
+ * here makes every Download button on the landing page 404.
  */
 export const RELEASES_URL =
-  "https://github.com/signalpath/signalpath/releases";
+  "https://github.com/thomasmarshalldj1998/radio-suite-pro/releases";
 
 export const DESKTOP_DOWNLOADS = {
   /** Windows 10/11 — NSIS installer. */
