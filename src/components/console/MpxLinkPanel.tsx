@@ -10,6 +10,10 @@
  * two jitter buffers, the healthy one feeds the splice, and a damaged link is
  * replaced without the composite ever going silent.
  *
+ * Receive mode also decodes what the splice releases: the station name and
+ * RadioText come off the 57 kHz subcarrier and left/right off the 38 kHz one,
+ * so the panel reports content that arrived, not content that was sent.
+ *
  * The self-test drives the whole path — framer, network model, jitter buffers,
  * splice — with a deterministic clock on a deliberately damaged primary, so the
  * receiver can be shown recovering rather than described.
@@ -189,6 +193,24 @@ function PathRow({
               : "closed"}
         </span>
       </div>
+    </div>
+  );
+}
+
+/** A small dBFS bar for one decoded leg. */
+function LevelBar({ label, rms }: { label: string; rms: number }) {
+  const db = rms > 1e-6 ? 20 * Math.log10(rms) : -60;
+  const pct = Math.max(0, Math.min(1, (db + 60) / 60));
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-muted-foreground w-2 shrink-0 text-[9px]">{label}</span>
+      <span className="relative h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-border/50">
+        <span
+          className="bg-signal absolute inset-y-0 left-0 rounded-full"
+          style={{ width: `${pct * 100}%` }}
+        />
+      </span>
+      <span className="text-readout w-9 shrink-0 text-right text-[9px]">{db.toFixed(0)} dB</span>
     </div>
   );
 }
@@ -538,6 +560,59 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
           <div className="grid grid-cols-2 gap-2">
             <LinkRow label="Link A" health={link.links[0]} live={link.receive && link.active === 0} />
             <LinkRow label="Link B" health={link.links[1]} live={link.receive && link.active === 1} />
+          </div>
+
+          {/* ── decoded from the splice, not from the sender ── */}
+          <div className="rounded border border-border/60 bg-card/40 p-2.5">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-muted-foreground text-[10px] font-semibold tracking-[0.1em] uppercase">
+                Received content
+              </span>
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 text-[9px]",
+                  link.content?.rds.locked ? "text-meter-ok" : "text-muted-foreground",
+                )}
+              >
+                <span
+                  className={cn("led size-1.5", link.content?.rds.locked && "led-on")}
+                  aria-hidden
+                />
+                {link.content?.rds.locked ? "RDS locked" : "searching"}
+              </span>
+            </div>
+            {link.content ? (
+              <>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-readout bg-signal/10 max-w-[60%] truncate rounded px-1.5 py-0.5 text-[11px] tracking-[0.2em]">
+                    {link.content.rds.ps.trim() || "—"}
+                  </span>
+                  <span className="text-muted-foreground shrink-0 text-[9px]">
+                    0x{(link.content.rds.pi ?? 0).toString(16).toUpperCase().padStart(4, "0")} · PTY{" "}
+                    {link.content.rds.pty ?? "—"}
+                  </span>
+                </div>
+                <div className="text-readout mt-1 truncate text-[10px]">
+                  {link.content.rds.rt || "—"}
+                </div>
+                <div className="mt-1.5 flex flex-col gap-1">
+                  <LevelBar label="L" rms={link.content.audio.rmsL} />
+                  <LevelBar label="R" rms={link.content.audio.rmsR} />
+                </div>
+                <div className="text-muted-foreground mt-1 flex justify-between gap-2 text-[9px]">
+                  <span>
+                    {link.content.rds.groups} groups · {link.content.rds.bits} bits · phase{" "}
+                    {link.content.rds.phase}
+                  </span>
+                  <span>{link.content.rds.errors} bad blocks</span>
+                </div>
+              </>
+            ) : (
+              <p className="text-muted-foreground text-[9px] leading-3.5">
+                Turn Receive on and the splice's output is demodulated here — station name and
+                RadioText off the 57 kHz subcarrier, left and right off the 38 kHz one.
+              </p>
+            )}
           </div>
 
           {link.selfTest ? (

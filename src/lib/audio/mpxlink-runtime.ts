@@ -16,6 +16,7 @@
  * the console shows exactly what would go out.
  */
 import { acquireStream, releaseStream, subscribeComposite } from "./fm";
+import { CompositeDecoder, type DecodeSnapshot } from "./mpxdecode";
 import type { FmParams } from "./params";
 import { closeUdp, getUdp, openUdp, sendPacket, setUdpInbound, udpPaths } from "./udp";
 import {
@@ -62,6 +63,12 @@ export interface LinkSnapshot {
   forced: number | null;
   links: [LinkHealth, LinkHealth];
   splices: SpliceEvent[];
+  /**
+   * What the receiver actually recovered from the spliced composite: station
+   * identity and text off the 57 kHz subcarrier, left and right off the 38 kHz
+   * one. Null until receive mode has produced audio.
+   */
+  content: DecodeSnapshot | null;
   /** The last link self-test, if one has been run. */
   selfTest: SelfTestReport | null;
 }
@@ -98,6 +105,7 @@ let snapshot: LinkSnapshot = {
   forced: null,
   links: [{ ...health0 }, { ...health0 }],
   splices: [],
+  content: null,
   selfTest: null,
 };
 
@@ -109,6 +117,8 @@ let transport: ((wire: Uint8Array, packet: MpxPacket) => void) | null = null;
 /** Composite bytes carried but not yet formed into a full frame. */
 let carry: Uint8Array | null = null;
 let carryLength = 0;
+/** Decoder for the receiver's spliced output — the far end of the link. */
+let decoder: CompositeDecoder | null = null;
 
 let lastEmit = 0;
 
@@ -189,6 +199,7 @@ export function armLink(fm: FmParams | null, codec: MpxCodec = "raw"): void {
   snapshot = { ...snapshot, armed: true, codec };
   if (fm) acquireStream(fm);
   sender = new MpxPacketiser(0, COMPOSITE_RATE, 1);
+  decoder = new CompositeDecoder({ sampleRate: COMPOSITE_RATE });
   receiver = new MpxDualLink(undefined, {
     sampleRate: COMPOSITE_RATE,
     targetMs: 120,
@@ -207,6 +218,7 @@ export function disarmLink(fm?: FmParams | null): void {
   // Drop the receiver too: with the link disarmed nothing drains it, and
   // inbound datagrams would pile up in its buffers.
   receiver = null;
+  decoder = null;
   carry = null;
   carryLength = 0;
   if (fm) releaseStream(fm);
@@ -218,12 +230,14 @@ export function disarmLink(fm?: FmParams | null): void {
     kbps: 0,
     fps: 0,
     links: [{ ...health0 }, { ...health0 }],
+    content: null,
   };
   emit();
 }
 
 export function setReceiveMode(on: boolean): void {
   snapshot = { ...snapshot, receive: on };
+  if (on) decoder = new CompositeDecoder({ sampleRate: COMPOSITE_RATE });
   if (on && !receiver) {
     receiver = new MpxDualLink(undefined, {
       sampleRate: COMPOSITE_RATE,
@@ -287,11 +301,30 @@ function pushComposite(mono: Float32Array): void {
   emitThrottled();
 }
 
-/** One receiver step — called from the console's status tick. */
+/** Scratch for 16-bit payload → float, reused because this runs at 187 Hz. */
+let decodeBuf: Float32Array | null = null;
+
+function toComposite(payload: Uint8Array): Float32Array {
+  const n = payload.length >> 1;
+  if (!decodeBuf || decodeBuf.length < n) decodeBuf = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = payload[i * 2] | (payload[i * 2 + 1] << 8);
+    decodeBuf[i] = ((v << 16) >> 16) / 32768;
+  }
+  return decodeBuf.subarray(0, n);
+}
+
+/**
+ * One receiver step — called from the console's status tick. Every frame the
+ * splice releases is decoded, so the panel reports content that came off the
+ * wire (or, in loopback, out of the local framer) rather than what was sent.
+ */
 export function tickLink(): void {
   if (!receiver || !snapshot.receive) return;
   for (let i = 0; i < 64; i++) {
-    if (!receiver.pull()) break;
+    const packet = receiver.pull();
+    if (!packet) break;
+    decoder?.process(toComposite(packet.payload));
   }
   snapshot = {
     ...snapshot,
@@ -299,6 +332,7 @@ export function tickLink(): void {
     forced: receiver.forcedLink,
     links: receiver.health(),
     splices: getSplices().slice(0, 8),
+    content: decoder?.snapshot() ?? null,
   };
   emit();
 }

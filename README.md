@@ -108,6 +108,38 @@ bun scripts/verify-udp.ts           # real loopback sockets, both paths
 bun scripts/verify-udp-renderer.ts  # renderer bridge wiring and attribution
 ```
 
+### Receiving: decoding the composite
+
+Receive mode does not just meter what arrives — `src/lib/audio/mpxdecode.ts`
+demodulates it back into programme material:
+
+- the 19 kHz pilot is recovered and used as the phase reference, exactly the
+  way the generator derives its subcarriers (cos 2φ at 38 kHz, sin 3φ at
+  57 kHz);
+- the 38 kHz difference signal is mixed down, filtered to 15 kHz and matrixed
+  with the main channel into left and right;
+- the 57 kHz data subcarrier is mixed down, biphase-sliced, differentially
+  decoded and block-synchronised against the RDS (26,16) code, which yields
+  PI, PTY, the programme service name and RadioText from the wire.
+
+Bit timing is not tracked with a loop. Both ends run off the same composite
+sample clock, so the symbol grid is exact; only the phase is unknown, and a
+splice shifts it by a fraction of a bit. Eight slicers are run at eighths of a
+bit and the block layer picks the one whose 26-bit words satisfy the syndrome.
+
+Cost is about 35 ms of CPU per second of received composite (≈3.5 % of one
+core), and it only runs while Receive is on.
+
+```bash
+bun scripts/verify-link-content.ts  # programme content over real UDP + splice
+```
+
+That test is the proof the link carries content rather than samples: a tone on
+each leg and a station name are generated into the composite, framed, sent over
+two real UDP paths, spliced, and then recovered by the decoder — with a
+quarter of path A removed, the receiver switches to B and the station name,
+RadioText and both tones come back at their original levels and separation.
+
 ### Download links
 
 The landing page (`src/pages/Landing.tsx`) has a **Download** section with a

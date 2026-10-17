@@ -219,10 +219,12 @@ class PolyphaseUpsampler {
 /* ── RDS (IEC 62106) group 0A encoder ──────────────────────────────────── */
 
 /** CRC-10 generator: x¹⁰+x⁸+x⁷+x⁵+x⁴+x³+1 (IEC 62106 §3.2.2). */
-const RDS_POLY = 0b10110111001; // 0x5B9
+/** Generator polynomial of the (26,16) RDS block code — decoder and encoder
+ * must not drift apart, so both read it from here. */
+export const RDS_POLY = 0b10110111001; // 0x5B9
 
 /** Block offset words identifying A/B/C/C′/D within a group. */
-const RDS_OFFSET = { A: 0x0fc, B: 0x198, C: 0x168, D: 0x1b4 } as const;
+export const RDS_OFFSET = { A: 0x0fc, B: 0x198, C: 0x168, D: 0x1b4 } as const;
 
 /** Application identification carried in group 3A for RadioText Plus. */
 export const RDS_RTPLUS_AID = 0x4bd7;
