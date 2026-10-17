@@ -1,7 +1,7 @@
 {
   "name": "signalpath",
   "private": true,
-  "version": "1.2.1",
+  "version": "2.0.0",
   "description": "Broadcast audio processor and stream encoder",
   "homepage": "https://signalpath.app",
   "author": "Signalpath <support@signalpath.app>",

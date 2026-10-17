@@ -80,38 +80,38 @@
 }
 
 .dark {
-  /* broadcast dark theme — ultra-dark console / rack card containers */
-  --background: #101216;
-  --foreground: #e8eaef;
-  --card: #1a1d24;
-  --card-foreground: #e8eaef;
-  --popover: #1a1d24;
-  --popover-foreground: #e8eaef;
-  --primary: #4a90e2;
+  /* v2 console theme — deeper rack void, lifted cards, crisper hairlines */
+  --background: #0b0d10;
+  --foreground: #eceef3;
+  --card: #171b21;
+  --card-foreground: #eceef3;
+  --popover: #171b21;
+  --popover-foreground: #eceef3;
+  --primary: #5b9cf0;
   --primary-foreground: #ffffff;
-  --secondary: #2a2e36;
-  --secondary-foreground: #e8eaef;
-  --muted: #23262c;
-  --muted-foreground: #b0b6c0;
-  --accent: #2a2e36;
-  --accent-foreground: #e8eaef;
+  --secondary: #20242c;
+  --secondary-foreground: #eceef3;
+  --muted: #1d2127;
+  --muted-foreground: #b6bcc7;
+  --accent: #20242c;
+  --accent-foreground: #eceef3;
   --destructive: #ff3b30;
-  --border: #2a2e36;
-  --input: #2a2e36;
-  --ring: #4a90e2;
+  --border: #262c35;
+  --input: #20242c;
+  --ring: #5b9cf0;
   --chart-1: #4a90e2;
   --chart-2: #4cd964;
   --chart-3: #ffcc00;
   --chart-4: #ff3b30;
   --chart-5: #b0b6c0;
-  --sidebar: #14161b;
-  --sidebar-foreground: #e8eaef;
-  --sidebar-primary: #4a90e2;
+  --sidebar: #0e1114;
+  --sidebar-foreground: #eceef3;
+  --sidebar-primary: #5b9cf0;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #2a2e36;
-  --sidebar-accent-foreground: #e8eaef;
-  --sidebar-border: #2a2e36;
-  --sidebar-ring: #4a90e2;
+  --sidebar-accent: #20242c;
+  --sidebar-accent-foreground: #eceef3;
+  --sidebar-border: #262c35;
+  --sidebar-ring: #5b9cf0;
 }
 
 /* ── Signalpath design tokens & console surfaces ────────────────────────── */
@@ -121,19 +121,19 @@
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo,
     monospace;
 
-  /* broadcast accent — primary control blue */
-  --color-signal: #4a90e2;
-  --color-signal-strong: #3b7cc4;
-  --color-signal-soft: #dcebfb;
+  /* broadcast accent — v2 control blue, a touch brighter for dark glass */
+  --color-signal: #5b9cf0;
+  --color-signal-strong: #3f7fd6;
+  --color-signal-soft: #d8e9fd;
   --color-signal-fg: #ffffff;
 
   /* dark instrument panels (used in both themes for metering surfaces) */
-  --color-panel: #1c1f24;
-  --color-panel-2: #23262c;
-  --color-panel-3: #2a2e36;
+  --color-panel: #1a1e24;
+  --color-panel-2: #20242c;
+  --color-panel-3: #272c35;
   --color-panel-fg: #ffffff;
-  --color-panel-mut: #b0b6c0;
-  --color-panel-line: #2a2e36;
+  --color-panel-mut: #b6bcc7;
+  --color-panel-line: #262c35;
 
   /* meter zones — broadcast PPM colour coding */
   --color-meter-ok: #4cd964;
@@ -142,12 +142,12 @@
   --color-meter-slate: #59616e;
 
   /* broadcast rack (console shell — deep charcoal) */
-  --color-rack: #121417;
-  --color-rack-2: #1c1f24;
-  --color-rack-3: #23262c;
-  --color-rack-line: #2a2e36;
-  --color-rack-fg: #e8eaef;
-  --color-rack-mut: #b0b6c0;
+  --color-rack: #0e1013;
+  --color-rack-2: #1a1e24;
+  --color-rack-3: #20242c;
+  --color-rack-line: #262c35;
+  --color-rack-fg: #eceef3;
+  --color-rack-mut: #b6bcc7;
   --color-amber-led: #ffcc00;
 }
 
@@ -167,7 +167,7 @@
     cursor: pointer;
   }
   ::selection {
-    background: rgb(74 144 226 / 30%);
+    background: rgb(91 156 240 / 32%);
   }
   input[type="number"]::-webkit-outer-spin-button,
   input[type="number"]::-webkit-inner-spin-button {
@@ -188,32 +188,34 @@
   .panel {
     background: linear-gradient(
       180deg,
-      #1f2329 0%,
-      #1a1d22 100%
+      #22262d 0%,
+      #1a1e23 55%,
+      #171b20 100%
     );
-    border: 1px solid #2a2e36;
+    border: 1px solid #262c35;
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 5%),
-      0 16px 40px -24px rgb(0 0 0 / 70%);
+      inset 0 1px 0 rgb(255 255 255 / 7%),
+      inset 0 -1px 0 rgb(0 0 0 / 35%),
+      0 20px 44px -24px rgb(0 0 0 / 75%);
   }
 
   /* recessed well inside a panel (meters, spectra) */
   .panel-well {
-    background: #121417;
-    border: 1px solid #2a2e36;
+    background: #0d0f12;
+    border: 1px solid #262c35;
     box-shadow:
-      inset 0 2px 6px rgb(0 0 0 / 55%),
-      inset 0 -1px 0 rgb(255 255 255 / 4%);
+      inset 0 2px 8px rgb(0 0 0 / 60%),
+      inset 0 -1px 0 rgb(255 255 255 / 5%);
   }
 
   /* brushed-metal control face */
   .panel-face {
     background: linear-gradient(
       180deg,
-      #272b32 0%,
-      #22262c 100%
+      #2a2f37 0%,
+      #22262d 100%
     );
-    border: 1px solid #2a2e36;
+    border: 1px solid #262c35;
   }
 
   .hairline-top {
@@ -225,21 +227,21 @@
     background:
       radial-gradient(
         130% 90% at 50% -10%,
-        rgb(255 255 255 / 4%) 0%,
+        rgb(255 255 255 / 5%) 0%,
         transparent 62%
       ),
-      #101216;
+      #0b0d10;
   }
 
   /* brushed rack strip (tab bar, header rails) */
   .rack-rail {
     background: linear-gradient(
       180deg,
-      #1e2127 0%,
-      #191c21 100%
+      #20242c 0%,
+      #181c22 100%
     );
-    border-bottom: 1px solid #2a2e36;
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
+    border-bottom: 1px solid #262c35;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
   }
 
   /* status LED */
@@ -252,7 +254,9 @@
   }
   .led-on {
     background: #4cd964;
-    box-shadow: 0 0 8px rgb(76 217 100 / 80%);
+    box-shadow:
+      0 0 10px rgb(76 217 100 / 85%),
+      0 0 2px rgb(76 217 100 / 90%);
   }
   .led-hot {
     background: #ff3b30;

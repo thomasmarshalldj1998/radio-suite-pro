@@ -1,6 +1,6 @@
 /** Signalpath application version — shown in the footer and diagnostics export. */
 export const APP_NAME = "Signalpath";
-export const APP_VERSION = "1.2.1";
+export const APP_VERSION = "2.0.0";
 
 /**
  * Desktop installers live on the GitHub Releases page. Each v* tag builds
