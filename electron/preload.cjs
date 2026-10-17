@@ -13,6 +13,16 @@ ipcRenderer.on("mpx:data", (_event, id, bytes) => {
   for (const handler of dataHandlers) handler(id, bytes);
 });
 
+/** Audio-device state/commands between the console and the Devices window. */
+const audioStateHandlers = new Set();
+const audioCommandHandlers = new Set();
+ipcRenderer.on("audio:state", (_event, state) => {
+  for (const handler of audioStateHandlers) handler(state);
+});
+ipcRenderer.on("audio:command", (_event, cmd) => {
+  for (const handler of audioCommandHandlers) handler(cmd);
+});
+
 contextBridge.exposeInMainWorld("signalpath", {
   platform: process.platform,
   udp: {
@@ -36,6 +46,34 @@ contextBridge.exposeInMainWorld("signalpath", {
       dataHandlers.add(cb);
       return () => {
         dataHandlers.delete(cb);
+      };
+    },
+  },
+  audio: {
+    available: true,
+    /** Main console reports its device state; the shell caches + forwards it. */
+    push: (state) => ipcRenderer.send("audio:push", state),
+    /** Cached state for a freshly opened Devices window. */
+    get: () => ipcRenderer.invoke("audio:get"),
+    setInput: (id) => ipcRenderer.send("audio:set", { type: "input", id }),
+    setOutput: (id) => ipcRenderer.send("audio:set", { type: "output", id }),
+    refresh: () => ipcRenderer.send("audio:set", { type: "refresh" }),
+    arm: () => ipcRenderer.send("audio:set", { type: "arm" }),
+    disarm: () => ipcRenderer.send("audio:set", { type: "disarm" }),
+    /** Devices window listens for state broadcasts. */
+    onState: (cb) => {
+      if (typeof cb !== "function") return () => {};
+      audioStateHandlers.add(cb);
+      return () => {
+        audioStateHandlers.delete(cb);
+      };
+    },
+    /** Main console listens for commands from the Devices window. */
+    onCommand: (cb) => {
+      if (typeof cb !== "function") return () => {};
+      audioCommandHandlers.add(cb);
+      return () => {
+        audioCommandHandlers.delete(cb);
       };
     },
   },

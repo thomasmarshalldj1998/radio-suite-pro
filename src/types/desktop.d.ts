@@ -29,9 +29,46 @@ export interface SignalpathUdp {
   onData: (cb: (id: "a" | "b", bytes: Uint8Array) => void) => () => void;
 }
 
+export interface SignalpathAudioDevice {
+  id: string;
+  label: string;
+}
+
+export interface SignalpathAudioState {
+  inputs: SignalpathAudioDevice[];
+  outputs: SignalpathAudioDevice[];
+  inputId: string;
+  outputId: string;
+  micStatus: string;
+  micLabel: string;
+}
+
+export interface SignalpathAudioCommand {
+  type: "input" | "output" | "refresh" | "arm" | "disarm";
+  id?: string;
+}
+
+export interface SignalpathAudio {
+  available: boolean;
+  /** Console → shell: report current device state. */
+  push: (state: SignalpathAudioState) => void;
+  /** Devices window → shell: last reported state, if any. */
+  get: () => Promise<SignalpathAudioState | null>;
+  setInput: (id: string) => void;
+  setOutput: (id: string) => void;
+  refresh: () => void;
+  arm: () => void;
+  disarm: () => void;
+  /** Devices window: follow state broadcasts. */
+  onState: (cb: (s: SignalpathAudioState) => void) => () => void;
+  /** Console: follow commands from the Devices window. */
+  onCommand: (cb: (cmd: SignalpathAudioCommand) => void) => () => void;
+}
+
 export interface SignalpathBridge {
   platform?: string;
   udp?: SignalpathUdp;
+  audio?: SignalpathAudio;
 }
 
 declare global {

@@ -27,6 +27,9 @@ const isMac = process.platform === "darwin";
 const DEV_URL = process.env.SIGNALPATH_DEV_URL || "";
 
 let mainWindow = null;
+let devicesWindow = null;
+/** Last device state pushed by the console; served to the Devices window. */
+let audioState = null;
 
 /* ── composite-over-IP links: one UDP socket per path ───────────────────── */
 
@@ -92,6 +95,32 @@ ipcMain.handle("mpx:close", (event, id) => {
   links.get(which)?.close();
   links.delete(which);
   return { ok: true };
+});
+
+/* ── audio devices: console ⇄ Devices window ──────────────────────────── */
+
+/** Only the Devices window may issue device commands. */
+function fromDevices(event) {
+  return Boolean(devicesWindow) && event.sender === devicesWindow.webContents;
+}
+
+ipcMain.handle("audio:get", () => audioState);
+
+ipcMain.on("audio:push", (event, state) => {
+  if (!fromApp(event)) return;
+  if (!state || typeof state !== "object") return;
+  audioState = state;
+  if (devicesWindow && !devicesWindow.isDestroyed()) {
+    devicesWindow.webContents.send("audio:state", state);
+  }
+});
+
+ipcMain.on("audio:set", (event, cmd) => {
+  if (!fromDevices(event)) return;
+  if (!cmd || typeof cmd !== "object") return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("audio:command", cmd);
+  }
 });
 
 protocol.registerSchemesAsPrivileged([
@@ -166,6 +195,50 @@ function createWindow() {
   }
 }
 
+/** Small satellite window for picking the sound input/output devices. */
+function openDevicesWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (devicesWindow && !devicesWindow.isDestroyed()) {
+    devicesWindow.focus();
+    return;
+  }
+  devicesWindow = new BrowserWindow({
+    width: 440,
+    height: 640,
+    minWidth: 360,
+    minHeight: 480,
+    show: false,
+    backgroundColor: "#0b0d11",
+    title: "Audio Devices",
+    parent: mainWindow,
+    modal: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, "preload.cjs"),
+    },
+  });
+
+  devicesWindow.once("ready-to-show", () => {
+    if (devicesWindow && !devicesWindow.isDestroyed()) devicesWindow.show();
+  });
+  devicesWindow.on("closed", () => {
+    devicesWindow = null;
+  });
+
+  devicesWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  if (DEV_URL) {
+    void devicesWindow.loadURL(`${DEV_URL}#/devices`);
+  } else {
+    void devicesWindow.loadURL("app://signalpath/#/devices");
+  }
+}
+
 function buildMenu() {
   // Standard roles keep Edit → Copy/Paste and the usual accelerators working.
   const template = [
@@ -174,6 +247,16 @@ function buildMenu() {
     { role: "editMenu" },
     { role: "viewMenu" },
     { role: "windowMenu" },
+    {
+      label: "Audio",
+      submenu: [
+        {
+          label: "Audio Devices…",
+          accelerator: "CmdOrCtrl+Shift+A",
+          click: () => openDevicesWindow(),
+        },
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

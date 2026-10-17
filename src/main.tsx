@@ -1,4 +1,5 @@
 import { Toaster } from "@/components/ui/sonner";
+import { AudioSync } from "@/components/console/AudioSync";
 import { RequireAuth } from "@/components/RequireAuth";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import {
@@ -26,6 +27,7 @@ const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const Studio = lazy(() => import("./pages/Studio.tsx"));
+const Devices = lazy(() => import("./pages/Devices.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -138,6 +140,7 @@ function AppTree() {
   const Router = IS_DESKTOP ? HashRouter : BrowserRouter;
   return (
     <>
+      <AudioSync />
       <Router>
         <RouteSyncer />
         <Suspense fallback={<RouteLoading />}>
@@ -173,6 +176,8 @@ function AppTree() {
               }
             />
             <Route path="/studio" element={<Studio />} />
+            {/* Desktop satellite window (Audio → Audio Devices…) and fallback. */}
+            <Route path="/devices" element={<Devices />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </Suspense>
