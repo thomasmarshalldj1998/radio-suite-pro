@@ -36,6 +36,12 @@ export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
 export type MicStatus = "idle" | "arming" | "on" | "error";
 
+/** One physical audio device, as listed by the OS. */
+export interface AudioDevice {
+  id: string;
+  label: string;
+}
+
 export interface MeterSnapshot {
   t: number;
   powered: boolean;
@@ -139,6 +145,14 @@ export class AudioEngine {
   signalMode: SignalMode = "pink";
   micStatus: MicStatus = "idle";
   micLabel = "";
+  /** Physical devices from enumerateDevices — picked in the UI, not default-only. */
+  inputDevices: AudioDevice[] = [];
+  outputDevices: AudioDevice[] = [];
+  /** Chosen input ("" = OS default). Survives re-arms. */
+  inputDeviceId = "";
+  /** Chosen monitor output ("" = OS default). Applied via setSinkId. */
+  outputDeviceId = "";
+  private deviceWatching = false;
 
   // file transport
   fileBuffer: AudioBuffer | null = null;
@@ -299,6 +313,8 @@ export class AudioEngine {
       await this.ctx.resume();
       this.powered = true;
       this.openOutput();
+      this.watchDevices();
+      void this.applyOutputDevice();
       this.startMeterLoop();
       this.notify();
       return;
@@ -306,6 +322,8 @@ export class AudioEngine {
     const ctx = new AudioContext({ latencyHint: "interactive" });
     this.ctx = ctx;
     this.buildGraph(ctx);
+    this.watchDevices();
+    void this.applyOutputDevice();
     if (this.params) this.apply(this.params);
     await ctx.resume();
     this.powered = true;
@@ -1118,26 +1136,125 @@ export class AudioEngine {
     return this.signalOsc !== null;
   }
 
+  /* ── physical I/O devices ─────────────────────────────────────────────── */
+
+  /**
+   * List the OS input/output devices. Labels stay blank until mic permission
+   * is granted (browser privacy rule), so entries fall back to numbered
+   * names and the list refreshes itself after every successful arm.
+   */
+  async refreshDevices(): Promise<void> {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      let n = 0;
+      this.inputDevices = all
+        .filter((d) => d.kind === "audioinput")
+        .map((d) => ({ id: d.deviceId, label: d.label || `Input ${++n}` }));
+      n = 0;
+      this.outputDevices = all
+        .filter((d) => d.kind === "audiooutput")
+        .map((d) => ({ id: d.deviceId, label: d.label || `Output ${++n}` }));
+      if (
+        this.inputDeviceId &&
+        !this.inputDevices.some((d) => d.id === this.inputDeviceId)
+      ) {
+        this.inputDeviceId = "";
+      }
+      if (
+        this.outputDeviceId &&
+        !this.outputDevices.some((d) => d.id === this.outputDeviceId)
+      ) {
+        this.outputDeviceId = "";
+      }
+    } catch {
+      /* media devices unavailable — keep whatever was listed */
+    }
+    this.notify();
+  }
+
+  /** Enumerate once + follow plug/unplug while the app runs. */
+  private watchDevices() {
+    void this.refreshDevices();
+    if (this.deviceWatching) return;
+    try {
+      navigator.mediaDevices.addEventListener("devicechange", this.onDeviceChange);
+      this.deviceWatching = true;
+    } catch {
+      /* older runtimes without devicechange — manual refresh still works */
+    }
+  }
+
+  private onDeviceChange = () => {
+    void this.refreshDevices();
+  };
+
+  /** Switch inputs; re-arms live so the new device takes over immediately. */
+  setInputDevice(id: string) {
+    this.inputDeviceId = id;
+    if (this.micStatus === "on") {
+      this.disarmMic();
+      void this.armMic();
+    } else {
+      this.notify();
+    }
+  }
+
+  /** Route the monitor bus to the chosen speakers/headphones. */
+  setOutputDevice(id: string) {
+    this.outputDeviceId = id;
+    void this.applyOutputDevice();
+    this.notify();
+  }
+
+  /**
+   * Push the chosen sink into the AudioContext. setSinkId post-dates the TS
+   * lib.dom in this tree, hence the structural type; Chromium (and the
+   * Electron shell) has shipped it since v110. "" = OS default.
+   */
+  private async applyOutputDevice(): Promise<void> {
+    const ctx = this.ctx as (AudioContext & {
+      setSinkId?: (sinkId: string) => Promise<void>;
+    }) | null;
+    if (!ctx || typeof ctx.setSinkId !== "function") return;
+    try {
+      await ctx.setSinkId(this.outputDeviceId);
+    } catch {
+      /* unknown device (unplugged?) — stays on the current sink */
+    }
+  }
+
   async armMic(): Promise<void> {
     if (!this.ctx) return;
     if (this.micStatus === "on" || this.micStatus === "arming") return;
     this.micStatus = "arming";
     this.notify();
+    const base = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 2,
+    };
+    const wanted = this.inputDeviceId;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 2,
-        },
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: wanted ? { ...base, deviceId: { exact: wanted } } : base,
+        });
+      } catch {
+        // Chosen device gone (unplugged?) — fall back to the OS default
+        // rather than leaving the operator with a dead input.
+        this.inputDeviceId = "";
+        stream = await navigator.mediaDevices.getUserMedia({ audio: base });
+      }
       this.micStream = stream;
       const track = stream.getAudioTracks()[0];
       this.micLabel = track?.label ?? "Microphone";
       this.micNode = this.ctx.createMediaStreamSource(stream);
       this.micNode.connect(this.sourceBus);
       this.micStatus = "on";
+      // Permission granted → real device labels are visible now.
+      void this.refreshDevices();
     } catch {
       this.micStatus = "error";
     }

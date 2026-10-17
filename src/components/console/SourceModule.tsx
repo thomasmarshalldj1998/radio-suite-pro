@@ -105,6 +105,8 @@ export function SourceModule({
   const [genOn, setGenOn] = useState(engine.generatorOn);
   const [micStatus, setMicStatus] = useState(engine.micStatus);
   const [micLabel, setMicLabel] = useState(engine.micLabel);
+  const [inputs, setInputs] = useState(engine.inputDevices);
+  const [inputId, setInputId] = useState(engine.inputDeviceId);
   const [fileMeta, setFileMeta] = useState<{
     name: string;
     duration: number;
@@ -119,6 +121,8 @@ export function SourceModule({
       engine.subscribe(() => {
         setMicStatus((prev) => (prev === engine.micStatus ? prev : engine.micStatus));
         setMicLabel((prev) => (prev === engine.micLabel ? prev : engine.micLabel));
+        setInputs((prev) => (prev === engine.inputDevices ? prev : engine.inputDevices));
+        setInputId((prev) => (prev === engine.inputDeviceId ? prev : engine.inputDeviceId));
         setPlaying((prev) => (prev === engine.filePlaying ? prev : engine.filePlaying));
         setPosition(engine.filePosition);
         setSourceState((prev) => (prev === engine.sourceKind ? prev : engine.sourceKind));
@@ -199,35 +203,67 @@ export function SourceModule({
         )}
 
         {source === "mic" && (
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate text-xs font-medium">
-                {micStatus === "on"
-                  ? micLabel || "Input device"
-                  : micStatus === "arming"
-                    ? "Requesting access…"
-                    : micStatus === "error"
-                      ? "Microphone blocked"
-                      : "No input armed"}
-              </p>
-              <p className="mt-0.5 text-[10px] text-muted-foreground">
-                Echo cancellation, noise suppression and AGC disabled.
-              </p>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium">
+                  {micStatus === "on"
+                    ? micLabel || "Input device"
+                    : micStatus === "arming"
+                      ? "Requesting access…"
+                      : micStatus === "error"
+                        ? "Microphone blocked"
+                        : "No input armed"}
+                </p>
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  Echo cancellation, noise suppression and AGC disabled.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant={micStatus === "on" ? "outline" : "default"}
+                className="h-7 shrink-0 text-[11px]"
+                onClick={() => {
+                  if (micStatus === "on") {
+                    engine.disarmMic();
+                  } else {
+                    void engine.armMic();
+                  }
+                }}
+              >
+                {micStatus === "on" ? "Disarm" : "Arm input"}
+              </Button>
             </div>
-            <Button
-              size="sm"
-              variant={micStatus === "on" ? "outline" : "default"}
-              className="h-7 shrink-0 text-[11px]"
-              onClick={() => {
-                if (micStatus === "on") {
-                  engine.disarmMic();
-                } else {
-                  void engine.armMic();
-                }
-              }}
-            >
-              {micStatus === "on" ? "Disarm" : "Arm input"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <select
+                className="h-7 min-w-0 flex-1 cursor-pointer truncate rounded border border-border/60 bg-muted/40 px-1.5 text-[11px] text-foreground"
+                value={inputId}
+                aria-label="Input device"
+                onFocus={() => void engine.refreshDevices()}
+                onChange={(e) => {
+                  setInputId(e.target.value);
+                  engine.setInputDevice(e.target.value);
+                }}
+              >
+                <option value="">System default input</option>
+                {inputs
+                  .filter((d) => d.id)
+                  .map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.label}
+                    </option>
+                  ))}
+              </select>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 shrink-0 px-2 text-[11px]"
+                onClick={() => void engine.refreshDevices()}
+                aria-label="Rescan audio devices"
+              >
+                ↻
+              </Button>
+            </div>
           </div>
         )}
 

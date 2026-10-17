@@ -284,6 +284,16 @@ export function ProcessingTab({
   const engine = getEngine();
   const snap = useMeterSnapshot();
   const [monitorMuted, setMonitorMuted] = useState(false);
+  const [outputs, setOutputs] = useState(engine.outputDevices);
+  const [outputId, setOutputId] = useState(engine.outputDeviceId);
+  useEffect(
+    () =>
+      engine.subscribe(() => {
+        setOutputs((p) => (p === engine.outputDevices ? p : engine.outputDevices));
+        setOutputId((p) => (p === engine.outputDeviceId ? p : engine.outputDeviceId));
+      }),
+    [engine],
+  );
 
   const eqFlat = () =>
     setParams((prev) => ({
@@ -1240,6 +1250,27 @@ export function ProcessingTab({
               Duck
             </Button>
           </div>
+
+          <select
+            className="mt-2 h-8 w-full cursor-pointer truncate rounded border border-border/60 bg-card px-1.5 text-[11px] text-foreground"
+            value={outputId}
+            aria-label="Monitor output device"
+            title="Monitor output — which speakers or headphones you hear"
+            onFocus={() => void engine.refreshDevices()}
+            onChange={(e) => {
+              setOutputId(e.target.value);
+              engine.setOutputDevice(e.target.value);
+            }}
+          >
+            <option value="">System default output</option>
+            {outputs
+              .filter((d) => d.id)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+          </select>
 
           <div className="mt-2 flex justify-center">
             <StereoLevelMeter kind="out" height={120} />
