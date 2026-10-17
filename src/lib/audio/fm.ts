@@ -10,7 +10,7 @@
  * rate (192 kHz) for MPX-over-IP — an exciter fed over IP, the way modern
  * all-digital chains are wired.
  */
-import type { FmParams } from "./params";
+import { DEFAULT_PARAMS, type FmParams } from "./params";
 import { getEngine } from "./engine";
 import { attachPcmTap } from "./js-encoder";
 import type { EncoderStats, ProgramEncoder } from "./encoder";
@@ -303,13 +303,7 @@ export class MpxStreamEncoder implements ProgramEncoder {
 const DEFAULT_FM: FmParams = {
   on: true,
   emphasis: "75",
-  mpx: {
-    on: true,
-    pilotPct: 9,
-    rdsPct: 3.3,
-    rdsPs: "SIGNAL  ",
-    scaPct: 0,
-    ceilingPct: 100,
-    alarmPct: 100,
-  },
+  // Start from the processor defaults so every new RDS field is carried
+  // through (a hand-written literal here silently drops additions).
+  mpx: { ...DEFAULT_PARAMS.fm.mpx },
 };

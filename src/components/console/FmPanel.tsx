@@ -1,8 +1,6 @@
 import { Knob } from "@/components/console/Knob";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { getFm, subscribeFm, type FmSnapshot } from "@/lib/audio/fm";
 import { emphasisBoostDb, emphasisCornerHz } from "@/lib/audio/mpx";
 import {
@@ -10,8 +8,9 @@ import {
   type FmParams,
 } from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { TermTip } from "@/components/console/Meters";
+import { RdsPanel } from "@/components/console/RdsPanel";
 
 /* ── MPX composite spectrum (0–100 kHz linear, subcarrier markers) ─────── */
 
@@ -261,14 +260,6 @@ export function FmPanel({
   onChange: (next: FmParams) => void;
 }) {
   const snap = useSyncExternalStore(subscribeFm, getFm);
-  const [psDraft, setPsDraft] = useState(fm.mpx.rdsPs);
-  const [lastPs, setLastPs] = useState(fm.mpx.rdsPs);
-  // keep the draft in step with external PS changes (preset loads) —
-  // adjust during render rather than resetting from an effect
-  if (fm.mpx.rdsPs !== lastPs) {
-    setLastPs(fm.mpx.rdsPs);
-    setPsDraft(fm.mpx.rdsPs);
-  }
 
   const set = (patch: Partial<FmParams>) => onChange({ ...fm, ...patch });
   const setMpx = (patch: Partial<FmParams["mpx"]>) =>
@@ -284,6 +275,7 @@ export function FmPanel({
   const sumWarn = subcarrierSum > 20;
 
   return (
+    <>
     <ModuleCard
       title="FM exciter · MPX"
       subtitle={
@@ -387,23 +379,7 @@ export function FmPanel({
             />
           </div>
 
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-[10px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-                RDS PS name
-              </Label>
-              <Input
-                value={psDraft}
-                maxLength={8}
-                onChange={(e) => setPsDraft(e.target.value.toUpperCase())}
-                onBlur={() => setMpx({ rdsPs: psDraft.padEnd(8, " ").slice(0, 8) })}
-                className="text-readout font-mono tracking-[0.2em] uppercase"
-                aria-label="RDS programme service name (8 characters)"
-              />
-              <span className="text-[9px] text-muted-foreground">
-                8 characters · sent as group 0A on the 57 kHz subcarrier
-              </span>
-            </div>
+          <div className="mt-3 grid gap-3">
             <div className="flex flex-col justify-end gap-1.5">
               <span
                 className={cn(
@@ -456,5 +432,9 @@ export function FmPanel({
         </div>
       </div>
     </ModuleCard>
+
+      {/* ── RDS data subcarrier: PI/PTY/PS/RT/AF + metadata ingest ── */}
+      <RdsPanel fm={fm} onChange={onChange} />
+    </>
   );
 }

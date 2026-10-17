@@ -60,6 +60,10 @@ export interface MeterSnapshot {
   };
   clipIn: boolean;
   clipOut: boolean;
+  /** Pre-gate programme-bus level (dBFS) — the dead-air detector's source. */
+  srcLevelDb: number;
+  /** True while the standby source is feeding the chain (failover active). */
+  backupActive: boolean;
 }
 
 export const SILENT_SNAPSHOT: MeterSnapshot = {
@@ -89,6 +93,8 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   },
   clipIn: false,
   clipOut: false,
+  srcLevelDb: -120,
+  backupActive: false,
 };
 
 const METER_FLOOR = -120;
@@ -152,6 +158,14 @@ export class AudioEngine {
   private gateBuf!: Float32Array<ArrayBuffer>;
   private gateOpen = true;
   private gateCloseAt = 0;
+  // failover: primary crossfade gain + standby media element into the chain
+  private srcGain!: GainNode;
+  private backupGain!: GainNode;
+  private backupEl: HTMLAudioElement | null = null;
+  private backupSrc: MediaElementAudioSourceNode | null = null;
+  private backupUrl: string | null = null;
+  private backupLabel: string | null = null;
+  private backupActiveFlag = false;
   private eqFilters: BiquadFilterNode[] = [];
   private eqWetPre!: GainNode;
   private eqDry!: GainNode;
@@ -256,6 +270,11 @@ export class AudioEngine {
     this.stopFile();
     this.disarmMic();
     this.stopSignal();
+    // the standby source never outlives the on-air chain
+    if (this.backupEl) this.backupEl.pause();
+    this.backupActiveFlag = false;
+    if (this.srcGain) this.srcGain.gain.value = 1;
+    if (this.backupGain) this.backupGain.gain.value = 0;
     this.cancelMeterLoop();
     this.powered = false;
     this.lufsPoints = [];
@@ -268,6 +287,10 @@ export class AudioEngine {
 
   dispose() {
     this.powerOff();
+    this.backupSrc = null;
+    this.backupEl = null;
+    if (this.backupUrl) URL.revokeObjectURL(this.backupUrl);
+    this.backupUrl = null;
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;
@@ -298,7 +321,15 @@ export class AudioEngine {
     this.hpf.frequency.value = 80;
     this.hpf.Q.value = 0.707;
     this.sourceBus.connect(this.gateGain);
-    this.gateGain.connect(this.inputGain);
+    // Failover crossfade point. The primary path (post-gate) and the standby
+    // source meet at inputGain: the backup therefore bypasses the silence gate
+    // but still feeds the whole chain, and the pre-gate analyser above stays a
+    // truthful view of the programme feed while the backup is on air.
+    this.srcGain = g(1);
+    this.backupGain = g(0);
+    this.gateGain.connect(this.srcGain);
+    this.srcGain.connect(this.inputGain);
+    this.backupGain.connect(this.inputGain);
     // pre-gate detector so a closed gate still hears program return
     this.gateAnalyser = ctx.createAnalyser();
     this.gateAnalyser.fftSize = 2048;
@@ -1117,16 +1148,20 @@ export class AudioEngine {
 
     // input-stage silence gate — detected pre-gate on the raw source bus so
     // a closed gate still hears the program come back
+    // Raw programme level, measured ahead of the gate and always — this is the
+    // value the dead-air detector and the failover state machine act on.
+    this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
+    let srcPeak = 0;
+    for (let i = 0; i < this.gateBuf.length; i++) {
+      const v = Math.abs(this.gateBuf[i]);
+      if (v > srcPeak) srcPeak = v;
+    }
+    const srcLevelDb = toDb(srcPeak);
+
     const gate = this.params?.gate;
     let gateWantOpen = true;
     if (gate?.on) {
-      this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
-      let gv = 0;
-      for (let i = 0; i < this.gateBuf.length; i++) {
-        const v = Math.abs(this.gateBuf[i]);
-        if (v > gv) gv = v;
-      }
-      if (toDb(gv) >= gate.thresholdDb) {
+      if (srcLevelDb >= gate.thresholdDb) {
         this.gateCloseAt = 0;
       } else {
         if (this.gateCloseAt === 0) this.gateCloseAt = now + gate.holdMs;
@@ -1270,6 +1305,8 @@ export class AudioEngine {
       },
       clipIn: now < this.clipInUntil,
       clipOut: now < this.clipOutUntil,
+      srcLevelDb,
+      backupActive: this.backupActiveFlag,
     };
 
     if (++this.frame % 3 === 0) this.notify();
@@ -1344,6 +1381,102 @@ export class AudioEngine {
       return gated[lo] + (gated[hi] - gated[lo]) * (idx - lo);
     };
     return Math.max(0, pct(0.95) - pct(0.1));
+  }
+
+  /* ── failover (dead-air protection) ───────────────────────────────────── */
+
+  /** Programme level ahead of the gate: dBFS, −120 when the feed is silent. */
+  get sourceLevelDb(): number {
+    return this.snapshotValue.srcLevelDb;
+  }
+
+  get backupLoaded(): boolean {
+    return this.backupEl !== null;
+  }
+
+  get backupName(): string | null {
+    return this.backupLabel;
+  }
+
+  get backupActive(): boolean {
+    return this.backupActiveFlag;
+  }
+
+  /**
+   * Load the standby audio. The media element decodes anything the platform
+   * supports, loops forever and stays muted until a take-over. Must be called
+   * from a user gesture (the file picker) so the later automatic play() is
+   * not blocked by the autoplay policy.
+   */
+  loadBackupFile(file: File) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (this.backupSrc) this.backupSrc.disconnect();
+    if (this.backupUrl) URL.revokeObjectURL(this.backupUrl);
+    const url = URL.createObjectURL(file);
+    const el = new Audio();
+    el.loop = true;
+    el.preload = "auto";
+    el.src = url;
+    this.backupEl = el;
+    this.backupUrl = url;
+    this.backupLabel = file.name;
+    this.backupSrc = ctx.createMediaElementSource(el);
+    this.backupSrc.connect(this.backupGain);
+    void el
+      .play()
+      .then(() => {
+        // primed for the take-over; stay silent until it actually happens
+        if (!this.backupActiveFlag) el.pause();
+      })
+      .catch(() => {
+        /* take-over retries play() when it fires */
+      });
+    this.notify();
+  }
+
+  /** Unload the standby source and return the chain to the programme feed. */
+  clearBackup() {
+    this.setBackupActive(false, 60);
+    if (this.backupEl) {
+      this.backupEl.pause();
+      this.backupEl.removeAttribute("src");
+    }
+    this.backupSrc?.disconnect();
+    this.backupSrc = null;
+    this.backupEl = null;
+    this.backupLabel = null;
+    if (this.backupUrl) URL.revokeObjectURL(this.backupUrl);
+    this.backupUrl = null;
+    this.notify();
+  }
+
+  /** Cross-fade the chain between the programme feed and the standby source. */
+  setBackupActive(active: boolean, fadeMs = 200) {
+    if (!this.ctx) return;
+    const tc = Math.max(0.005, fadeMs / 3000);
+    if (active) {
+      if (this.backupEl) {
+        try {
+          this.backupEl.currentTime = 0;
+        } catch {
+          /* seeking before metadata is fine to skip */
+        }
+        void this.backupEl.play().catch(() => {});
+      }
+      this.ramp(this.srcGain.gain, 0, tc);
+      this.ramp(this.backupGain.gain, 1, tc);
+    } else {
+      this.ramp(this.srcGain.gain, 1, tc);
+      this.ramp(this.backupGain.gain, 0, tc);
+      if (this.backupEl) {
+        window.setTimeout(() => {
+          if (!this.backupActiveFlag) this.backupEl?.pause();
+        }, fadeMs + 400);
+      }
+    }
+    this.backupActiveFlag = active;
+    this.notify();
   }
 
   snapshot(): MeterSnapshot {

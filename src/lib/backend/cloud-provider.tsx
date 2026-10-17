@@ -32,6 +32,22 @@ export function CloudBackendProvider({
   const saveMountMut = useMutation(api.stations.saveMount);
   const setNowPlayingMut = useMutation(api.stations.setNowPlaying);
 
+  const alarmsQuery = useQuery(api.ops.listAlarms, { limit: 200 });
+  const pushAlarmMut = useMutation(api.ops.pushAlarm);
+  const ackAlarmMut = useMutation(api.ops.ackAlarm);
+  const ackAllAlarmsMut = useMutation(api.ops.ackAllAlarms);
+  const clearAlarmsMut = useMutation(api.ops.clearAlarms);
+
+  const schedulesQuery = useQuery(api.ops.listSchedules);
+  const saveScheduleMut = useMutation(api.ops.saveSchedule);
+  const removeScheduleMut = useMutation(api.ops.removeSchedule);
+  const setScheduleEnabledMut = useMutation(api.ops.setScheduleEnabled);
+
+  const stationsQuery = useQuery(api.ops.listStations);
+  const registerStationMut = useMutation(api.ops.registerStation);
+  const removeStationMut = useMutation(api.ops.removeStation);
+  const reportStationMut = useMutation(api.ops.reportStation);
+
   const { isLoading: authLoading, isAuthenticated } = useConvexAuth();
   const user = useQuery(api.users.currentUser);
   const { signIn, signOut } = useAuthActions();
@@ -87,6 +103,40 @@ export function CloudBackendProvider({
         await setNowPlayingMut({ title, artist });
       },
 
+      alarms: alarmsQuery,
+      pushAlarm: (args) => pushAlarmMut(args),
+      ackAlarm: async (id) => {
+        await ackAlarmMut({ id: id as Id<"alarms"> });
+      },
+      ackAllAlarms: () => ackAllAlarmsMut({}),
+      clearAlarms: () => clearAlarmsMut({}),
+
+      schedules: schedulesQuery,
+      saveSchedule: (args) =>
+        saveScheduleMut({
+          id: args.id ? (args.id as Id<"schedules">) : undefined,
+          name: args.name,
+          days: args.days,
+          startMin: args.startMin,
+          endMin: args.endMin,
+          presetName: args.presetName,
+          params: args.params,
+          enabled: args.enabled,
+        }),
+      removeSchedule: async (id) => {
+        await removeScheduleMut({ id: id as Id<"schedules"> });
+      },
+      setScheduleEnabled: async (id, enabled) => {
+        await setScheduleEnabledMut({ id: id as Id<"schedules">, enabled });
+      },
+
+      stations: stationsQuery,
+      registerStation: (args) => registerStationMut(args),
+      removeStation: async (id) => {
+        await removeStationMut({ id: id as Id<"stations"> });
+      },
+      reportStation: (args) => reportStationMut(args),
+
       session: {
         isLoading: authLoading || user === undefined,
         isAuthenticated,
@@ -109,6 +159,19 @@ export function CloudBackendProvider({
       mountDoc,
       saveMountMut,
       setNowPlayingMut,
+      alarmsQuery,
+      pushAlarmMut,
+      ackAlarmMut,
+      ackAllAlarmsMut,
+      clearAlarmsMut,
+      schedulesQuery,
+      saveScheduleMut,
+      removeScheduleMut,
+      setScheduleEnabledMut,
+      stationsQuery,
+      registerStationMut,
+      removeStationMut,
+      reportStationMut,
       authLoading,
       isAuthenticated,
       user,

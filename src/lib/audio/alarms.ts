@@ -16,7 +16,31 @@ export type AlarmKind =
   | "clip"
   | "loudness"
   | "correlation"
-  | "mod";
+  | "mod"
+  /** programme feed lost (dead air) */
+  | "silence"
+  /** standby source took over / programme returned */
+  | "failover"
+  /** 19 kHz pilot missing or badly off frequency */
+  | "pilot"
+  /** RDS data stale, PI unset or the subcarrier is unmodulated */
+  | "rds"
+  /** MPX-over-IP link degraded (loss, jitter, single link) */
+  | "link";
+
+/** Severity used when an alarm is written to the durable history. */
+export const ALARM_SEVERITY: Record<AlarmKind, "critical" | "warning" | "info"> = {
+  peak: "warning",
+  clip: "critical",
+  loudness: "warning",
+  correlation: "warning",
+  mod: "critical",
+  silence: "critical",
+  failover: "warning",
+  pilot: "warning",
+  rds: "warning",
+  link: "warning",
+};
 
 export interface AlarmEvent {
   id: number;
@@ -32,6 +56,11 @@ const COOLDOWN_MS: Record<AlarmKind, number> = {
   loudness: 60_000,
   correlation: 60_000,
   mod: 30_000,
+  silence: 60_000,
+  failover: 10_000,
+  pilot: 60_000,
+  rds: 120_000,
+  link: 30_000,
 };
 
 const MAX_EVENTS = 50;
@@ -44,6 +73,11 @@ const lastFired: Record<AlarmKind, number> = {
   loudness: 0,
   correlation: 0,
   mod: 0,
+  silence: 0,
+  failover: 0,
+  pilot: 0,
+  rds: 0,
+  link: 0,
 };
 
 const listeners = new Set<() => void>();

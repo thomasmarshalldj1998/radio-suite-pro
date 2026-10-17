@@ -23,6 +23,7 @@
  * sweeps the filters, checks the RDS CRC framing and measures the composite
  * spectrum against the spec allocation.
  */
+import { MPX_WINDOW_SECONDS, mpxPowerDbr } from "./compliance";
 import type { FmParams } from "./params";
 
 /* ── constants ─────────────────────────────────────────────────────────── */
@@ -223,6 +224,111 @@ const RDS_POLY = 0b10110111001; // 0x5B9
 /** Block offset words identifying A/B/C/C′/D within a group. */
 const RDS_OFFSET = { A: 0x0fc, B: 0x198, C: 0x168, D: 0x1b4 } as const;
 
+/** Application identification carried in group 3A for RadioText Plus. */
+export const RDS_RTPLUS_AID = 0x4bd7;
+/**
+ * Application group type code announced for RT+: group 11, version A. The
+ * four type bits and the version bit are sent as one five-bit field.
+ */
+export const RDS_RTPLUS_AGTC = (11 << 1) | 0;
+/** RT+ content types (IEC 62106-6 annex A). */
+export const RDS_RTPLUS_TAG = {
+  title: 1,
+  album: 2,
+  track: 3,
+  artist: 4,
+  comment: 10,
+  genre: 11,
+} as const;
+
+/** Content-type names for the tags this encoder emits. */
+export const RDS_RTPLUS_TAG_NAMES: Record<number, string> = {
+  0: "undefined",
+  1: "Item.Title",
+  2: "Item.Album",
+  3: "Item.Tracknumber",
+  4: "Item.Artist",
+  5: "Item.Composition",
+  6: "Item.Movement",
+  7: "Item.Conductor",
+  8: "Item.Composer",
+  9: "Item.Band",
+  10: "Item.Comment",
+  11: "Item.Genre",
+  12: "Info.News",
+  31: "StationName.Short",
+  32: "StationName.Long",
+  33: "Program.Now",
+  34: "Program.Next",
+};
+
+/** One RT+ tag: a content type plus a character range of the RadioText. */
+export interface RdsTag {
+  type: number;
+  /** Zero-based character offset into the RadioText. */
+  start: number;
+  /** Characters *after* the first, which is how the marker is defined. */
+  len: number;
+}
+
+/**
+ * Read the two RT+ tags out of a RadioText string: with "artist - title" in
+ * the text the artist is tagged first, otherwise the whole line is the title.
+ * Tag 1's length marker is six bits (up to 64 characters), tag 2's is five
+ * (up to 32), so both are clamped to what the field can carry.
+ */
+export function rdsRtPlusTags(rt: string): RdsTag[] {
+  if (!rt) return [];
+  const tags: RdsTag[] = [];
+  const sep = rt.indexOf(" - ");
+  if (sep > 0 && rt.length > sep + 3) {
+    tags.push({
+      type: RDS_RTPLUS_TAG.artist,
+      start: 0,
+      len: Math.min(rt.slice(0, sep).length - 1, 63),
+    });
+    tags.push({
+      type: RDS_RTPLUS_TAG.title,
+      start: sep + 3,
+      len: Math.min(rt.slice(sep + 3).length - 1, 31),
+    });
+  } else {
+    tags.push({
+      type: RDS_RTPLUS_TAG.title,
+      start: 0,
+      len: Math.min(rt.length - 1, 63),
+    });
+  }
+  return tags;
+}
+
+/** A slot in the repeating group cycle. */
+export type RdsSlot = "0A" | "2A" | "3A" | "11A";
+
+/**
+ * The repeating group cycle: four PS groups, a text group, another four PS
+ * groups, a second text group, then the RadioText Plus pair — the 3A
+ * announcement followed by the 11A tag group.
+ *
+ * With RT+ off (or no RadioText) the ODA pair is skipped, which leaves the
+ * classic one-text-group-per-four-PS pattern. Slots that carry nothing (2A
+ * with no text) fall back to PS.
+ */
+export const RDS_SCHEDULE: readonly RdsSlot[] = [
+  "0A",
+  "0A",
+  "0A",
+  "0A",
+  "2A",
+  "0A",
+  "0A",
+  "0A",
+  "0A",
+  "2A",
+  "3A",
+  "11A",
+];
+
 function crc10(data16: number): number {
   let reg = data16 << 10; // 26-bit working register
   for (let i = 25; i >= 10; i--) {
@@ -237,47 +343,308 @@ export function rdsBlock(data16: number, offset: number): number {
 }
 
 /**
- * Bit source producing spec-correct 0A groups: PI in block A, group type 0A
- * + segment address in block B, no-AF filler in block C, PS character pair
- * in block D — cycling the four PS segments so a receiver assembles the
- * 8-character name. MSB first, per standard.
+ * Fold free text into what an RDS receiver can actually display.
+ *
+ * The character set is a single byte rendered with the receiver's own font, so
+ * accented characters are transliterated rather than sent as UTF-8 (which a
+ * receiver shows as mojibake), control characters become spaces and the result
+ * is trimmed. Metadata coming from the station database goes through here
+ * before it reaches RadioText.
+ */
+export function rdsAscii(text: string, max = 64): string {
+  return (text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7e]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * Alternative-frequency code for a frequency in MHz (87.6–107.9 → 1–204),
+ * or 0 when the frequency is outside the broadcast band. Receivers step the
+ * code exactly once to land on the neighbouring carrier.
+ */
+export function rdsAfCode(mhz: number): number {
+  if (!Number.isFinite(mhz)) return 0;
+  const code = Math.round(mhz * 10) - 875;
+  return code >= 1 && code <= 204 ? code : 0;
+}
+
+/**
+ * RDS group generator (IEC 62106).
+ *
+ * Emits the standard pair of group types:
+ *
+ *   · **0A** — block B carries type A + TP + PTY + TA/MS/DI + the two-bit PS
+ *     segment address; block C carries the alternative-frequency list (or the
+ *     no-AF filler); block D carries two PS characters.
+ *   · **2A** — block B carries type 2A + the AB flag + a four-bit text address;
+ *     blocks C and D carry four RadioText characters, the message terminated
+ *     by 0x0D once the text runs out.
+ *   · **3A / 11A** — RadioText Plus. The 3A group announces the application
+ *     (aid 0x4BD7) as data carried in group 11A; the 11A group then tags two
+ *     character ranges of the current RadioText with their content types, so a
+ *     receiver can show the artist and title as separate fields. The tag
+ *     toggle bit flips whenever the text becomes a new item.
+ *
+ * One 2A group follows every four 0A groups, so the 8-character name still
+ * cycles in four groups while a 64-character RadioText refreshes in about two
+ * seconds. MSB first, per the standard.
+ *
+ * Text edits can be delayed (`delayMs`) so the display lines up with audio
+ * that is itself delayed — the first value of each field is shown immediately
+ * so the encoder never comes up blank — and a PS longer than eight characters
+ * scrolls through the receiver's window instead of being cut off.
  */
 export class RdsBitSource {
   private bits: number[] = [];
   private idx = 0;
-  private seg = 0;
-  readonly pi: number;
-  readonly pty: number;
-  readonly tp: number;
+  private psSeg = 0;
+  private rtSeg = 0;
+  /** 0A groups since the last 2A group. */
+  private slot = 0;
+  private scrollStep = 0;
+  /** RadioText Plus: 3A announcement + 11A tags. */
+  private rtPlus = false;
+  private odaToggle = 0;
+  private odaItem = "";
+  private pending: { at: number; ps?: string; rt?: string } | null = null;
+  /** An edit has been applied, so later edits must wait out the delay. */
+  private applied = false;
   private ps: string;
+  private rt = "";
+  private af: number[] = [];
+  private scroll = false;
+  private delayMs = 0;
+  pi = 0x1234;
+  pty = 10;
+  tp = 0;
+  /** Groups emitted since construction — a stall shows up as no advance. */
+  groups = 0;
 
   constructor(pi: number, ps: string, pty = 10, tp = 0) {
     this.pi = pi & 0xffff;
     this.pty = pty & 0x1f;
     this.tp = tp & 1;
-    this.ps = (ps + "        ").slice(0, 8);
+    this.ps = RdsBitSource.sanitise(ps);
   }
 
-  setPs(ps: string) {
-    this.ps = (ps + "        ").slice(0, 8);
-    this.idx = this.bits.length; // rebuild the next group with the new name
+  /** Text as the receiver will render it (single-byte, printable). */
+  private static sanitise(text: string): string {
+    return rdsAscii(text);
+  }
+
+  /** Exactly the eight characters a non-scrolling receiver displays. */
+  private static pad8(text: string): string {
+    return (text + "        ").slice(0, 8);
+  }
+
+  /** Programme identification from a 1–4 digit hex string ("C479"). */
+  static parsePi(input: string, fallback = 0x1234): number {
+    const clean = (input ?? "").trim().replace(/^0x/i, "");
+    if (!/^[0-9a-fA-F]{1,4}$/.test(clean)) return fallback & 0xffff;
+    return parseInt(clean, 16) & 0xffff;
+  }
+
+  /** Change signature the generator uses to diff RDS settings per update. */
+  static signature(mpx: FmParams["mpx"]): string {
+    // defensive: the worker is fed coerced params, but presets, the CLI
+    // verification script and stale saved state can still arrive partial
+    return [
+      mpx.rdsPi ?? "",
+      mpx.rdsPty ?? 0,
+      mpx.rdsPs ?? "",
+      mpx.rdsRt ?? "",
+      mpx.rdsScroll ? 1 : 0,
+      mpx.rdsDelayMs ?? 0,
+      mpx.rdsRtPlus ? 1 : 0,
+      (mpx.rdsAf ?? []).join(","),
+    ].join("|");
+  }
+
+  /** Apply encoder settings; text changes honour the configured delay. */
+  setConfig(cfg: {
+    pi?: number;
+    pty?: number;
+    tp?: number;
+    ps?: string;
+    rt?: string;
+    af?: number[];
+    scroll?: boolean;
+    delayMs?: number;
+    rtPlus?: boolean;
+  }): void {
+    if (cfg.pi !== undefined) this.pi = cfg.pi & 0xffff;
+    if (cfg.pty !== undefined) this.pty = cfg.pty & 0x1f;
+    if (cfg.tp !== undefined) this.tp = cfg.tp & 1;
+    if (cfg.scroll !== undefined) this.scroll = cfg.scroll;
+    if (cfg.rtPlus !== undefined) this.rtPlus = cfg.rtPlus;
+    if (cfg.af !== undefined) this.af = cfg.af.slice(0, 8);
+    if (cfg.delayMs !== undefined) this.delayMs = Math.max(0, cfg.delayMs);
+
+    const ps = cfg.ps === undefined ? undefined : RdsBitSource.sanitise(cfg.ps);
+    const rt =
+      cfg.rt === undefined ? undefined : RdsBitSource.sanitise(cfg.rt);
+    if (ps === undefined && rt === undefined) return;
+
+    if (this.delayMs === 0 || !this.applied) {
+      if (ps !== undefined) {
+        this.ps = ps;
+        this.scrollStep = 0;
+      }
+      if (rt !== undefined) this.rt = rt;
+      this.pending = null;
+      this.applied = true;
+      return;
+    }
+    this.pending = { at: Date.now() + this.delayMs, ps, rt };
+  }
+
+  /** Compatibility shim for PS-only call sites. */
+  setPs(ps: string): void {
+    this.setConfig({ ps });
+  }
+
+  /** Apply a delayed text edit once its deadline has passed. */
+  private applyPending(now: number): void {
+    const p = this.pending;
+    if (!p || now < p.at) return;
+    if (p.ps !== undefined) {
+      this.ps = p.ps;
+      this.scrollStep = 0;
+    }
+    if (p.rt !== undefined) this.rt = p.rt;
+    this.pending = null;
+    this.applied = true;
+  }
+
+  /** The eight-character window the receiver should be showing right now. */
+  private psWindow(): string {
+    if (this.ps.length <= 8) return RdsBitSource.pad8(this.ps);
+    if (!this.scroll) return this.ps.slice(0, 8);
+    // one pass of the name, then a gap, wrapped so the window is continuous
+    const cycle = `${this.ps}    `;
+    const step = this.scrollStep % cycle.length;
+    return (cycle + cycle).slice(step, step + 8);
+  }
+
+  /**
+   * Group 0A block C. The count field states how many alternatives *this*
+   * group carries, so a single entry is always an honest announcement even
+   * when the station lists several frequencies.
+   */
+  private afBlockC(): number {
+    const first = this.af.map(rdsAfCode).find((code) => code > 0);
+    return first ? (1 << 8) | first : 0xdce8;
+  }
+
+  /**
+   * Next usable slot in the repeating cycle. A slot that has nothing to carry
+   * is stepped over: no RadioText means no text groups and no ODA, and RT+ off
+   * means no 3A/11A — which leaves the plain PS-and-text cycle.
+   */
+  private nextSlot(): RdsSlot {
+    const len = RDS_SCHEDULE.length;
+    for (let i = 0; i < len; i++) {
+      const at = (this.slot + i) % len;
+      const slot = RDS_SCHEDULE[at];
+      const usable =
+        slot === "0A" ||
+        (slot === "2A" && this.rt.length > 0) ||
+        ((slot === "3A" || slot === "11A") &&
+          this.rtPlus &&
+          this.rt.length > 0);
+      if (usable) {
+        this.slot = (at + 1) % len;
+        return slot;
+      }
+    }
+    return "0A";
+  }
+
+  /** Group 11A — RadioText Plus: two tags, addressed into the current text. */
+  private rtPlusBlocks(): { blockB: number; blockC: number; blockD: number } {
+    if (this.rt !== this.odaItem) {
+      // a new item: flip the toggle so receivers re-read the tags and return
+      // the old tag positions rather than carrying them into the new text
+      this.odaItem = this.rt;
+      this.odaToggle ^= 1;
+    }
+    const [first, second] = rdsRtPlusTags(this.rt);
+    const a = first ?? { type: 0, start: 0, len: 0 };
+    const b = second ?? { type: 0, start: 0, len: 0 };
+    return {
+      // B: type 11 (1011) + version A, TP, PTY, item toggle, item running,
+      // then the top three bits of tag 1's content type
+      blockB:
+        (11 << 12) |
+        (this.tp << 10) |
+        (this.pty << 5) |
+        ((this.odaToggle & 1) << 4) |
+        (a.type !== 0 ? 1 << 3 : 0) |
+        ((a.type >> 3) & 0b111),
+      blockC:
+        ((a.type & 0b111) << 13) |
+        ((a.start & 0x3f) << 7) |
+        ((a.len & 0x3f) << 1) |
+        ((b.type >> 5) & 1),
+      blockD:
+        ((b.type & 0b11111) << 11) |
+        ((b.start & 0x3f) << 5) |
+        (b.len & 0x1f),
+    };
   }
 
   private buildGroup(): void {
-    const seg = this.seg;
-    // B: group type 0A, B0=0, TP, PTY, TA=0, MS=1 (music), DI (stereo bit
-    // rotates with the segment per the DI spread), C1C0 = segment address
-    const di = (0b1000 >> seg) & 1;
-    const blockB =
-      (0 << 12) | (0 << 11) | (this.tp << 10) | (this.pty << 5) | (0 << 4) |
-      (1 << 3) | (di << 2) | seg;
-    const cA = this.char(2 * seg);
-    const cB = this.char(2 * seg + 1);
-    const blockD = (cA << 8) | cB;
+    this.applyPending(Date.now());
+    const slot = this.nextSlot();
+
+    let blockB: number;
+    let blockC: number;
+    let blockD: number;
+
+    if (slot === "2A") {
+      const seg = this.rtSeg; // four-bit text address on 2A
+      blockB =
+        (2 << 12) | (0 << 11) | (this.tp << 10) | (this.pty << 5) | (0 << 4) | seg;
+      const text = (this.rt + "\r".repeat(64)).slice(0, 64);
+      blockC =
+        ((text.charCodeAt(seg * 4) & 0xff) << 8) |
+        (text.charCodeAt(seg * 4 + 1) & 0xff);
+      blockD =
+        ((text.charCodeAt(seg * 4 + 2) & 0xff) << 8) |
+        (text.charCodeAt(seg * 4 + 3) & 0xff);
+      this.rtSeg = (seg + 1) & 15;
+    } else if (slot === "3A") {
+      // ODA announcement: the AGTC names group 11A as the data carrier and
+      // block C carries the RT+ application identification
+      blockB = (3 << 12) | (this.tp << 10) | (this.pty << 5) | RDS_RTPLUS_AGTC;
+      blockC = RDS_RTPLUS_AID;
+      blockD = 0;
+    } else if (slot === "11A") {
+      ({ blockB, blockC, blockD } = this.rtPlusBlocks());
+    } else {
+      const seg = this.psSeg;
+      // B: group type 0A, B0=0, TP, PTY, TA=0, MS=1 (music), DI (the stereo
+      // bit rotates with the segment per the DI spread), C1C0 = address
+      const di = (0b1000 >> seg) & 1;
+      blockB =
+        (0 << 12) | (0 << 11) | (this.tp << 10) | (this.pty << 5) | (0 << 4) |
+        (1 << 3) | (di << 2) | seg;
+      const window = this.psWindow();
+      blockC = this.afBlockC();
+      blockD =
+        (this.char(window, 2 * seg) << 8) | this.char(window, 2 * seg + 1);
+      this.psSeg = (seg + 1) & 3;
+      if (this.psSeg === 0) this.scrollStep += 1;
+    }
+
     const blocks: [number, number][] = [
       [this.pi, RDS_OFFSET.A],
       [blockB, RDS_OFFSET.B],
-      [0xdce8, RDS_OFFSET.C], // no-AF filler
+      [blockC, RDS_OFFSET.C],
       [blockD, RDS_OFFSET.D],
     ];
     this.bits = [];
@@ -286,11 +653,11 @@ export class RdsBitSource {
       for (let b = 25; b >= 0; b--) this.bits.push((word >> b) & 1);
     }
     this.idx = 0;
-    this.seg = (seg + 1) & 3;
+    this.groups += 1;
   }
 
-  private char(i: number): number {
-    const c = this.ps.charCodeAt(i);
+  private char(text: string, i: number): number {
+    const c = text.charCodeAt(i);
     return Number.isNaN(c) || c === 0 ? 0x20 : c & 0xff;
   }
 
@@ -324,6 +691,19 @@ export interface MpxTickStats {
   alarmPct: number;
   ceilingPct: number;
   components: MpxComponents;
+  /**
+   * BS.412 multiplex power over the last 60 s, dBr — 0 dBr is the power of a
+   * sine at ±19 kHz peak deviation, which the clause makes the limit.
+   */
+  powerDbr: number;
+  /** Seconds of composite actually inside that averaging window. */
+  powerWindowSeconds: number;
+  /** RDS groups emitted during this tick (a stall means no data is moving). */
+  rdsGroups: number;
+  /** 19 kHz pilot is being injected — receivers cannot lock without it. */
+  pilotOn: boolean;
+  /** The RDS subcarrier is injected at a non-zero level. */
+  rdsOn: boolean;
 }
 
 const OVER_SUSTAIN_MS = 5000;
@@ -354,6 +734,8 @@ export class MpxGenerator {
   private rdsShaper: Biquad;
   private rdsShaper2: Biquad;
   private rdsPs: string;
+  private rdsSig = "";
+  private rdsGroupsAtStats = 0;
 
   // oscillator phases (all subcarriers derive from the pilot accumulator)
   private phi = 0; // 19 kHz pilot phase
@@ -371,6 +753,15 @@ export class MpxGenerator {
   private peakHold = 0;
   private overSince = 0;
 
+  // BS.412 multiplex power: 100 ms blocks of composite energy, 60 s of them
+  private mpxBlocks: { sum: number; n: number }[] = [];
+  private mpxBlockSum = 0;
+  private mpxBlockN = 0;
+  private mpxWindowSum = 0;
+  private mpxWindowN = 0;
+  private readonly mpxBlockSamples: number;
+  private readonly mpxMaxBlocks: number;
+
   private readonly block: number;
 
   constructor(inRate: number, fm: FmParams, blockSize = 4096) {
@@ -378,6 +769,9 @@ export class MpxGenerator {
     this.outRate = inRate * 4;
     this.fm = fm;
     this.block = blockSize;
+    // 100 ms energy blocks, enough of them to cover the BS.412 60 s interval
+    this.mpxBlockSamples = Math.max(16, Math.round(this.outRate / 10));
+    this.mpxMaxBlocks = Math.round(MPX_WINDOW_SECONDS * 10);
     const tau = fm.emphasis === "off" ? null : EMPHASIS_TAU[fm.emphasis];
     const empTaps = this.designEmphasis(tau);
 
@@ -398,7 +792,20 @@ export class MpxGenerator {
     this.compBuf = new Float32Array(blockSize * 4);
 
     this.rdsPs = fm.mpx.rdsPs;
-    this.rdsBits = new RdsBitSource(0x1234, fm.mpx.rdsPs);
+    this.rdsBits = new RdsBitSource(
+      RdsBitSource.parsePi(fm.mpx.rdsPi),
+      fm.mpx.rdsPs,
+      fm.mpx.rdsPty,
+    );
+    this.rdsBits.setConfig({
+      rt: fm.mpx.rdsRt,
+      af: fm.mpx.rdsAf,
+      scroll: fm.mpx.rdsScroll,
+      delayMs: fm.mpx.rdsDelayMs,
+      rtPlus: fm.mpx.rdsRtPlus,
+    });
+    this.rdsSig = RdsBitSource.signature(fm.mpx);
+    this.rdsGroupsAtStats = 0;
     // 4th-order 2.4 kHz lowpass on the biphase stream — the IEC 62106
     // spectrum mask confines RDS to roughly ±2.4 kHz around 57 kHz
     this.rdsShaper = Biquad.lowpass(2400, this.outRate);
@@ -423,7 +830,7 @@ export class MpxGenerator {
     const tauChanged =
       (fm.emphasis === "off" ? null : EMPHASIS_TAU[fm.emphasis]) !==
       (this.fm.emphasis === "off" ? null : EMPHASIS_TAU[this.fm.emphasis]);
-    const psChanged = fm.mpx.rdsPs !== this.rdsPs;
+    const rdsSig = RdsBitSource.signature(fm.mpx);
     this.fm = fm;
     if (tauChanged) {
       const tau = fm.emphasis === "off" ? null : EMPHASIS_TAU[fm.emphasis];
@@ -431,9 +838,19 @@ export class MpxGenerator {
       this.empL = new FirFilter(empTaps, this.block);
       this.empR = new FirFilter(empTaps, this.block);
     }
-    if (psChanged) {
+    if (rdsSig !== this.rdsSig) {
+      this.rdsSig = rdsSig;
       this.rdsPs = fm.mpx.rdsPs;
-      this.rdsBits.setPs(fm.mpx.rdsPs);
+      this.rdsBits.setConfig({
+        pi: RdsBitSource.parsePi(fm.mpx.rdsPi, this.rdsBits.pi),
+        pty: fm.mpx.rdsPty,
+        ps: fm.mpx.rdsPs,
+        rt: fm.mpx.rdsRt,
+        af: fm.mpx.rdsAf,
+        scroll: fm.mpx.rdsScroll,
+        delayMs: fm.mpx.rdsDelayMs,
+        rtPlus: fm.mpx.rdsRtPlus,
+      });
     }
   }
 
@@ -488,6 +905,8 @@ export class MpxGenerator {
     let over = this.overSamples;
     // biphase symbols run at 2× the bit rate — one transition mid-bit
     const halfAdv = (2 * RDS_BIT_RATE) / this.outRate;
+    // running energy sum for the BS.412 multiplex-power window
+    let sq = 0;
 
     for (let i = 0; i < clen; i++) {
       phi += this.wPilot;
@@ -526,10 +945,15 @@ export class MpxGenerator {
       const apre = pre < 0 ? -pre : pre;
       if (apre > maxPre) maxPre = apre;
       if (apre > alarm) over++;
-      comp[i] = apre > ceil ? (pre > 0 ? ceil : -ceil) : pre;
+      const out = apre > ceil ? (pre > 0 ? ceil : -ceil) : pre;
+      comp[i] = out;
       if (apre > ceil) clip++;
+      // BS.412 measures the transmitted multiplex, so accumulate the composite
+      // as it leaves the clipper
+      sq += out * out;
     }
     this.totalSamples += clen;
+    this.accumulateMpxPower(sq, clen);
 
     this.phi = phi;
     this.psi = psi;
@@ -541,6 +965,39 @@ export class MpxGenerator {
     this.clipSamples = clip;
     this.overSamples = over;
     return comp.subarray(0, clen);
+  }
+
+  /**
+   * Fold another batch of composite energy into the rolling 60 s window.
+   * Completed 100 ms blocks live in `mpxBlocks` (oldest dropped first, so the
+   * reading is the mean square over the *last* 60 s); the batch still in flight
+   * stays in `mpxBlockSum`/`mpxBlockN` and is added once, at read time, by
+   * `mpxEnergy()` — folding it in here as well would count it twice.
+   */
+  private accumulateMpxPower(sumSquares: number, n: number): void {
+    this.mpxBlockSum += sumSquares;
+    this.mpxBlockN += n;
+    if (this.mpxBlockN < this.mpxBlockSamples) return;
+    this.mpxBlocks.push({ sum: this.mpxBlockSum, n: this.mpxBlockN });
+    this.mpxWindowSum += this.mpxBlockSum;
+    this.mpxWindowN += this.mpxBlockN;
+    this.mpxBlockSum = 0;
+    this.mpxBlockN = 0;
+    while (this.mpxBlocks.length > this.mpxMaxBlocks) {
+      const dropped = this.mpxBlocks.shift();
+      if (dropped) {
+        this.mpxWindowSum -= dropped.sum;
+        this.mpxWindowN -= dropped.n;
+      }
+    }
+  }
+
+  /** Window energy and sample count, including the partial block in flight. */
+  private mpxEnergy(): { sum: number; n: number } {
+    return {
+      sum: this.mpxWindowSum + this.mpxBlockSum,
+      n: this.mpxWindowN + this.mpxBlockN,
+    };
   }
 
   /** Take the metering tick and reset the window accumulators. */
@@ -557,11 +1014,20 @@ export class MpxGenerator {
     const stats: MpxTickStats = {
       modPct,
       peakHoldPct: this.peakHold,
+      powerDbr: mpxPowerDbr(
+        this.mpxEnergy().n > 0
+          ? this.mpxEnergy().sum / this.mpxEnergy().n
+          : 0,
+      ),
+      powerWindowSeconds: this.mpxEnergy().n / this.outRate,
       clipPct: (this.clipSamples / Math.max(1, this.totalSamples)) * 100,
       sustainedOver:
         this.overSince > 0 && now - this.overSince >= OVER_SUSTAIN_MS,
       alarmPct: this.fm.mpx.alarmPct,
       ceilingPct: this.fm.mpx.ceilingPct,
+      rdsGroups: this.rdsBits.groups - this.rdsGroupsAtStats,
+      pilotOn: this.fm.mpx.on && this.fm.mpx.pilotPct > 0,
+      rdsOn: this.fm.mpx.on && this.fm.mpx.rdsPct > 0,
       components: {
         mainPct: 90 * this.maxM,
         subPct: 90 * this.maxS,
@@ -570,6 +1036,7 @@ export class MpxGenerator {
         scaPct: this.fm.mpx.on ? this.fm.mpx.scaPct : 0,
       },
     };
+    this.rdsGroupsAtStats = this.rdsBits.groups;
     this.maxPre = 0;
     this.maxM = 0;
     this.maxS = 0;

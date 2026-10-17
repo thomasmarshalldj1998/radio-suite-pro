@@ -5,14 +5,24 @@
 import { useMemo, type ReactNode } from "react";
 import { useSyncExternalStore } from "react";
 import {
+  ackAllLocalAlarms,
+  ackLocalAlarm,
+  clearLocalAlarms,
   getLocalState,
   LOCAL_CONNECTION,
   LOCAL_SESSION,
+  pushLocalAlarm,
   pushLocalLog,
+  registerLocalStation,
   removeLocalPreset,
+  removeLocalSchedule,
+  removeLocalStation,
+  reportLocalStation,
   saveLocalMount,
   saveLocalPreset,
+  saveLocalSchedule,
   setLocalNowPlaying,
+  setLocalScheduleEnabled,
   subscribeLocal,
 } from "./local";
 import type { Backend } from "./context";
@@ -34,6 +44,23 @@ export function LocalBackendProvider({ children }: { children: ReactNode }) {
       mount: state.mount,
       saveMount: async (args: MountRecord) => saveLocalMount(args),
       setNowPlaying: async (title, artist) => setLocalNowPlaying(title, artist),
+
+      alarms: state.alarms,
+      pushAlarm: async (args) => pushLocalAlarm(args),
+      ackAlarm: async (id) => ackLocalAlarm(id),
+      ackAllAlarms: async () => ackAllLocalAlarms(),
+      clearAlarms: async () => clearLocalAlarms(),
+
+      schedules: state.schedules,
+      saveSchedule: async (args) => saveLocalSchedule(args),
+      removeSchedule: async (id) => removeLocalSchedule(id),
+      setScheduleEnabled: async (id, enabled) =>
+        setLocalScheduleEnabled(id, enabled),
+
+      stations: state.stations,
+      registerStation: async (args) => registerLocalStation(args),
+      removeStation: async (id) => removeLocalStation(id),
+      reportStation: async (args) => reportLocalStation(args),
 
       session: LOCAL_SESSION,
       connection: LOCAL_CONNECTION,

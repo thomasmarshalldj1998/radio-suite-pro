@@ -11,12 +11,18 @@
  */
 import { createContext } from "react";
 import type {
+  AlarmPush,
+  AlarmRecord,
   ConnectionState,
   LogPush,
   LogRecord,
   MountRecord,
   PresetRecord,
+  ScheduleInput,
+  ScheduleRecord,
   Session,
+  StationRecord,
+  StationReport,
 } from "./types";
 
 /** The desktop package is standalone by design — no cloud binding. */
@@ -38,6 +44,29 @@ export interface Backend {
   /** Broadcast log, newest first; `undefined` while loading in cloud mode. */
   log: LogRecord[] | undefined;
   pushLog: (args: LogPush) => Promise<unknown>;
+
+  /** Durable alarm history, newest first; `undefined` while cloud-loading. */
+  alarms: AlarmRecord[] | undefined;
+  pushAlarm: (args: AlarmPush) => Promise<unknown>;
+  ackAlarm: (id: string) => Promise<void>;
+  ackAllAlarms: () => Promise<unknown>;
+  clearAlarms: () => Promise<unknown>;
+
+  /** Dayparting schedule; `undefined` while loading in cloud mode. */
+  schedules: ScheduleRecord[] | undefined;
+  saveSchedule: (args: ScheduleInput) => Promise<unknown>;
+  removeSchedule: (id: string) => Promise<void>;
+  setScheduleEnabled: (id: string, enabled: boolean) => Promise<void>;
+
+  /** Stations reporting into the remote console; `undefined` while loading. */
+  stations: StationRecord[] | undefined;
+  registerStation: (args: {
+    name: string;
+    token: string;
+    note?: string;
+  }) => Promise<unknown>;
+  removeStation: (id: string) => Promise<void>;
+  reportStation: (args: StationReport) => Promise<unknown>;
 
   /** Saved mount configuration; `undefined` while loading in cloud mode. */
   mount: MountRecord | null | undefined;

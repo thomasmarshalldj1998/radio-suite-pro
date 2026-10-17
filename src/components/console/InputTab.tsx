@@ -1,3 +1,4 @@
+import { FailoverCard } from "@/components/console/FailoverCard";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { SourceModule } from "@/components/console/SourceModule";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
@@ -152,6 +153,9 @@ export function InputTab({
           <StereoLevelMeter kind="in" height={224} />
         </div>
       </ModuleCard>
+
+      {/* ── dead-air protection ── */}
+      <FailoverCard className="xl:col-span-12" />
 
       {/* ── input analysis ── */}
       <ModuleCard

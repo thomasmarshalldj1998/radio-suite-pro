@@ -84,6 +84,61 @@ const schema = defineSchema(
       at: v.number(),
       meta: v.optional(v.any()),
     }).index("by_user_time", ["userId", "at"]),
+
+    // durable alarm history — the console's tolerance watchdog (peak, clip,
+    // loudness, correlation, overmodulation, dead air, failover, RDS) writes
+    // here so a 3 a.m. event survives the session and can be acknowledged.
+    alarms: defineTable({
+      userId: v.id("users"),
+      kind: v.string(),
+      severity: v.union(
+        v.literal("critical"),
+        v.literal("warning"),
+        v.literal("info"),
+      ),
+      title: v.string(),
+      detail: v.optional(v.string()),
+      at: v.number(),
+      ackAt: v.optional(v.number()),
+      /** "console" for this app, or a station id when reported remotely. */
+      source: v.optional(v.string()),
+    }).index("by_user_time", ["userId", "at"]),
+
+    // dayparting — preset snapshots switched by day-of-week + time of day
+    schedules: defineTable({
+      userId: v.id("users"),
+      name: v.string(),
+      /** 0 = Sunday … 6 = Saturday */
+      days: v.array(v.number()),
+      /** minutes past local midnight */
+      startMin: v.number(),
+      endMin: v.number(),
+      presetName: v.string(),
+      /** full ProcessorParams snapshot, so a slot is self-contained */
+      params: v.any(),
+      enabled: v.boolean(),
+      updatedAt: v.number(),
+    }).index("by_user", ["userId"]),
+
+    // remote console — one row per reporting station
+    stations: defineTable({
+      userId: v.id("users"),
+      stationId: v.string(),
+      name: v.string(),
+      /** Shared secret the station agent posts with (see convex/http.ts). */
+      token: v.string(),
+      lastSeenAt: v.number(),
+      onAir: v.boolean(),
+      presetName: v.optional(v.string()),
+      lufs: v.optional(v.number()),
+      truePeakDb: v.optional(v.number()),
+      modPct: v.optional(v.number()),
+      openAlarms: v.optional(v.number()),
+      version: v.optional(v.string()),
+      note: v.optional(v.string()),
+    })
+      .index("by_user", ["userId"])
+      .index("by_token", ["token"]),
   },
   {
     schemaValidation: false,

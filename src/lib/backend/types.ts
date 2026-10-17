@@ -46,6 +46,84 @@ export interface LogPush {
   meta?: unknown;
 }
 
+/** Alarm severity — drives colour and whether the event demands attention. */
+export type AlarmSeverity = "critical" | "warning" | "info";
+
+/** One durable alarm row (console watchdog or a remotely reported station). */
+export interface AlarmRecord {
+  _id: string;
+  kind: string;
+  severity: AlarmSeverity;
+  title: string;
+  detail?: string;
+  at: number;
+  ackAt?: number;
+  source?: string;
+}
+
+export interface AlarmPush {
+  kind: string;
+  severity: AlarmSeverity;
+  title: string;
+  detail?: string;
+  at?: number;
+  source?: string;
+}
+
+/** Dayparting slot: a preset snapshot active on given days between two times. */
+export interface ScheduleRecord {
+  _id: string;
+  name: string;
+  /** 0 = Sunday … 6 = Saturday */
+  days: number[];
+  /** minutes past local midnight */
+  startMin: number;
+  endMin: number;
+  presetName: string;
+  params: unknown;
+  enabled: boolean;
+  updatedAt: number;
+}
+
+export interface ScheduleInput {
+  id?: string;
+  name: string;
+  days: number[];
+  startMin: number;
+  endMin: number;
+  presetName: string;
+  params: unknown;
+  enabled: boolean;
+}
+
+/** A station reporting into the remote console. */
+export interface StationRecord {
+  _id: string;
+  stationId: string;
+  name: string;
+  token: string;
+  lastSeenAt: number;
+  onAir: boolean;
+  presetName?: string;
+  lufs?: number;
+  truePeakDb?: number;
+  modPct?: number;
+  openAlarms?: number;
+  version?: string;
+  note?: string;
+}
+
+export interface StationReport {
+  stationId: string;
+  onAir: boolean;
+  presetName?: string;
+  lufs?: number;
+  truePeakDb?: number;
+  modPct?: number;
+  openAlarms?: number;
+  version?: string;
+}
+
 /** What `useAuth()` hands every consumer, regardless of backend. */
 export interface Session {
   isLoading: boolean;

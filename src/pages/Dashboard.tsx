@@ -11,13 +11,22 @@ import {
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { Button } from "@/components/ui/button";
 import {
+  useAlarms,
   useConnectionState,
+  useMount,
+  usePushAlarm,
   usePushLog,
+  useSchedules,
 } from "@/lib/backend/hooks";
+import type { ScheduleRecord } from "@/lib/backend/types";
+import { ScheduleCard } from "@/components/console/ScheduleCard";
+import { StationsTab } from "@/components/console/StationsTab";
 import {
-  fireAlarm,
+  ALARM_SEVERITY,
+  fireAlarm as fireSessionAlarm,
   getAlarms,
   subscribeAlarms,
+  type AlarmKind,
 } from "@/lib/audio/alarms";
 import { getEngine } from "@/lib/audio/engine";
 import { getFm, stopFm, syncFm } from "@/lib/audio/fm";
@@ -29,6 +38,11 @@ import {
   sourceParams,
   type ProcessorParams,
 } from "@/lib/audio/params";
+import { sampleLoudness, sampleMpxPower } from "@/lib/audio/compliance";
+import { rdsAscii } from "@/lib/audio/mpx";
+import { evaluateFailover, getFailover } from "@/lib/audio/failover";
+import { maybeReport, queueRemoteAlarm } from "@/lib/audio/reporting";
+import { resolveActiveSchedule } from "@/lib/audio/scheduler";
 import { getRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
 import { APP_NAME, APP_VERSION } from "@/lib/version";
@@ -36,6 +50,7 @@ import {
   Activity,
   LayoutDashboard,
   Power,
+  Radio,
   RotateCcw,
   SlidersHorizontal,
   Sparkles,
@@ -55,7 +70,12 @@ const STORAGE_KEY = "signalpath.params.v2";
 const LEGACY_STORAGE_KEY = "signalpath.params.v1";
 const START_TIMEOUT_MS = 12_000;
 
-export type TabId = "overview" | "dsp" | "presets" | "telemetry";
+export type TabId =
+  | "overview"
+  | "dsp"
+  | "presets"
+  | "stations"
+  | "telemetry";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
   {
@@ -71,6 +91,12 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     hint: "Preamp → AGC → MB → Limit · TX",
   },
   { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
+  {
+    id: "stations",
+    label: "Network",
+    icon: Radio,
+    hint: "Group console · stations · alarms",
+  },
   { id: "telemetry", label: "Telemetry", icon: Activity, hint: "Compliance · diagnostics · health" },
 ];
 
@@ -216,6 +242,25 @@ export default function Dashboard() {
   const engine = getEngine();
   const connState = useConnectionState();
   const pushLog = usePushLog();
+  const pushAlarm = usePushAlarm();
+  const durableAlarms = useAlarms();
+  const schedules = useSchedules();
+
+  /**
+   * One alarm path. The session tolerance feed still gates the per-kind
+   * cooldown, and the same event then goes to the durable history and — when
+   * the reporting agent is on — onto the group console, so a 3 a.m. breach is
+   * still there after a reload.
+   */
+  const fireAlarm = useCallback(
+    (kind: AlarmKind, title: string, detail: string) => {
+      if (!fireSessionAlarm(kind, title, detail)) return;
+      const severity = ALARM_SEVERITY[kind];
+      void pushAlarm({ kind, severity, title, detail });
+      queueRemoteAlarm({ kind, severity, title, detail, at: Date.now() });
+    },
+    [pushAlarm],
+  );
   const [params, setParams] = useState<ProcessorParams>(() => {
     try {
       const raw =
@@ -245,11 +290,39 @@ export default function Dashboard() {
   );
   const poweredAtRef = useRef(0);
   const powerBusyRef = useRef(false);
-  const alarmCondRef = useRef({ driftSince: 0, corrSince: 0 });
+  const alarmCondRef = useRef({ driftSince: 0, corrSince: 0, rdsStall: 0 });
   const paramsRef = useRef(params);
+  const openAlarmsRef = useRef(0);
   useEffect(() => {
     paramsRef.current = params;
   }, [params]);
+  useEffect(() => {
+    openAlarmsRef.current = (durableAlarms ?? []).filter(
+      (a) => a.ackAt === undefined,
+    ).length;
+  }, [durableAlarms]);
+
+  /**
+   * RDS metadata ingest — with the encoder set to follow now-playing, the
+   * station's title and artist are folded into radio-text and pushed onto the
+   * 57 kHz subcarrier as soon as they change. The text goes through the
+   * single-byte fold here, so what the receiver shows is what the operator
+   * sees in the panel.
+   */
+  const mountDoc = useMount();
+  const npTitle = mountDoc?.nowPlayingTitle ?? "";
+  const npArtist = mountDoc?.nowPlayingArtist ?? "";
+  const rtAuto = params.fm.mpx.rdsRtAuto;
+  useEffect(() => {
+    if (!rtAuto) return;
+    const text = rdsAscii(npArtist ? `${npArtist} - ${npTitle}` : npTitle);
+    if (!text) return;
+    setParams((prev) =>
+      prev.fm.mpx.rdsRt === text
+        ? prev
+        : { ...prev, fm: { ...prev.fm, mpx: { ...prev.fm.mpx, rdsRt: text } } },
+    );
+  }, [npTitle, npArtist, rtAuto]);
 
   // displayed controls vs the loaded preset snapshot
   const dirty = JSON.stringify(params) !== JSON.stringify(baseline.params);
@@ -320,7 +393,101 @@ export default function Dashboard() {
             `Composite demand ${fmSnap.stats.modPct.toFixed(0)}% held over the ${fmSnap.stats.alarmPct}% threshold for 5 s`,
           );
         }
+
+        // ── pilot + RDS integrity: the subcarrier is on, is data moving? ──
+        const mpx = p.fm.mpx;
+        if (p.fm.on && mpx.on) {
+          if (mpx.pilotPct <= 0) {
+            fireAlarm(
+              "pilot",
+              "No 19 kHz pilot",
+              "The stereo pilot is at 0 % — receivers cannot lock and fall back to mono",
+            );
+          }
+          if (mpx.rdsPct <= 0) {
+            cond.rdsStall = 0;
+            fireAlarm(
+              "rds",
+              "RDS subcarrier muted",
+              "The RDS encoder is engaged but the 57 kHz subcarrier is at 0 % — PI, PS and RadioText are not on air",
+            );
+          } else {
+            if (!/^[0-9a-fA-F]{4}$/.test(mpx.rdsPi.trim())) {
+              fireAlarm(
+                "rds",
+                "Programme identification invalid",
+                `"${mpx.rdsPi}" is not four hex digits — the encoder is sending the 0xC479 fallback`,
+              );
+            }
+            const stats = fmSnap.stats;
+            // the generator's group counter resets every tick, so four zero
+            // ticks in a row (~2 s) means the encoder is not emitting
+            if (stats && stats.rdsGroups === 0) {
+              cond.rdsStall += 1;
+              if (cond.rdsStall >= 4) {
+                fireAlarm(
+                  "rds",
+                  "RDS encoder stalled",
+                  `No groups emitted for ${(cond.rdsStall * 0.5).toFixed(1)} s while the subcarrier runs at ${mpx.rdsPct.toFixed(1)} %`,
+                );
+              }
+            } else {
+              cond.rdsStall = 0;
+            }
+          }
+        }
       }
+
+      // ── dead-air watchdog → standby take-over / automatic return ──
+      const foEvent = evaluateFailover(snap.srcLevelDb, powered);
+      const fo = getFailover();
+      if (foEvent) {
+        fireAlarm(
+          "failover",
+          foEvent.type === "takeover"
+            ? `Standby source on air after ${(foEvent.deadMs / 1000).toFixed(1)} s`
+            : "Programme restored — returned from standby",
+          foEvent.type === "takeover"
+            ? `Programme sat below ${fo.config.thresholdDb} dBFS for ${(foEvent.deadMs / 1000).toFixed(1)} s; the standby source was cross-faded in automatically`
+            : `Programme stayed healthy for ${Math.round(fo.config.returnMs / 1000)} s, so the chain returned to the live feed`,
+        );
+      } else if (!fo.active && fo.deadMs > Math.max(fo.config.holdMs, 3000)) {
+        fireAlarm(
+          "silence",
+          "Dead air",
+          `Programme below ${fo.config.thresholdDb} dBFS for ${(fo.deadMs / 1000).toFixed(0)} s${
+            fo.loaded ? "" : " — no standby source armed"
+          }`,
+        );
+      }
+
+      // ── compliance: BS.1770 loudness + BS.412 multiplex power ──
+      sampleLoudness({
+        powered,
+        lufsM: snap.lufsM,
+        lufsS: snap.lufsS,
+        lufsI: snap.lufsI,
+        lra: snap.lra,
+        truePeak: snap.truePeak,
+        samplePeakDb: snap.samplePeakDb,
+        measureMs: snap.measureMs,
+        targets: {
+          lufsTarget: p.rider.targetLufs,
+          truePeakCeilingDb: p.limiter.ceilingDb,
+        },
+      });
+      const fmStats = getFm().stats;
+      sampleMpxPower(fmStats?.powerDbr, fmStats?.powerWindowSeconds ?? 0);
+
+      // ── station reporting agent (heartbeat + queued remote alarms) ──
+      maybeReport({
+        onAir: rt.onAir,
+        presetName: activePresetRef.current,
+        lufs: snap.lufsI ?? undefined,
+        truePeakDb: snap.truePeak,
+        modPct: getFm().stats?.modPct,
+        openAlarms: openAlarmsRef.current,
+      });
 
       // source / destination labels (real engine + output matrix state)
       const sourceLabel =
@@ -346,8 +513,8 @@ export default function Dashboard() {
         powered,
         onAir: rt.onAir,
         alarm:
-          rt.onAir &&
-          (snap.clipOut || snap.truePeak > p.limiter.ceilingDb + 0.1),
+          fo.active ||
+          (rt.onAir && (snap.clipOut || snap.truePeak > p.limiter.ceilingDb + 0.1)),
         degraded:
           powered &&
           (snap.perf.throttled ||
@@ -368,7 +535,7 @@ export default function Dashboard() {
     tick();
     const id = window.setInterval(tick, 500);
     return () => window.clearInterval(id);
-  }, [engine]);
+  }, [engine, fireAlarm]);
 
   // persistence + engine sync
   useEffect(() => {
@@ -513,6 +680,32 @@ export default function Dashboard() {
     setActivePreset(baseline.name);
     toast.success(`Reverted to ${baseline.name}`);
   }, [baseline]);
+
+  // ── dayparting: apply the scheduled slot when the clock moves into it ──
+  const activeSlotRef = useRef<string | null>(null);
+  useEffect(() => {
+    const check = () => {
+      const slot = resolveActiveSchedule(
+        schedules as ScheduleRecord[] | undefined,
+      );
+      const id = slot?._id ?? null;
+      if (id === activeSlotRef.current) return;
+      activeSlotRef.current = id;
+      if (!slot) return;
+      applyPreset(coerceParams(slot.params as ProcessorParams), slot.presetName);
+      toast.message(`Dayparting · ${slot.name}`, {
+        description: `Applied “${slot.presetName}”`,
+      });
+      void pushLog({
+        kind: "preset",
+        title: `Dayparting applied ${slot.presetName}`,
+        detail: `Slot “${slot.name}” on air`, 
+      });
+    };
+    check();
+    const id = window.setInterval(check, 20_000);
+    return () => window.clearInterval(id);
+  }, [schedules, applyPreset, pushLog]);
 
   // header height drives the sticky page rail offset (resizes with wrap)
   const headerRef = useRef<HTMLElement>(null);
@@ -773,14 +966,18 @@ export default function Dashboard() {
               />
             )}
             {tab === "presets" && (
-              <PresetPanel
-                params={params}
-                activeName={activePreset}
-                dirty={dirty}
-                onApply={applyPreset}
-                onRevert={revertPreset}
-              />
+              <div className="grid gap-4">
+                <PresetPanel
+                  params={params}
+                  activeName={activePreset}
+                  dirty={dirty}
+                  onApply={applyPreset}
+                  onRevert={revertPreset}
+                />
+                <ScheduleCard params={params} activeName={activePreset} />
+              </div>
             )}
+            {tab === "stations" && <StationsTab />}
             {tab === "telemetry" && (
               <TelemetryTab
                 onConfigureStream={() => {

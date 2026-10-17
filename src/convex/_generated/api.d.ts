@@ -11,6 +11,7 @@
 import type * as auth from "../auth.js";
 import type * as auth_emailOtp from "../auth/emailOtp.js";
 import type * as http from "../http.js";
+import type * as ops from "../ops.js";
 import type * as presets from "../presets.js";
 import type * as stations from "../stations.js";
 import type * as users from "../users.js";
@@ -25,6 +26,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   "auth/emailOtp": typeof auth_emailOtp;
   http: typeof http;
+  ops: typeof ops;
   presets: typeof presets;
   stations: typeof stations;
   users: typeof users;

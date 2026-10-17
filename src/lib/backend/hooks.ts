@@ -5,12 +5,18 @@
 import { use } from "react";
 import { BackendContext } from "./context";
 import type {
+  AlarmPush,
+  AlarmRecord,
   ConnectionState,
   LogPush,
   LogRecord,
   MountRecord,
   PresetRecord,
+  ScheduleInput,
+  ScheduleRecord,
   Session,
+  StationRecord,
+  StationReport,
 } from "./types";
 
 function useBackend() {
@@ -71,4 +77,70 @@ export function useSession(): Session {
 /** Backend connectivity — `"local"` when persisting on-device. */
 export function useConnectionState(): ConnectionState {
   return useBackend().connection;
+}
+
+/* ── durable alarms ── */
+
+/** Alarm history, newest first (`undefined` while cloud mode is loading). */
+export function useAlarms(): AlarmRecord[] | undefined {
+  return useBackend().alarms;
+}
+
+export function usePushAlarm(): (args: AlarmPush) => Promise<unknown> {
+  return useBackend().pushAlarm;
+}
+
+export function useAckAlarm(): (id: string) => Promise<void> {
+  return useBackend().ackAlarm;
+}
+
+export function useAckAllAlarms(): () => Promise<unknown> {
+  return useBackend().ackAllAlarms;
+}
+
+export function useClearAlarms(): () => Promise<unknown> {
+  return useBackend().clearAlarms;
+}
+
+/* ── dayparting schedules ── */
+
+export function useSchedules(): ScheduleRecord[] | undefined {
+  return useBackend().schedules;
+}
+
+export function useSaveSchedule(): (args: ScheduleInput) => Promise<unknown> {
+  return useBackend().saveSchedule;
+}
+
+export function useRemoveSchedule(): (id: string) => Promise<void> {
+  return useBackend().removeSchedule;
+}
+
+export function useSetScheduleEnabled(): (
+  id: string,
+  enabled: boolean,
+) => Promise<void> {
+  return useBackend().setScheduleEnabled;
+}
+
+/* ── multi-station console ── */
+
+export function useStations(): StationRecord[] | undefined {
+  return useBackend().stations;
+}
+
+export function useRegisterStation(): (args: {
+  name: string;
+  token: string;
+  note?: string;
+}) => Promise<unknown> {
+  return useBackend().registerStation;
+}
+
+export function useRemoveStation(): (id: string) => Promise<void> {
+  return useBackend().removeStation;
+}
+
+export function useReportStation(): (args: StationReport) => Promise<unknown> {
+  return useBackend().reportStation;
 }

@@ -81,6 +81,32 @@ export interface FmParams {
     rdsPct: number;
     /** RDS programme service name — 8 characters, space-padded. */
     rdsPs: string;
+    /** Programme identification, 4 hex digits (e.g. "C479"). */
+    rdsPi: string;
+    /** Programme type 0–31 (IEC 62106 Annex F table). */
+    rdsPty: number;
+    /** RadioText, up to 64 characters (group 2A). */
+    rdsRt: string;
+    /**
+     * Alternative frequencies in MHz. The first is carried in group 0A's
+     * block C as "one alternative" — the count field is emitted as 1 so the
+     * list is never over-claimed.
+     */
+    rdsAf: number[];
+    /** Scroll a longer PS text through the 8-character window. */
+    rdsScroll: boolean;
+    /**
+     * Delay RDS text changes by this many ms, so station/artist text lines up
+     * with audio that is itself delayed (profanity delay, diversity delay).
+     */
+    rdsDelayMs: number;
+    /** Drive RadioText from the station's now-playing metadata. */
+    rdsRtAuto: boolean;
+    /**
+     * RadioText Plus: announce the application in group 3A and tag two
+     * character ranges of the RadioText (artist, title) in group 11A.
+     */
+    rdsRtPlus: boolean;
     /** 67 kHz SCA subcarrier, % of total deviation (unmodulated placeholder). */
     scaPct: number;
     /** Composite clipper ceiling, % of ±75 kHz (US cap: 110 %). */
@@ -238,6 +264,14 @@ export const DEFAULT_PARAMS: ProcessorParams = {
       pilotPct: 9,
       rdsPct: 3.3,
       rdsPs: "SIGNAL  ",
+      rdsPi: "C479",
+      rdsPty: 10,
+      rdsRt: "Signalpath broadcast",
+      rdsAf: [],
+      rdsScroll: false,
+      rdsDelayMs: 0,
+      rdsRtAuto: true,
+      rdsRtPlus: true,
       scaPct: 0,
       ceilingPct: 100,
       alarmPct: 100,
@@ -3026,7 +3060,23 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       fm: {
         on: true,
         emphasis: "50",
-        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+        mpx: {
+          on: true,
+          pilotPct: 9,
+          rdsPct: 3,
+          rdsPs: "SIGNAL  ",
+          rdsPi: "C479",
+          rdsPty: 10,
+          rdsRt: "Signalpath broadcast",
+          rdsAf: [],
+          rdsScroll: false,
+          rdsDelayMs: 0,
+          rdsRtAuto: true,
+          rdsRtPlus: true,
+          scaPct: 0,
+          ceilingPct: 100,
+          alarmPct: 100,
+        },
       },
     }),
   },
@@ -3083,7 +3133,23 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       fm: {
         on: true,
         emphasis: "50",
-        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+        mpx: {
+          on: true,
+          pilotPct: 9,
+          rdsPct: 3,
+          rdsPs: "SIGNAL  ",
+          rdsPi: "C479",
+          rdsPty: 10,
+          rdsRt: "Signalpath broadcast",
+          rdsAf: [],
+          rdsScroll: false,
+          rdsDelayMs: 0,
+          rdsRtAuto: true,
+          rdsRtPlus: true,
+          scaPct: 0,
+          ceilingPct: 100,
+          alarmPct: 100,
+        },
       },
     }),
   },
@@ -3139,7 +3205,23 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       fm: {
         on: true,
         emphasis: "50",
-        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+        mpx: {
+          on: true,
+          pilotPct: 9,
+          rdsPct: 3,
+          rdsPs: "SIGNAL  ",
+          rdsPi: "C479",
+          rdsPty: 10,
+          rdsRt: "Signalpath broadcast",
+          rdsAf: [],
+          rdsScroll: false,
+          rdsDelayMs: 0,
+          rdsRtAuto: true,
+          rdsRtPlus: true,
+          scaPct: 0,
+          ceilingPct: 100,
+          alarmPct: 100,
+        },
       },
     }),
   },
@@ -3193,7 +3275,23 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       fm: {
         on: true,
         emphasis: "50",
-        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+        mpx: {
+          on: true,
+          pilotPct: 9,
+          rdsPct: 3,
+          rdsPs: "SIGNAL  ",
+          rdsPi: "C479",
+          rdsPty: 10,
+          rdsRt: "Signalpath broadcast",
+          rdsAf: [],
+          rdsScroll: false,
+          rdsDelayMs: 0,
+          rdsRtAuto: true,
+          rdsRtPlus: true,
+          scaPct: 0,
+          ceilingPct: 100,
+          alarmPct: 100,
+        },
       },
     }),
   },
@@ -3250,7 +3348,23 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       fm: {
         on: true,
         emphasis: "50",
-        mpx: { on: true, pilotPct: 9, rdsPct: 3, rdsPs: "SIGNAL  ", scaPct: 0, ceilingPct: 100, alarmPct: 100 },
+        mpx: {
+          on: true,
+          pilotPct: 9,
+          rdsPct: 3,
+          rdsPs: "SIGNAL  ",
+          rdsPi: "C479",
+          rdsPty: 10,
+          rdsRt: "Signalpath broadcast",
+          rdsAf: [],
+          rdsScroll: false,
+          rdsDelayMs: 0,
+          rdsRtAuto: true,
+          rdsRtPlus: true,
+          scaPct: 0,
+          ceilingPct: 100,
+          alarmPct: 100,
+        },
       },
     }),
   },

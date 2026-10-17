@@ -1,3 +1,4 @@
+import { CompliancePanel } from "@/components/console/CompliancePanel";
 import { LogPanel } from "@/components/console/LogPanel";
 import { LoudnessHistory } from "@/components/console/LoudnessHistory";
 import { CorrelationMeter, LoudnessMeter } from "@/components/console/Meters";
@@ -106,6 +107,26 @@ const ALARM_STYLE: Record<AlarmKind, { led: string; chip: string }> = {
     chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
   },
   loudness: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+  silence: {
+    led: "led-hot animate-pulse-live",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
+  failover: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+  pilot: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+  rds: {
+    led: "led-warn",
+    chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
+  },
+  link: {
     led: "led-warn",
     chip: "border-meter-warn/40 bg-meter-warn/10 text-meter-warn",
   },
@@ -562,6 +583,11 @@ export function TelemetryTab({
           </label>
         </div>
       </ModuleCard>
+
+      {/* ── compliance record ── */}
+      <div className="xl:col-span-12">
+        <CompliancePanel />
+      </div>
 
       {/* ── event log ── */}
       <div className="xl:col-span-12">
