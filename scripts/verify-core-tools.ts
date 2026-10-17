@@ -1,0 +1,318 @@
+/**
+ * Broadcast tool checks — the four console tools added for v2:
+ *
+ *   bun scripts/verify-core-tools.ts
+ *
+ *  1  window gate: freeze inside the window, release outside, reset on silence
+ *  2  phase rotator: a 4-stage staggered allpass cascade, bypassable
+ *  3  Less–More macro: ratios, timing and limiter drive move together
+ *  4  de-esser: band clamp, cut depth and coefficient
+ *  5  parameters: new controls default cleanly and old saved presets coerce
+ *  6  wiring: the graph really carries those nodes, and apply() reaches them
+ *
+ * Section 6 drives the real AudioEngine against a mock AudioContext, so the
+ * numbers below are the values the live graph would receive.
+ */
+import { AudioEngine } from "../src/lib/audio/engine";
+import { BUILTIN_PRESETS, DEFAULT_PARAMS, coerceParams, dbToGain } from "../src/lib/audio/params";
+import {
+  DEESS_MAX_HZ,
+  DEESS_MIN_HZ,
+  DENSITY_MAX,
+  DENSITY_MIN,
+  WindowGate,
+  clampDeessFreq,
+  deessAlpha,
+  densityProfile,
+  phaseStageFrequencies,
+} from "../src/lib/audio/tools";
+
+let passed = 0;
+let failed = 0;
+
+function check(ok: boolean, label: string, detail = ""): void {
+  if (ok) {
+    passed += 1;
+    console.log(`  ok   ${label}${detail ? ` — ${detail}` : ""}`);
+  } else {
+    failed += 1;
+    console.log(`  FAIL ${label}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+const near = (a: number, b: number, tol = 1e-6) => Math.abs(a - b) <= tol;
+
+/* ── 1 · window gate ───────────────────────────────────────────────────── */
+
+console.log("\n1 · AGC window gate");
+{
+  const gate = new WindowGate({ windowDb: 3, spanMs: 1000, floorDb: -70 });
+  // a steady programme inside the window: freeze after the history fills
+  let t = 0;
+  let reading = gate.update(-20, t);
+  for (let i = 0; i < 12; i++) reading = gate.update(-20 + (i % 2 ? 0.5 : -0.5), (t += 100));
+  check(reading.frozen, "a steady ±0.5 dB programme freezes the gain", `${reading.spreadDb.toFixed(1)} dB spread`);
+  check(near(reading.spreadDb, 1, 1e-9), "the spread is measured, not assumed", `${reading.spreadDb.toFixed(2)} dB`);
+
+  // the programme moves: the gate must let go
+  reading = gate.update(-8, (t += 100));
+  check(!reading.frozen, "leaving the window releases the gate", `${reading.spreadDb.toFixed(1)} dB spread`);
+
+  // silence is not a stable programme
+  const quiet = new WindowGate({ windowDb: 3, spanMs: 1000, floorDb: -70 });
+  for (let i = 0; i < 12; i++) quiet.update(-80, (t += 100));
+  check(!quiet.frozen, "silence below the floor never freezes");
+
+  // hysteresis: a level sitting right on the edge must not chatter
+  const edge = new WindowGate({ windowDb: 3, spanMs: 600, floorDb: -70 });
+  for (let i = 0; i < 10; i++) edge.update(-20, (t += 100));
+  check(edge.frozen, "a flat programme freezes");
+  edge.update(-16.5, (t += 100)); // 3.5 dB spread — inside the 35 % release band
+  check(edge.frozen, "a spill just past the window keeps the hold (hysteresis)");
+  edge.update(-10, (t += 100));
+  check(!edge.frozen, "a clear departure releases it");
+
+  // disabled
+  const off = new WindowGate({ windowDb: 0, spanMs: 1000, floorDb: -70 });
+  for (let i = 0; i < 20; i++) off.update(-20, (t += 100));
+  check(!off.frozen, "window 0 dB disables the gate entirely");
+}
+
+/* ── 2 · phase rotator cascade ─────────────────────────────────────────── */
+
+console.log("\n2 · phase rotator");
+{
+  const stages = phaseStageFrequencies(300);
+  check(stages.length === 4, "the rotor is a 4-stage cascade", `${stages.length} stages`);
+  check(
+    stages.every((hz, i) => i === 0 || hz > stages[i - 1]),
+    "the stages are staggered upward",
+    stages.join(" / "),
+  );
+  check(near(stages[0], 150) && near(stages[3], 450), "0.5× … 1.5× around the tuning frequency", `${stages[0]}–${stages[3]} Hz`);
+  const clamped = phaseStageFrequencies(1e6);
+  check(clamped[2] <= 2000, "an absurd tuning is clamped, not passed through", `${clamped[2]} Hz`);
+}
+
+/* ── 3 · Less–More density macro ───────────────────────────────────────── */
+
+console.log("\n3 · Less–More macro");
+{
+  const neutral = densityProfile(5);
+  check(neutral.ratioScale === 1 && neutral.timeScale === 1 && neutral.driveDb === 0, "5 is exactly neutral", JSON.stringify(neutral));
+  const open = densityProfile(DENSITY_MIN);
+  const dense = densityProfile(DENSITY_MAX);
+  check(open.ratioScale < neutral.ratioScale && neutral.ratioScale < dense.ratioScale, "ratio rises with the macro", `${open.ratioScale} → ${dense.ratioScale}`);
+  check(open.timeScale > neutral.timeScale && neutral.timeScale > dense.timeScale, "envelopes speed up with the macro", `${open.timeScale}s → ${dense.timeScale}s`);
+  check(open.driveDb < 0 && dense.driveDb > 0, "limiter drive follows the macro", `${open.driveDb} → +${dense.driveDb} dB`);
+  check(densityProfile(-4).ratioScale === open.ratioScale && densityProfile(99).ratioScale === dense.ratioScale, "out-of-range settings clamp");
+  check(open.label === "Open" && dense.label === "Maximum", "the label describes the setting", `${open.label} / ${dense.label}`);
+}
+
+/* ── 4 · de-esser ──────────────────────────────────────────────────────── */
+
+console.log("\n4 · de-esser");
+{
+  check(clampDeessFreq(1000) === DEESS_MIN_HZ, "tuning clamps to 6 kHz", `${clampDeessFreq(1000)} Hz`);
+  check(clampDeessFreq(20000) === DEESS_MAX_HZ, "tuning clamps to 10 kHz", `${clampDeessFreq(20000)} Hz`);
+  check(clampDeessFreq(8000) === 8000, "an in-band tuning passes through", "8000 Hz");
+  check(deessAlpha(0) === 0, "no cut, no subtraction");
+  check(deessAlpha(6) > deessAlpha(3) && deessAlpha(3) > 0, "deeper cuts subtract more");
+  check(deessAlpha(80) < 1, "the subtractor never nulls the band completely", deessAlpha(80).toFixed(3));
+  // α = 1 − 10^(−cut/20) is a −cut dB cut by construction
+  const cut = 6;
+  const alpha = deessAlpha(cut);
+  check(near(20 * Math.log10(1 - alpha), -cut, 1e-9), "the coefficient equals the requested cut", `${(20 * Math.log10(1 - alpha)).toFixed(2)} dB`);
+}
+
+/* ── 5 · parameters and old saves ─────────────────────────────────────── */
+
+console.log("\n5 · parameters");
+{
+  check(DEFAULT_PARAMS.agc.windowDb === 0, "the window gate ships off", `${DEFAULT_PARAMS.agc.windowDb} dB`);
+  check(DEFAULT_PARAMS.phase.on, "the phase rotator ships engaged");
+  check(DEFAULT_PARAMS.density === 5, "the macro ships neutral", `${DEFAULT_PARAMS.density}`);
+  check(DEFAULT_PARAMS.deess.on, "the de-esser ships engaged");
+  check(DEFAULT_PARAMS.deess.freqHz >= DEESS_MIN_HZ && DEFAULT_PARAMS.deess.freqHz <= DEESS_MAX_HZ, "its default tuning is inside the band", `${DEFAULT_PARAMS.deess.freqHz} Hz`);
+
+  const legacy = structuredClone(DEFAULT_PARAMS) as unknown as Record<string, unknown>;
+  delete (legacy.agc as Record<string, unknown>).windowDb;
+  delete (legacy.phase as Record<string, unknown>).on;
+  delete (legacy as Record<string, unknown>).density;
+  delete (legacy as Record<string, unknown>).deess;
+  const coerced = coerceParams(legacy);
+  check(coerced.agc.windowDb === 0 && coerced.phase.on === true, "a pre-v2 save gains the new AGC/phase defaults");
+  check(coerced.density === 5 && coerced.deess.on === true, "and the macro/de-esser defaults");
+
+  const missing = BUILTIN_PRESETS.filter(
+    (p) =>
+      typeof p.params.density !== "number" ||
+      typeof p.params.agc.windowDb !== "number" ||
+      typeof p.params.deess?.freqHz !== "number",
+  );
+  check(missing.length === 0, "every built-in preset carries the new controls", `${BUILTIN_PRESETS.length - missing.length}/${BUILTIN_PRESETS.length}`);
+}
+
+/* ── 6 · graph wiring ─────────────────────────────────────────────────── */
+
+console.log("\n6 · graph");
+
+class FakeParam {
+  value = 0;
+  setTargetAtTime(v: number) {
+    this.value = v;
+  }
+  setValueAtTime(v: number) {
+    this.value = v;
+  }
+  cancelScheduledValues() {
+    /* nothing scheduled */
+  }
+}
+
+/** Every connection made while building the graph, as [from, to] node ids. */
+const EDGES: [number, number][] = [];
+let nodeId = 0;
+
+class FakeNode {
+  id = (nodeId += 1);
+  gain = new FakeParam();
+  frequency = new FakeParam();
+  Q = new FakeParam();
+  threshold = new FakeParam();
+  knee = new FakeParam();
+  ratio = new FakeParam();
+  attack = new FakeParam();
+  release = new FakeParam();
+  reduction = 0;
+  type = "";
+  curve: Float32Array | null = null;
+  oversample = "none";
+  fftSize = 2048;
+  smoothingTimeConstant = 0;
+  channelCount = 2;
+  stream = {};
+  connect(target: FakeNode): this {
+    EDGES.push([this.id, target.id]);
+    return this;
+  }
+  disconnect() {
+    /* mock graph */
+  }
+  getFloatTimeDomainData(out: Float32Array) {
+    out.fill(0);
+  }
+  getByteFrequencyData(out: Uint8Array) {
+    out.fill(0);
+  }
+  start() {
+    /* running */
+  }
+  stop() {
+    /* stopped */
+  }
+}
+
+const fakeCtx = {
+  currentTime: 0,
+  sampleRate: 48000,
+  state: "running",
+  baseLatency: 0.01,
+  outputLatency: 0.02,
+  onstatechange: null as null | (() => void),
+  destination: new FakeNode(),
+  createGain: () => new FakeNode(),
+  createBiquadFilter: () => new FakeNode(),
+  createDynamicsCompressor: () => new FakeNode(),
+  createAnalyser: () => new FakeNode(),
+  createWaveShaper: () => new FakeNode(),
+  createChannelSplitter: () => new FakeNode(),
+  createChannelMerger: () => new FakeNode(),
+  createMediaStreamDestination: () => new FakeNode(),
+  createOscillator: () => new FakeNode(),
+  createBufferSource: () => new FakeNode(),
+  createMediaElementSource: () => new FakeNode(),
+  createMediaStreamSource: () => new FakeNode(),
+  createBuffer: (_c: number, length: number) => ({
+    getChannelData: () => new Float32Array(length),
+  }),
+  decodeAudioData: async () => ({}),
+  resume: async () => undefined,
+  suspend: async () => undefined,
+  close: async () => undefined,
+};
+
+interface EngineInternals {
+  buildGraph: (ctx: unknown) => void;
+  phaseStages: FakeNode[];
+  phaseWet: FakeNode;
+  phaseDry: FakeNode;
+  deessBpAudio: FakeNode;
+  deessBpDet: FakeNode;
+  deessDet: FakeNode;
+  deessSub: FakeNode;
+  deessOut: FakeNode;
+  limDrive: FakeNode;
+  limWetPre: FakeNode;
+  limComp: FakeNode;
+  mbComps: FakeNode[];
+  agcHold: FakeNode;
+  agcWetOut: FakeNode;
+  windowGate: { frozen: boolean };
+}
+
+const engine = new AudioEngine();
+const internals = engine as unknown as EngineInternals;
+engine.ctx = fakeCtx as unknown as AudioContext;
+internals.buildGraph(fakeCtx);
+check(internals.phaseStages.length === 4, "the graph holds four allpass stages", `${internals.phaseStages.length}`);
+check(
+  internals.phaseStages.every((n) => n.type === "allpass"),
+  "every stage is an allpass filter",
+  internals.phaseStages.map((n) => `${n.frequency.value.toFixed(0)}`).join("/"),
+);
+check(internals.windowGate !== undefined, "the AGC carries a window gate");
+check(internals.deessBpAudio.frequency.value === 7500, "the de-esser band starts at 7.5 kHz");
+
+engine.apply(DEFAULT_PARAMS);
+check(internals.phaseWet.gain.value === 1 && internals.phaseDry.gain.value === 0, "the rotor is in circuit by default");
+check(near(internals.limDrive.gain.value, 1), "density 5 adds no limiter drive", internals.limDrive.gain.value.toFixed(3));
+
+engine.apply({ ...DEFAULT_PARAMS, density: DENSITY_MAX });
+check(near(internals.limDrive.gain.value, dbToGain(densityProfile(DENSITY_MAX).driveDb)), "density 10 drives the limiter", internals.limDrive.gain.value.toFixed(3));
+check(
+  near(internals.mbComps[0].ratio.value, DEFAULT_PARAMS.multiband.bands[0].ratio * densityProfile(DENSITY_MAX).ratioScale),
+  "and raises the multiband ratios with it",
+  internals.mbComps[0].ratio.value.toFixed(2),
+);
+check(
+  internals.mbComps[0].attack.value < DEFAULT_PARAMS.multiband.bands[0].attackMs / 1000,
+  "and speeds the band envelopes up",
+  `${(internals.mbComps[0].attack.value * 1000).toFixed(1)} ms`,
+);
+
+engine.apply({ ...DEFAULT_PARAMS, phase: { ...DEFAULT_PARAMS.phase, on: false } });
+check(internals.phaseWet.gain.value === 0 && internals.phaseDry.gain.value === 1, "bypass drops the whole cascade");
+
+engine.apply({ ...DEFAULT_PARAMS, deess: { ...DEFAULT_PARAMS.deess, freqHz: 9000 } });
+check(internals.deessBpAudio.frequency.value === 9000 && internals.deessBpDet.frequency.value === 9000, "retuning moves audio and detector together", "9 kHz");
+engine.apply({ ...DEFAULT_PARAMS, deess: { ...DEFAULT_PARAMS.deess, on: false } });
+check(internals.deessSub.gain.value === 0, "bypass removes the cut");
+
+// chain order: the de-esser must sit BEFORE the limiter, not beside it
+const edge = (a: FakeNode, b: FakeNode) =>
+  EDGES.some(([from, to]) => from === a.id && to === b.id);
+check(edge(internals.deessOut, internals.limWetPre), "the de-esser feeds the limiter input");
+check(!edge(internals.deessOut, internals.limComp), "it never feeds the limiter directly");
+check(
+  edge(internals.limWetPre, internals.limDrive) && edge(internals.limDrive, internals.limComp),
+  "the density drive sits between the de-esser and the limiter",
+);
+// the phase cascade is a chain, not parallel stages
+check(
+  internals.phaseStages.every((n, i) => i === 0 || edge(internals.phaseStages[i - 1], n)),
+  "the four allpass stages are connected in series",
+);
+
+console.log(`\n${passed} checks passed, ${failed} failed.`);
+process.exit(failed === 0 ? 0 : 1);

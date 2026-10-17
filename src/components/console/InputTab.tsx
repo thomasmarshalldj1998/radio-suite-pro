@@ -210,9 +210,29 @@ export function InputTab({
             <span className={cn("led size-1.5", params.hpf.on && "led-on")} />
             HPF {params.hpf.on ? formatHz(params.hpf.freqHz) : "off"}
           </span>
-          <span className="rounded-md border border-border/70 px-2 py-1">
-            Phase rot {params.phase.mode === "auto" ? "auto" : `${params.phase.freqHz.toFixed(2)} Hz`}
-          </span>
+          <button
+            type="button"
+            onClick={() =>
+              setParams((p) => ({
+                ...p,
+                phase: { ...p.phase, on: !p.phase.on },
+              }))
+            }
+            aria-pressed={params.phase.on}
+            aria-label="Phase rotator (4-stage allpass)"
+            className={cn(
+              "flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition-colors",
+              params.phase.on
+                ? "border-signal/30 bg-signal/10 text-signal"
+                : "border-border/70 text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <span className={cn("led size-1.5", params.phase.on && "led-on")} />
+            Phase rot{" "}
+            {params.phase.on
+              ? `4-stage · ${params.phase.mode === "auto" ? "auto" : `${params.phase.freqHz.toFixed(2)} Hz`}`
+              : "bypassed"}
+          </button>
           <span className="rounded-md border border-border/70 px-2 py-1">
             Gate {params.gate.on ? `${params.gate.thresholdDb.toFixed(2).replace("-", "−")} dB` : "bypassed"}
           </span>

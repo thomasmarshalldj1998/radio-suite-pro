@@ -916,6 +916,7 @@ export default function Dashboard() {
           params={params}
           activePreset={activePreset}
           dirty={dirty}
+          onDensity={(v) => setParams((p) => ({ ...p, density: v }))}
           onConfigureStream={() => {
             setTab("dsp");
             setDspSection("stream");

@@ -4,11 +4,14 @@
  * Signal flow:
  *   source → inputGain → HPF ─┬─ input meters (L/R)
  *                              ├─ spectrum (pre)
- *                              └─ 6-band EQ → harmonic exciter (parallel)
+ *                              └─ phase rotator (4-stage allpass cascade)
+ *                                 → 6-band EQ → harmonic exciter (parallel)
  *                                 → dynamic EQ (3 subtractive bands)
- *                                 → program AGC (pre-multiband leveller)
- *                                 → 6-band multiband compressor (LR4)
+ *                                 → program AGC (window-gated leveller)
+ *                                 → 6-band multiband compressor (LR4,
+ *                                    scaled by the Less–More macro)
  *                                 → loudness rider
+ *                                 → de-esser (dynamic 6–10 kHz cut)
  *                                 → composite limiter → output gain
  *                                 → ceiling guard → M/S stereo width → duck
  *                                  ├─ monitor out (speakers)
@@ -21,6 +24,13 @@
 import { GlitchMonitor } from "./glitch";
 import type { ProcessorParams } from "./params";
 import { DEFAULT_PARAMS, DEFAULT_SPLITS, dbToGain } from "./params";
+import {
+  WindowGate,
+  clampDeessFreq,
+  deessAlpha,
+  densityProfile,
+  phaseStageFrequencies,
+} from "./tools";
 
 export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
@@ -49,6 +59,10 @@ export interface MeterSnapshot {
   correlation: number;
   /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
   gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
+  /** AGC window gate — true while the gain is held inside the window. */
+  agcWindow: { frozen: boolean; spreadDb: number };
+  /** Current de-esser cut (dB). */
+  deessCut: number;
   /** current loudness-rider gain in dB (negative = pulling down) */
   riderDb: number;
   /** latency & main-thread health */
@@ -88,6 +102,8 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   samplePeakDb: -120,
   correlation: 1,
   gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
+  agcWindow: { frozen: false, spreadDb: 0 },
+  deessCut: 0,
   riderDb: 0,
   perf: {
     baseLatencyMs: 0,
@@ -159,7 +175,9 @@ export class AudioEngine {
   private sourceBus!: GainNode;
   private inputGain!: GainNode;
   private hpf!: BiquadFilterNode;
-  private phaseRot!: BiquadFilterNode;
+  private phaseWet!: GainNode;
+  private phaseDry!: GainNode;
+  private phaseStages: BiquadFilterNode[] = [];
   private gateGain!: GainNode;
   private gateAnalyser!: AnalyserNode;
   private gateBuf!: Float32Array<ArrayBuffer>;
@@ -220,6 +238,22 @@ export class AudioEngine {
   private agcComp!: DynamicsCompressorNode;
   private agcMakeup!: GainNode;
   private agcDry!: GainNode;
+  /** Metering branch of the leveller (off while the window gate is holding). */
+  private agcWetOut!: GainNode;
+  /** Static hold path: frozen gain, crossfaded in by the window gate. */
+  private agcHold!: GainNode;
+  private agcHoldGainDb = 0;
+  private windowGate = new WindowGate();
+  private agcFrozen = false;
+  private agcSpreadDb = 0;
+  private deessBpAudio!: BiquadFilterNode;
+  private deessBpDet!: BiquadFilterNode;
+  private deessDet!: DynamicsCompressorNode;
+  private deessSub!: GainNode;
+  /** Program bus leaving the de-esser, on its way to the limiter. */
+  private deessOut!: GainNode;
+  private deessCutDb = 0;
+  private limDrive!: GainNode;
   private limWetPre!: GainNode;
   private limComp!: DynamicsCompressorNode;
   private limDry!: GainNode;
@@ -399,18 +433,33 @@ export class AudioEngine {
 
     this.inputGain.connect(this.hpf);
 
-    // phase rotation — first-order allpass (voice asymmetry correction)
-    this.phaseRot = ctx.createBiquadFilter();
-    this.phaseRot.type = "allpass";
-    this.phaseRot.frequency.value = 300;
-    this.phaseRot.Q.value = 0.5;
-    this.hpf.connect(this.phaseRot);
+    // ── phase rotator: 4-stage allpass cascade (voice asymmetry) ──
+    // Allpass sections change phase and never magnitude, so a staggered
+    // cascade levels the waveform's positive and negative peaks without
+    // touching the spectrum. Bypassable as a whole.
+    this.phaseWet = g(1);
+    this.phaseDry = g(0);
+    this.hpf.connect(this.phaseWet);
+    this.hpf.connect(this.phaseDry);
+    let phaseNode: AudioNode = this.phaseWet;
+    for (const stageHz of phaseStageFrequencies(300)) {
+      const ap = ctx.createBiquadFilter();
+      ap.type = "allpass";
+      ap.frequency.value = stageHz;
+      ap.Q.value = 0.5;
+      phaseNode.connect(ap);
+      phaseNode = ap;
+      this.phaseStages.push(ap);
+    }
+    const phaseOut = g(1);
+    phaseNode.connect(phaseOut);
+    this.phaseDry.connect(phaseOut);
 
     // ── 6-band EQ (wet/dry crossfade) ──
     this.eqWetPre = g(1);
     this.eqDry = g(0);
-    this.phaseRot.connect(this.eqWetPre);
-    this.phaseRot.connect(this.eqDry);
+    phaseOut.connect(this.eqWetPre);
+    phaseOut.connect(this.eqDry);
     let eqNode: AudioNode = this.eqWetPre;
     for (const band of [
       { freq: 60, type: "lowshelf" as BiquadFilterType, q: 0.7 },
@@ -517,12 +566,20 @@ export class AudioEngine {
     this.agcComp.attack.value = 0.015;
     this.agcComp.release.value = 0.4;
     this.agcMakeup = g(dbToGain(4));
+    // Window-gate hold path: the same programme at a fixed gain equal to the
+    // leveller's current gain. Crossfading to it freezes the gain without
+    // muting the program.
+    this.agcWetOut = g(1);
+    this.agcHold = g(0);
     const agcOut = g(1);
     deqSum.connect(this.agcWetPre);
     deqSum.connect(this.agcDry);
+    deqSum.connect(this.agcHold);
     this.agcWetPre.connect(this.agcComp);
     this.agcComp.connect(this.agcMakeup);
-    this.agcMakeup.connect(agcOut);
+    this.agcMakeup.connect(this.agcWetOut);
+    this.agcWetOut.connect(agcOut);
+    this.agcHold.connect(agcOut);
     this.agcDry.connect(agcOut);
 
     // ── 6-band multiband compressor (LR4 crossovers), driven by the
@@ -584,9 +641,45 @@ export class AudioEngine {
     // multiband sum carries the AGC-leveled program into the rider
     mbSum.connect(this.riderGain);
 
-    // ── brickwall limiter ──
+    // ── de-esser: dynamic HF cut ahead of the limiter ──
+    // Parallel-subtract, exactly like a dynamic-EQ band: the sibilance band
+    // is isolated, its level drives a fast detector, and α of that band is
+    // subtracted from the program before the final stage sees it.
+    const deessIn = g(1);
+    const deessOut = g(1);
+    this.deessOut = deessOut;
+    this.riderGain.connect(deessIn);
+    deessIn.connect(deessOut); // dry pass-through
+    this.deessBpAudio = ctx.createBiquadFilter();
+    this.deessBpAudio.type = "bandpass";
+    this.deessBpAudio.frequency.value = 7500;
+    this.deessBpAudio.Q.value = 0.7;
+    this.deessSub = g(0);
+    const deessInv = g(-1);
+    deessIn.connect(this.deessBpAudio);
+    this.deessBpAudio.connect(this.deessSub);
+    this.deessSub.connect(deessInv);
+    deessInv.connect(deessOut);
+    this.deessBpDet = ctx.createBiquadFilter();
+    this.deessBpDet.type = "bandpass";
+    this.deessBpDet.frequency.value = 7500;
+    this.deessBpDet.Q.value = 0.7;
+    this.deessDet = ctx.createDynamicsCompressor();
+    this.deessDet.threshold.value = -26;
+    this.deessDet.ratio.value = 20;
+    this.deessDet.knee.value = 3;
+    this.deessDet.attack.value = 0.001;
+    this.deessDet.release.value = 0.06;
+    deessIn.connect(this.deessBpDet);
+    this.deessBpDet.connect(this.deessDet);
+    const deessSink = g(0);
+    this.deessDet.connect(deessSink);
+    deessSink.connect(ctx.destination);
+
+    // ── brickwall limiter (the density macro drives it from the front) ──
     this.limWetPre = g(1);
     this.limDry = g(0);
+    this.limDrive = g(1);
     this.limComp = ctx.createDynamicsCompressor();
     this.limComp.threshold.value = -1;
     this.limComp.ratio.value = 20;
@@ -594,9 +687,10 @@ export class AudioEngine {
     this.limComp.attack.value = 0.0015;
     this.limComp.release.value = 0.1;
     const limOut = g(1);
-    this.riderGain.connect(this.limWetPre);
-    this.riderGain.connect(this.limDry);
-    this.limWetPre.connect(this.limComp);
+    deessOut.connect(this.limWetPre);
+    deessOut.connect(this.limDry);
+    this.limWetPre.connect(this.limDrive);
+    this.limDrive.connect(this.limComp);
     this.limComp.connect(limOut);
     this.limDry.connect(limOut);
 
@@ -731,11 +825,13 @@ export class AudioEngine {
     this.ramp(this.hpf.frequency, params.hpf.freqHz);
     this.hpf.type = params.hpf.on ? "highpass" : "allpass";
 
-    // phase rotation: auto = fixed voice window, manual = user frequency
-    this.ramp(
-      this.phaseRot.frequency,
-      params.phase.mode === "auto" ? 300 : params.phase.freqHz,
-    );
+    // phase rotator: auto = fixed voice window, manual = user frequency;
+    // the cascade is retuned as a whole and bypassed as a whole
+    const phaseBase = params.phase.mode === "auto" ? 300 : params.phase.freqHz;
+    phaseStageFrequencies(phaseBase).forEach((hz, i) => {
+      this.ramp(this.phaseStages[i]?.frequency, hz);
+    });
+    this.crossfade(this.phaseWet, this.phaseDry, params.phase.on);
     // silence-gate bypass
     if (!params.gate.on) {
       this.gateCloseAt = 0;
@@ -757,14 +853,24 @@ export class AudioEngine {
     params.multiband.splitsHz.forEach((hz, split) => {
       for (const f of this.mbSplitFilters[split] ?? []) this.ramp(f.frequency, hz);
     });
+    // Less–More macro: one setting scales every band's ratio and envelope.
+    // 5 is the preset's own tuning, so the loaded preset is heard as designed
+    // until the operator moves the macro.
+    const dens = densityProfile(params.density);
     params.multiband.bands.forEach((band, i) => {
       const comp = this.mbComps[i];
       const makeup = this.mbMakeups[i];
       if (!comp || !makeup) return;
       this.ramp(comp.threshold, band.thresholdDb);
-      this.ramp(comp.ratio, band.ratio);
-      this.ramp(comp.attack, Math.max(band.attackMs, 0) / 1000);
-      this.ramp(comp.release, Math.max(band.releaseMs, 10) / 1000);
+      this.ramp(comp.ratio, Math.min(20, Math.max(1, band.ratio * dens.ratioScale)));
+      this.ramp(
+        comp.attack,
+        (Math.max(band.attackMs, 0) * dens.timeScale) / 1000,
+      );
+      this.ramp(
+        comp.release,
+        (Math.max(band.releaseMs, 10) * dens.timeScale) / 1000,
+      );
       this.ramp(makeup.gain, dbToGain(band.makeupDb));
     });
     this.crossfade(this.mbWetPre, this.mbDry, params.multiband.on);
@@ -794,7 +900,37 @@ export class AudioEngine {
     this.ramp(this.agcComp.release, Math.max(params.agc.releaseMs, 10) / 1000);
     this.ramp(this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
     this.crossfade(this.agcWetPre, this.agcDry, params.agc.on);
+    this.windowGate.configure({ windowDb: params.agc.windowDb });
+    if (!params.agc.on || params.agc.windowDb <= 0) {
+      this.agcFrozen = false;
+      this.agcSpreadDb = 0;
+      this.ramp(this.agcHold.gain, 0, 0.02);
+      this.ramp(this.agcWetOut.gain, 1, 0.02);
+    }
 
+    // de-esser: retune the band and detector; a bypass closes the cut
+    const deessHz = clampDeessFreq(params.deess.freqHz);
+    this.ramp(this.deessBpAudio?.frequency, deessHz);
+    this.ramp(this.deessBpDet?.frequency, deessHz);
+    this.ramp(this.deessDet?.threshold, params.deess.thresholdDb);
+    this.ramp(
+      this.deessDet?.attack,
+      Math.max(params.deess.attackMs, 0.1) / 1000,
+    );
+    this.ramp(
+      this.deessDet?.release,
+      Math.max(params.deess.releaseMs, 10) / 1000,
+    );
+    if (!params.deess.on) {
+      this.deessCutDb = 0;
+      this.ramp(this.deessSub?.gain, 0, 0.01);
+    }
+
+    // density drives the limiter from the front; the ceiling is untouched
+    this.ramp(
+      this.limDrive?.gain,
+      params.limiter.on ? dbToGain(dens.driveDb) : 1,
+    );
     this.ramp(this.limComp.threshold, params.limiter.ceilingDb);
     this.ramp(this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
     this.ramp(this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
@@ -1246,6 +1382,41 @@ export class AudioEngine {
       );
     }
 
+    // ── AGC window gate: hold the leveller while the programme is steady ──
+    if (this.params?.agc.on && this.params.agc.windowDb > 0) {
+      const reading = this.windowGate.update(srcLevelDb, now);
+      this.agcSpreadDb = reading.spreadDb;
+      this.agcFrozen = reading.frozen;
+      if (reading.frozen) {
+        // leave the hold gain where the last unfrozen tick put it: that is
+        // the freeze. The compressor keeps running, muted, so the release is
+        // just a crossfade back to wherever it has since travelled.
+        this.ramp(this.agcWetOut.gain, 0, 0.02);
+      } else {
+        const reduction = this.agcComp.reduction ?? 0;
+        this.agcHoldGainDb = this.params.agc.makeupDb + reduction;
+        this.ramp(this.agcHold.gain, dbToGain(this.agcHoldGainDb), 0.02);
+        this.ramp(this.agcWetOut.gain, 1, 0.02);
+      }
+    } else if (this.agcFrozen) {
+      this.agcFrozen = false;
+      this.agcSpreadDb = 0;
+      this.windowGate.reset();
+      this.ramp(this.agcHold.gain, 0, 0.02);
+      this.ramp(this.agcWetOut.gain, 1, 0.02);
+    }
+
+    // ── de-esser: control-rate cut over the sibilance band ──
+    if (this.params?.deess.on && this.deessDet) {
+      const over = Math.max(0, -(this.deessDet.reduction || 0));
+      const cut = Math.min(this.params.deess.maxCutDb, over);
+      this.deessCutDb = cut;
+      this.ramp(this.deessSub.gain, deessAlpha(cut), 0.006);
+    } else if (this.deessCutDb !== 0) {
+      this.deessCutDb = 0;
+      this.ramp(this.deessSub?.gain, 0, 0.01);
+    }
+
     // output peaks + true peak + correlation
     this.outAnalyserL.getFloatTimeDomainData(this.ksBufL);
     this.outAnalyserR.getFloatTimeDomainData(this.ksBufR);
@@ -1362,6 +1533,8 @@ export class AudioEngine {
         agc: grOf(this.agcComp),
         limiter: grOf(this.limComp),
       },
+      agcWindow: { frozen: this.agcFrozen, spreadDb: this.agcSpreadDb },
+      deessCut: this.deessCutDb,
       riderDb: this.riderDb,
       perf: {
         baseLatencyMs: (ctx.baseLatency ?? 0) * 1000,

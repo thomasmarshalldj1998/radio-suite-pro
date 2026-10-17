@@ -76,6 +76,37 @@ bun scripts/verify-studio-dsp.ts     # morph, de-clipper curve, loudness gating,
 bun scripts/verify-studio-engine.ts  # headless graph build + a finite measurement frame
 ```
 
+## Broadcast processing tools
+
+The console chain (`src/lib/audio/engine.ts`, surfaced in `ProcessingTab`,
+`InputTab` and the meter bridge) carries four operator tools on top of the
+EQ → AGC → multiband → limiter chain. Their control maths is pure and lives
+in `src/lib/audio/tools.ts`, so it is verified without a browser:
+`bun scripts/verify-core-tools.ts`.
+
+- **Window gate (AGC)** — `agc.windowDb`, 0–9 dB (0 = off). While the
+  programme's peak-to-trough spread over the last 1.5 s stays inside the
+  window, the AGC gain is held instead of re-ridden, so quiet intros and
+  speech pauses cannot pump the noise floor up. A 35 % release band stops it
+  chattering on a level that sits on the edge. The AGC card shows a **Hold**
+  badge while the gain is frozen.
+- **Phase rotator (allpass)** — `phase.on`. Four staggered allpass stages
+  (0.5× / 0.75× / 1× / 1.5× of the tuning frequency, 150/225/300/450 Hz at the
+  voice default) rotate phase without touching magnitude, making
+  asymmetrical vocal waveforms symmetrical so the limiter meets the same peak
+  from either polarity. Toggle it from the input stage or the preamp strip in
+  `InputTab`.
+- **Less–More density macro** — `density`, 1–10 (5 = neutral). One control
+  scales every multiband ratio (×0.68…×1.4), their attack/release times
+  (×1.28…×0.65) and the drive into the final limiter (−1.2…+1.5 dB). The
+  limiter ceiling never moves, so "more" raises average density without
+  spending true-peak headroom. It lives on the meter bridge, always visible.
+- **De-esser** — `deess`, a dynamic band cut ahead of the limiter. Tuning is
+  clamped to 6–10 kHz (default 7.5 kHz); a fast detector (1 ms attack, 60 ms
+  release) subtracts up to `maxCutDb` of the band, so sibilance is tamed
+  before the final stage sees it rather than after it has already squashed
+  the programme.
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with

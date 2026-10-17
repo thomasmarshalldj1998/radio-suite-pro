@@ -1,10 +1,11 @@
 /**
  * Processor parameter model for the Signalpath broadcast chain:
  *
- *   input gain → HPF → 6-band EQ → dynamic EQ (3 subtractive bands) →
- *   program AGC (pre-multiband leveller) → 6-band multiband compressor
- *   (LR4 crossovers) → composite limiter (fast peak stage + per-sample
- *   ceiling guard) → output gain → (monitor + encoder send)
+ *   input gain → HPF → phase rotator (4-stage allpass) → 6-band EQ →
+ *   dynamic EQ (3 subtractive bands) → program AGC (window-gated leveller)
+ *   → 6-band multiband compressor (LR4 crossovers, Less–More macro) →
+ *   de-esser (dynamic 6–10 kHz) → composite limiter (fast peak stage +
+ *   per-sample ceiling guard) → output gain → (monitor + encoder send)
  *
  * The FM branch taps the program bus after the chain and builds the
  * composite (MPX) signal for an FM exciter: pre-emphasis → 15 kHz brickwall
@@ -24,6 +25,23 @@ export interface BandCompParams {
   attackMs: number;
   releaseMs: number;
   makeupDb: number;
+}
+
+/**
+ * High-frequency de-esser: a dynamic cut over a broad band inside 6–10 kHz,
+ * placed ahead of the limiter so sibilance is tamed before it drives the
+ * final stage instead of after it has already squashed the programme.
+ */
+export interface DeessParams {
+  on: boolean;
+  /** Centre of the detection band (Hz) — 6 kHz … 10 kHz. */
+  freqHz: number;
+  /** HF level at which the cut starts (dBFS). */
+  thresholdDb: number;
+  /** Deepest cut the band may apply (dB). */
+  maxCutDb: number;
+  attackMs: number;
+  releaseMs: number;
 }
 
 /** One dynamic-EQ band: cut the band (up to maxCutDb) when it exceeds threshold. */
@@ -130,8 +148,13 @@ export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
 export interface ProcessorParams {
   inputGainDb: number;
   hpf: { on: boolean; freqHz: number };
-  /** Phase rotation (allpass): auto = fixed voice window, manual = user freq. */
-  phase: { mode: "auto" | "manual"; freqHz: number };
+  /**
+   * Phase rotation: a 4-stage allpass cascade (staggered around the tuning
+   * frequency) that makes asymmetrical speech waveforms symmetrical so the
+   * limiter meets the same peak from either polarity.
+   * auto = fixed voice window, manual = user frequency.
+   */
+  phase: { on: boolean; mode: "auto" | "manual"; freqHz: number };
   /** Input-stage silence gate (close below threshold, hold, reopen). */
   gate: { on: boolean; thresholdDb: number; holdMs: number };
   eq: { on: boolean; bands: EqBand[] };
@@ -149,7 +172,22 @@ export interface ProcessorParams {
     attackMs: number;
     releaseMs: number;
     makeupDb: number;
+    /**
+     * Window gate: while the programme's level spread over the last 1.5 s
+     * stays inside this many dB, the AGC gain is held rather than re-ridden,
+     * so quiet intros and speech pauses do not pump the noise floor.
+     * 0 = off.
+     */
+    windowDb: number;
   };
+  /** High-frequency dynamic de-esser ahead of the limiter. */
+  deess: DeessParams;
+  /**
+   * Less–More master density macro, 1 (open, dynamic) … 10 (dense, loud).
+   * One control scales multiband ratios, their attack/release and the drive
+   * into the final limiter together.
+   */
+  density: number;
   limiter: {
     on: boolean;
     ceilingDb: number;
@@ -209,7 +247,7 @@ export const OMNIA_SPLITS: MultibandSplits = [180, 1000, 3300, 6500, 12000];
 export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
   hpf: { on: true, freqHz: 80 },
-  phase: { mode: "auto", freqHz: 300 },
+  phase: { on: true, mode: "auto", freqHz: 300 },
   gate: { on: true, thresholdDb: -52, holdMs: 1500 },
   eq: {
     on: true,
@@ -252,7 +290,17 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     attackMs: 15,
     releaseMs: 400,
     makeupDb: 4,
+    windowDb: 0,
   },
+  deess: {
+    on: true,
+    freqHz: 7500,
+    thresholdDb: -26,
+    maxCutDb: 6,
+    attackMs: 1,
+    releaseMs: 60,
+  },
+  density: 5,
   limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
   stereo: { width: 1 },
   exciter: { on: false, mix: 3, freqHz: 3200 },
@@ -299,7 +347,21 @@ export interface BuiltinPreset {
   params: ProcessorParams;
 }
 
-const merge = (patch: Partial<ProcessorParams>): ProcessorParams =>
+/**
+ * Presets patch a chain section (e.g. only the AGC fields they retune) and
+ * let the rest fall back to the defaults, so the patch type has to be deep:
+ * a shallow Partial would demand every field of every nested block and force
+ * all ~40 presets to be rewritten whenever a control is added.
+ */
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends readonly unknown[]
+    ? T[K]
+    : T[K] extends object
+      ? DeepPartial<T[K]>
+      : T[K];
+};
+
+const merge = (patch: DeepPartial<ProcessorParams>): ProcessorParams =>
   coerceParams({ ...structuredClone(DEFAULT_PARAMS), ...patch });
 
 /**

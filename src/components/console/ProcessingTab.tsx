@@ -443,23 +443,29 @@ export function ProcessingTab({
             </CtrlRow>
             <CtrlRow label="Phase rot">
               <Seg
-                ariaLabel="Phase rotation"
-                value={params.phase.mode}
+                ariaLabel="Phase rotator — 4-stage allpass cascade"
+                value={!params.phase.on ? "bypass" : params.phase.mode}
                 options={[
                   { value: "auto", label: "Auto" },
                   { value: "manual", label: "Manual" },
+                  { value: "bypass", label: "Bypass" },
                 ]}
                 onChange={(v) =>
                   setParams((p) => ({
                     ...p,
-                    phase: { ...p.phase, mode: v as "auto" | "manual" },
+                    phase:
+                      v === "bypass"
+                        ? { ...p.phase, on: false }
+                        : { ...p.phase, on: true, mode: v as "auto" | "manual" },
                   }))
                 }
               />
               <Val>
-                {params.phase.mode === "auto"
-                  ? "300 Hz voice"
-                  : formatHz(params.phase.freqHz)}
+                {!params.phase.on
+                  ? "bypassed"
+                  : params.phase.mode === "auto"
+                    ? "300 Hz · 4 stages"
+                    : `${formatHz(params.phase.freqHz)} · 4 stages`}
               </Val>
             </CtrlRow>
             <CtrlRow label="Gate">
@@ -679,6 +685,28 @@ export function ProcessingTab({
               />
               <Val>{secs(params.agc.releaseMs)}</Val>
             </CtrlRow>
+            <CtrlRow label="Window">
+              <SliderRow
+                min={0}
+                max={9}
+                step={0.5}
+                value={params.agc.windowDb}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, agc: { ...p.agc, windowDb: v } }))
+                }
+                label="AGC window gate"
+              />
+              <Val>
+                {params.agc.windowDb > 0
+                  ? `±${(params.agc.windowDb / 2).toFixed(1)} dB`
+                  : "off"}
+              </Val>
+              {snap?.powered && snap.agcWindow.frozen && (
+                <span className="rounded border border-signal/40 bg-signal/10 px-1.5 py-0.5 text-[9px] font-bold tracking-[0.1em] text-signal uppercase">
+                  Hold
+                </span>
+              )}
+            </CtrlRow>
             <CtrlRow label="Target">
               <SliderRow
                 min={-32}
@@ -851,9 +879,100 @@ export function ProcessingTab({
         )}
         {section === "limiter" && (
           <>
-        {/* 05 — composite limiter */}
+        {/* 05 — de-esser, ahead of the limiter */}
         <ChainBlock
           index={5}
+          title="De-esser"
+          subtitle="Dynamic sibilance control · 6–10 kHz"
+          enabled={params.deess.on}
+          onToggle={() =>
+            setParams((p) => ({
+              ...p,
+              deess: { ...p.deess, on: !p.deess.on },
+            }))
+          }
+          gr={{ label: "DE-ESS", get: () => getEngine().snapshot().deessCut }}
+          right={
+            <span className="text-readout text-[10px] text-panel-mut">
+              {formatHz(params.deess.freqHz)}
+            </span>
+          }
+        >
+          <div className="divide-y divide-border/60 rounded border border-border/60">
+            <CtrlRow label="Tune">
+              <SliderRow
+                min={6000}
+                max={10000}
+                step={250}
+                value={params.deess.freqHz}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, deess: { ...p.deess, freqHz: v } }))
+                }
+                label="De-esser frequency"
+              />
+              <Val>{formatHz(params.deess.freqHz)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Depth">
+              <SliderRow
+                min={0}
+                max={12}
+                step={0.5}
+                value={params.deess.maxCutDb}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, deess: { ...p.deess, maxCutDb: v } }))
+                }
+                label="Maximum de-esser cut"
+              />
+              <Val>−{params.deess.maxCutDb.toFixed(1)} dB</Val>
+            </CtrlRow>
+            <CtrlRow label="Thr">
+              <SliderRow
+                min={-40}
+                max={-6}
+                step={1}
+                value={params.deess.thresholdDb}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    deess: { ...p.deess, thresholdDb: v },
+                  }))
+                }
+                label="De-esser threshold"
+              />
+              <Val>{formatDb(params.deess.thresholdDb, 0)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Release">
+              <SliderRow
+                min={20}
+                max={200}
+                step={10}
+                value={params.deess.releaseMs}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    deess: { ...p.deess, releaseMs: v },
+                  }))
+                }
+                label="De-esser release"
+              />
+              <Val>{params.deess.releaseMs.toFixed(0)} ms</Val>
+            </CtrlRow>
+            <CtrlRow label="Cut">
+              <Val className={cn((snap?.deessCut ?? 0) > 0.1 && "text-signal")}>
+                {snap?.powered ? `−${(snap.deessCut ?? 0).toFixed(1)} dB` : "―"}
+              </Val>
+            </CtrlRow>
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+            A fast band detector cuts only the sibilance band, and it sits
+            ahead of the limiter so the final stage is never asked to absorb
+            esses it should not have seen.
+          </p>
+        </ChainBlock>
+
+        {/* 06 — composite limiter */}
+        <ChainBlock
+          index={6}
           title="Composite limit"
           subtitle="Pre-delay · clip stage · ceiling guard"
           enabled={params.limiter.on}
@@ -967,7 +1086,7 @@ export function ProcessingTab({
           <>
         {/* 06 — density & enhancement */}
         <ChainBlock
-          index={6}
+          index={7}
           title="Density & enhancement"
           subtitle="Harmonic exciter · mix"
           enabled={params.exciter.on}
@@ -1019,7 +1138,7 @@ export function ProcessingTab({
 
         {/* 07 — stereo image */}
         <ChainBlock
-          index={7}
+          index={8}
           title="Stereo image"
           subtitle="Width · correlation"
         >
@@ -1060,7 +1179,7 @@ export function ProcessingTab({
           <>
         {/* 08 — output & monitor */}
         <ChainBlock
-          index={8}
+          index={9}
           title="Output & monitor"
           subtitle="Trim · monitor · out meter"
         >

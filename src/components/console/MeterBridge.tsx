@@ -8,6 +8,7 @@ import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
 import { isConfigured, useOutputs } from "@/lib/audio/outputs";
 import type { ProcessorParams } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
+import { DENSITY_MAX, DENSITY_MIN, densityProfile } from "@/lib/audio/tools";
 import { cn } from "@/lib/utils";
 import { RotateCcw } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
@@ -121,11 +122,14 @@ export function MeterBridge({
   activePreset,
   dirty = false,
   onConfigureStream,
+  onDensity,
 }: {
   params: ProcessorParams;
   activePreset: string;
   dirty?: boolean;
   onConfigureStream?: () => void;
+  /** Less–More macro setter — one control over the whole density chain. */
+  onDensity: (value: number) => void;
 }) {
   const s = useBridgeSnapshot();
   const powered = s.powered;
@@ -440,6 +444,37 @@ export function MeterBridge({
                 ]}
                 onChange={(fall) => setCfg((c) => ({ ...c, fall }))}
               />
+            </div>
+          </div>
+
+          {/* ── Less–More master density macro ── */}
+          <div className="flex w-40 shrink-0 flex-col justify-center gap-1 rounded-lg border border-rack-line bg-white/[0.02] px-2.5 py-2">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[8px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
+                Less–More
+              </span>
+              <span className="text-readout text-[12px] leading-none font-semibold text-white">
+                {params.density}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={DENSITY_MIN}
+              max={DENSITY_MAX}
+              step={1}
+              value={params.density}
+              onChange={(e) => onDensity(Number(e.target.value))}
+              aria-label="Master density: 1 open, 10 dense"
+              aria-valuetext={`${params.density} of ${DENSITY_MAX} — ${densityProfile(params.density).label}`}
+              className="h-1.5 w-full cursor-pointer accent-[#22d3ee]"
+            />
+            <div className="flex items-center justify-between">
+              <span className="text-[8px] tracking-[0.1em] text-panel-mut uppercase">
+                Less · More
+              </span>
+              <span className="text-[8px] font-semibold tracking-[0.1em] text-signal uppercase">
+                {densityProfile(params.density).label}
+              </span>
             </div>
           </div>
 
