@@ -676,6 +676,29 @@ export default function Dashboard() {
     [engine, logSession],
   );
 
+  /**
+   * Cold boot: bring the graph up on load so the saved input/output devices
+   * initialise without hunting for Start. Silent on failure (autoplay policy
+   * may hold the context suspended until the first click) — the Start button
+   * path is unchanged, and any gesture resumes the context.
+   */
+  useEffect(() => {
+    // Deferred past first paint so the HUD renders before the graph build.
+    const boot = window.setTimeout(() => {
+      void startEngine();
+    }, 0);
+    const kick = () => {
+      void engine.ctx?.resume();
+    };
+    window.addEventListener("pointerdown", kick);
+    window.addEventListener("keydown", kick);
+    return () => {
+      window.clearTimeout(boot);
+      window.removeEventListener("pointerdown", kick);
+      window.removeEventListener("keydown", kick);
+    };
+  }, [engine, startEngine]);
+
   const stopEngine = useCallback(() => {
     if (powerBusyRef.current || !engine.powered) return;
     engine.powerOff();

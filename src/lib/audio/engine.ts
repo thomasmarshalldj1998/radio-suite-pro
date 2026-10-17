@@ -138,6 +138,9 @@ interface LufsPoint {
   ms: number;
 }
 
+/** Persisted I/O prefs: last input/output device + source. */
+const DEVICE_STORE = "signalpath.devices.v1";
+
 export class AudioEngine {
   ctx: AudioContext | null = null;
   powered = false;
@@ -306,6 +309,64 @@ export class AudioEngine {
 
   /* ── lifecycle ────────────────────────────────────────────────────────── */
 
+  constructor() {
+    this.loadDevicePrefs();
+  }
+
+  /** Last-used I/O + source survive restarts, so boot restores the rig. */
+  private loadDevicePrefs() {
+    try {
+      const raw = localStorage.getItem(DEVICE_STORE);
+      if (!raw) return;
+      const p = JSON.parse(raw) as Partial<{
+        input: string;
+        output: string;
+        source: SourceKind;
+      }>;
+      if (typeof p.input === "string") this.inputDeviceId = p.input;
+      if (typeof p.output === "string") this.outputDeviceId = p.output;
+      if (p.source === "mic" || p.source === "signal" || p.source === "file") {
+        this.sourceKind = p.source;
+      }
+    } catch {
+      /* fresh install or blocked storage — defaults stand */
+    }
+  }
+
+  private saveDevicePrefs() {
+    try {
+      localStorage.setItem(
+        DEVICE_STORE,
+        JSON.stringify({
+          input: this.inputDeviceId,
+          output: this.outputDeviceId,
+          source: this.sourceKind,
+        }),
+      );
+    } catch {
+      /* storage may be unavailable */
+    }
+  }
+
+  /**
+   * Cold-boot input: if the rig was left on mic and the OS permission is
+   * already granted, arm the saved device without prompting. Anything else
+   * (denied/prompt/unplugged) stays idle — boot must never throw a
+   * permission dialog at the operator.
+   */
+  private async autoInitInput(): Promise<void> {
+    if (this.sourceKind !== "mic") return;
+    if (this.micStatus === "on" || this.micStatus === "arming") return;
+    try {
+      const q = await navigator.permissions.query({
+        name: "microphone" as PermissionName,
+      });
+      if (q.state === "granted") await this.armMic();
+    } catch {
+      /* permissions API missing — leave idle for an explicit Arm press */
+    }
+  }
+
   async powerOn(): Promise<void> {
     this.resetLoudness();
     this.fadeToken += 1; // any pending power-off teardown is now stale
@@ -315,6 +376,7 @@ export class AudioEngine {
       this.openOutput();
       this.watchDevices();
       void this.applyOutputDevice();
+      void this.autoInitInput();
       this.startMeterLoop();
       this.notify();
       return;
@@ -324,6 +386,7 @@ export class AudioEngine {
     this.buildGraph(ctx);
     this.watchDevices();
     void this.applyOutputDevice();
+    void this.autoInitInput();
     if (this.params) this.apply(this.params);
     await ctx.resume();
     this.powered = true;
@@ -1031,6 +1094,7 @@ export class AudioEngine {
   setSource(kind: SourceKind) {
     if (!this.ctx) {
       this.sourceKind = kind;
+      this.saveDevicePrefs();
       this.notify();
       return;
     }
@@ -1043,6 +1107,7 @@ export class AudioEngine {
     window.setTimeout(() => {
       if (this.sourceToken !== token || !this.powered) return;
       this.sourceKind = kind;
+      this.saveDevicePrefs();
       this.stopSignal();
       this.pauseFile();
       if (kind === "signal") void this.startSignal();
@@ -1191,6 +1256,7 @@ export class AudioEngine {
   /** Switch inputs; re-arms live so the new device takes over immediately. */
   setInputDevice(id: string) {
     this.inputDeviceId = id;
+    this.saveDevicePrefs();
     if (this.micStatus === "on") {
       this.disarmMic();
       void this.armMic();
@@ -1202,6 +1268,7 @@ export class AudioEngine {
   /** Route the monitor bus to the chosen speakers/headphones. */
   setOutputDevice(id: string) {
     this.outputDeviceId = id;
+    this.saveDevicePrefs();
     void this.applyOutputDevice();
     this.notify();
   }
