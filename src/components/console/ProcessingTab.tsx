@@ -246,15 +246,20 @@ export type DspSection =
   | "output"
   | "stream";
 
-const DSP_SECTIONS: { id: DspSection; label: string }[] = [
-  { id: "preamp", label: "Preamp" },
-  { id: "agc", label: "AGC" },
-  { id: "eq", label: "EQ" },
-  { id: "stereo", label: "Stereo" },
-  { id: "multiband", label: "Multiband" },
-  { id: "limiter", label: "Limiter" },
-  { id: "output", label: "Output" },
-  { id: "stream", label: "Stream TX" },
+/** Tab groups mirror the signal path: shape → squeeze → deliver. */
+const DSP_SECTION_GROUPS: { id: DspSection; label: string }[][] = [
+  [
+    { id: "preamp", label: "Preamp" },
+    { id: "agc", label: "AGC" },
+    { id: "eq", label: "EQ" },
+    { id: "stereo", label: "Stereo" },
+  ],
+  [
+    { id: "multiband", label: "Multiband" },
+    { id: "limiter", label: "Limiter" },
+    { id: "output", label: "Output" },
+  ],
+  [{ id: "stream", label: "Stream TX" }],
 ];
 
 /**
@@ -318,26 +323,36 @@ export function ProcessingTab({
           aria-label="DSP sections"
           className="scrollbar-slim flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
         >
-          {DSP_SECTIONS.map((t) => {
-            const active = section === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => onSectionChange(t.id)}
-                className={cn(
-                  "shrink-0 cursor-pointer rounded-md px-3 py-2 text-[11px] font-bold tracking-[0.12em] uppercase transition-colors",
-                  active
-                    ? "bg-cyan-400/15 text-cyan-300 shadow-[inset_0_-2px_0_0_#22d3ee]"
-                    : "text-rack-mut hover:bg-white/5 hover:text-rack-fg",
-                )}
-              >
-                {t.label}
-              </button>
-            );
-          })}
+          {DSP_SECTION_GROUPS.map((group, gi) => (
+            <span key={gi} className="flex shrink-0 items-center gap-1">
+              {gi > 0 && (
+                <span
+                  aria-hidden
+                  className="mx-1.5 h-5 w-px shrink-0 bg-rack-line"
+                />
+              )}
+              {group.map((t) => {
+                const active = section === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => onSectionChange(t.id)}
+                    className={cn(
+                      "shrink-0 cursor-pointer rounded-md px-3 py-2 text-[11px] tracking-[0.12em] uppercase transition-colors",
+                      active
+                        ? "bg-signal/15 font-extrabold text-signal shadow-[inset_0_-2px_0_0_var(--color-signal)]"
+                        : "font-semibold text-rack-mut hover:bg-white/5 hover:text-rack-fg",
+                    )}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </span>
+          ))}
         </div>
         <span className="ml-auto flex items-center gap-2 pl-3">
           {compare && (

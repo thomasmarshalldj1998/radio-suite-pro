@@ -29,22 +29,33 @@ export function Seg<T extends string>({
         className,
       )}
     >
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          aria-pressed={value === o.value}
-          className={cn(
-            "px-2 py-1 text-[10px] leading-4 font-semibold tracking-[0.08em] uppercase transition-colors",
-            value === o.value
-              ? "bg-signal text-signal-fg"
-              : "text-muted-foreground hover:bg-accent hover:text-foreground",
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
+      {options.map((o) => {
+        const on = value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => onChange(o.value)}
+            aria-pressed={on}
+            className={cn(
+              "flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] leading-4 font-semibold tracking-[0.08em] uppercase transition-colors",
+              on
+                ? "bg-signal text-signal-fg"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
+            )}
+          >
+            {/* state dot: selected reads without colour alone */}
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 rounded-full",
+                on ? "bg-white" : "bg-current opacity-30",
+              )}
+            />
+            {o.label}
+          </button>
+        );
+      })}
     </span>
   );
 }
@@ -75,6 +86,25 @@ export function CtrlRow({
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1.5 sm:justify-end">
         {children}
       </div>
+    </div>
+  );
+}
+
+/* ── section heading — bold rule-separated header, never a plain row ────── */
+
+export function SectionHead({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex items-center gap-3 px-3 pt-3 pb-1", className)}>
+      <span className="text-[10px] font-bold tracking-[0.16em] text-foreground/90 uppercase">
+        {children}
+      </span>
+      <span aria-hidden className="h-px flex-1 bg-border/70" />
     </div>
   );
 }

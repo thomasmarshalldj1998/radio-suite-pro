@@ -2,7 +2,7 @@ import type { SignalMode, SourceKind } from "@/lib/audio/engine";
 import { getEngine } from "@/lib/audio/engine";
 import type { ProcessorParams } from "@/lib/audio/params";
 import { formatTime } from "@/lib/audio/params";
-import { CtrlRow, Seg, Val } from "@/components/console/controls";
+import { CtrlRow, SectionHead, Seg, Val } from "@/components/console/controls";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -322,7 +322,8 @@ export function SourceModule({
       </div>
 
       {/* control strip */}
-      <div className="mt-3 divide-y divide-border/60 rounded border border-border/60 bg-card">
+      <SectionHead className="px-0 pt-1">Input stage</SectionHead>
+      <div className="mt-1 divide-y divide-border/60 rounded-lg border border-border/60 bg-card">
         <CtrlRow label="Input trim">
           <Slider
             className="w-40"

@@ -453,8 +453,13 @@ export function MeterBridge({
               <span className="text-[8px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
                 Less–More
               </span>
-              <span className="text-readout text-[12px] leading-none font-semibold text-white">
-                {params.density}
+              <span className="flex items-baseline gap-1.5">
+                <span className="text-[8px] font-bold tracking-[0.1em] text-signal uppercase">
+                  {densityProfile(params.density).label}
+                </span>
+                <span className="text-readout text-[12px] leading-none font-bold text-white">
+                  {params.density}
+                </span>
               </span>
             </div>
             <input
@@ -468,12 +473,15 @@ export function MeterBridge({
               aria-valuetext={`${params.density} of ${DENSITY_MAX} — ${densityProfile(params.density).label}`}
               className="h-1.5 w-full cursor-pointer accent-[#22d3ee]"
             />
-            <div className="flex items-center justify-between">
-              <span className="text-[8px] tracking-[0.1em] text-panel-mut uppercase">
-                Less · More
+            <div
+              className="flex items-center justify-between"
+              aria-hidden
+            >
+              <span className="text-[8px] font-semibold tracking-[0.1em] text-panel-mut uppercase">
+                Less
               </span>
-              <span className="text-[8px] font-semibold tracking-[0.1em] text-signal uppercase">
-                {densityProfile(params.density).label}
+              <span className="text-[8px] font-semibold tracking-[0.1em] text-panel-mut uppercase">
+                More
               </span>
             </div>
           </div>
@@ -481,7 +489,7 @@ export function MeterBridge({
           {/* ── station status cluster ── */}
           <div className="flex w-44 shrink-0 flex-col justify-center gap-1.5 rounded-lg border border-rack-line bg-white/[0.02] px-2.5 py-2">
             <p
-              className="truncate text-[11px] leading-4 font-semibold text-white"
+              className="truncate text-[12px] leading-4 font-bold text-white"
               title={activePreset}
             >
               {activePreset}
@@ -490,13 +498,18 @@ export function MeterBridge({
             <p
               className={cn(
                 "flex items-center gap-1.5 text-[9px] font-bold tracking-[0.12em] uppercase",
-                rt.onAir ? "text-[#ff3b30]" : "text-panel-mut",
+                rt.onAir
+                  ? "text-[#ff3b30]"
+                  : configuredIdx >= 0
+                    ? "text-panel-mut"
+                    : "text-meter-warn",
               )}
             >
               <span
                 className={cn(
                   "led size-1.5",
                   rt.onAir && "led-hot animate-pulse-live",
+                  !rt.onAir && configuredIdx < 0 && "led-warn",
                 )}
                 aria-hidden
               />
@@ -504,13 +517,13 @@ export function MeterBridge({
                 ? `${rt.kbps.toFixed(1)} kbps on air`
                 : configuredIdx >= 0
                   ? "TX ready"
-                  : "No output"}
+                  : "⚠ No output"}
             </p>
             {!rt.onAir && onConfigureStream && (
               <button
                 type="button"
                 onClick={onConfigureStream}
-                className="cursor-pointer rounded border border-signal/40 bg-signal/10 px-2 py-1 text-left text-[9px] font-bold tracking-[0.12em] text-signal uppercase transition-colors hover:bg-signal/20"
+                className="h-8 cursor-pointer rounded-md border border-signal/40 bg-signal/10 px-3 text-left text-[9px] font-bold tracking-[0.12em] text-signal uppercase transition-colors hover:bg-signal/20"
               >
                 Configure stream
               </button>

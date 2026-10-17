@@ -56,6 +56,7 @@ import {
   RotateCcw,
   SlidersHorizontal,
   Sparkles,
+  TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -789,7 +790,7 @@ export default function Dashboard() {
               <p className="flex min-w-0 items-center justify-center gap-2 text-lg leading-6 font-semibold text-white">
                 <span className="truncate">{activePreset}</span>
                 {dirty && (
-                  <span className="shrink-0 rounded border border-amber-led/40 bg-amber-led/10 px-1.5 py-0.5 text-[8px] font-bold tracking-[0.12em] text-amber-led uppercase">
+                  <span className="shrink-0 rounded-md border border-amber-led/40 bg-amber-led/10 px-2 py-1 text-[9px] font-bold tracking-[0.12em] text-amber-led uppercase">
                     Modified
                   </span>
                 )}
@@ -828,6 +829,9 @@ export default function Dashboard() {
                   )}
                   aria-hidden
                 />
+                {hud.alarm && (
+                  <TriangleAlert className="size-3.5" aria-hidden />
+                )}
                 {hud.alarm ? "Over limit" : hud.audioLive ? "Audio live" : "Running"}
                 <span className="hidden text-readout font-medium sm:inline">
                   {formatHms(hud.uptimeMs)}
@@ -854,7 +858,7 @@ export default function Dashboard() {
                 onClick={() => void startEngine("start")}
                 disabled={powerBusy}
                 aria-label="Start the audio engine"
-                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-semibold tracking-[0.1em] uppercase sm:px-3"
+                className="h-9 cursor-pointer gap-1.5 border-signal bg-signal px-2.5 text-[11px] font-bold tracking-[0.1em] text-white uppercase shadow-[0_0_18px_rgba(91,156,240,0.4)] hover:bg-signal-strong sm:px-3"
               >
                 <Power className="size-3.5" />
                 {/* phones keep the transport on one row — icon + short label */}
@@ -875,7 +879,7 @@ export default function Dashboard() {
                 disabled={powerBusy}
                 title="Stop and start the audio engine"
                 aria-label="Restart the audio engine"
-                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-semibold tracking-[0.1em] uppercase sm:px-3"
+                className="h-9 cursor-pointer gap-1.5 border-rack-line px-2.5 text-[11px] font-semibold tracking-[0.1em] text-rack-mut uppercase hover:text-rack-fg sm:px-3"
               >
                 <RotateCcw className="size-3.5" />
                 <span className="hidden sm:inline">Restart</span>
@@ -893,37 +897,40 @@ export default function Dashboard() {
               <Activity className="size-4" />
             </Button>
 
-            {/* CPU + uptime + clock (desktop) */}
-            <span className="hidden flex-col gap-1 xl:flex">
-              <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
-                CPU
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="block h-1.5 w-12 overflow-hidden rounded-full bg-input">
-                  <span
-                    className="block h-full rounded-full bg-signal transition-[width] duration-500"
-                    style={{ width: `${hud.cpu ?? 0}%` }}
-                  />
+            {/* CPU · uptime · system — one grouped cluster, values over labels */}
+            <span className="hidden items-center gap-4 rounded-lg border border-rack-line bg-white/[0.02] px-3 py-1.5 lg:flex">
+              <span className="hidden flex-col gap-1 xl:flex">
+                <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
+                  CPU
                 </span>
-                <span className="text-readout text-[11px] text-white">
-                  {hud.cpu === null ? "––" : String(hud.cpu).padStart(2, "0")}%
+                <span className="flex items-center gap-1.5">
+                  <span className="block h-1.5 w-12 overflow-hidden rounded-full bg-input">
+                    <span
+                      className="block h-full rounded-full bg-signal transition-[width] duration-500"
+                      style={{ width: `${hud.cpu ?? 0}%` }}
+                    />
+                  </span>
+                  <span className="text-readout text-[12px] font-semibold text-white">
+                    {hud.cpu === null ? "––" : String(hud.cpu).padStart(2, "0")}
+                    %
+                  </span>
                 </span>
               </span>
-            </span>
-            <span className="hidden flex-col gap-1 xl:flex">
-              <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
-                Uptime
+              <span className="hidden flex-col gap-1 xl:flex">
+                <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
+                  Uptime
+                </span>
+                <span className="text-readout text-[12px] font-semibold text-white">
+                  {formatHms(hud.uptimeMs)}
+                </span>
               </span>
-              <span className="text-readout text-[11px] text-white">
-                {formatHms(hud.uptimeMs)}
-              </span>
-            </span>
-            <span className="hidden flex-col gap-1 lg:flex">
-              <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
-                System
-              </span>
-              <span className="text-readout text-[11px] text-white">
-                {hud.clock}
+              <span className="flex flex-col gap-1">
+                <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
+                  System
+                </span>
+                <span className="text-readout text-[12px] font-semibold text-white">
+                  {hud.clock}
+                </span>
               </span>
             </span>
 
@@ -977,6 +984,7 @@ export default function Dashboard() {
           }
           activePreset={activePreset}
           dirty={dirty}
+          error={phase === "error" ? (engineError ?? "Engine failed to start") : null}
           top={headerH + 12}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
