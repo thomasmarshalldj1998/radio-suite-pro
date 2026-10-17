@@ -11,6 +11,11 @@ import {
   type BuiltinPreset,
   type ProcessorParams,
 } from "@/lib/audio/params";
+import {
+  CHARACTERS,
+  applyCharacter,
+  type CharacterId,
+} from "@/lib/audio/character";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -261,10 +266,61 @@ export function PresetPanel({
     toast.success(`Exported ${payload.presets.length} presets`);
   };
 
+  const [character, setCharacter] = useState<CharacterId | null>(null);
+  const applyCharacterCard = (id: CharacterId) => {
+    const def = CHARACTERS.find((c) => c.id === id);
+    if (!def) return;
+    setCharacter(id);
+    apply(coerceParams(applyCharacter(params, id)), `Character · ${def.name}`);
+  };
+
   return (
     <div className="grid gap-4 xl:grid-cols-12">
       {/* ── library ── */}
       <div className="space-y-4 xl:col-span-9">
+        {/* character face — one-word promises that reshape the live chain */}
+        <div className="panel rounded-xl p-4">
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-[10px] font-semibold tracking-[0.16em] text-panel-mut uppercase">
+              Character
+            </p>
+            <p className="text-[10px] text-panel-mut">
+              Reshapes dynamics + density — never volume
+            </p>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            {CHARACTERS.map((c) => {
+              const active = character === c.id;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => applyCharacterCard(c.id)}
+                  aria-pressed={active}
+                  title={c.description}
+                  className={cn(
+                    "rounded-lg border px-3 py-2.5 text-left transition-all",
+                    active
+                      ? "border-signal bg-signal/15 shadow-[0_0_16px_rgba(91,156,240,0.25)]"
+                      : "border-border/60 bg-muted/40 hover:border-signal/40 hover:bg-accent",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "block text-xs font-bold tracking-wide uppercase",
+                      active ? "text-signal" : "text-foreground",
+                    )}
+                  >
+                    {c.name}
+                  </span>
+                  <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                    {c.promise} · density {c.density}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         {/* active + actions */}
         <div className="card-layer flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card px-4 py-3">
           <div className="min-w-0">
