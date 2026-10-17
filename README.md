@@ -135,11 +135,11 @@ demodulates it back into programme material:
   57 kHz);
 - the 38 kHz difference signal is mixed down, filtered to 15 kHz and matrixed
   with the main channel into left and right;
--the 57 kHz data subcarrier is mixed down, biphase-sliced, differentially
-decoded and block-synchronised against the RDS (26,16) code, which yields
-PI, PTY, the programme service name and RadioText from the wire;
-RadioText Plus (11A) is decoded too, so the artist and title come back as
-their own fields rather than one string.
+- the 57 kHz data subcarrier is mixed down, biphase-sliced, differentially
+  decoded and block-synchronised against the RDS (26,16) code, which yields
+  PI, PTY, the programme service name and RadioText from the wire;
+- RadioText Plus (11A) is decoded too, so the artist and title come back as
+  their own fields rather than one string.
 
 Bit timing is not tracked with a loop. Both ends run off the same composite
 sample clock, so the symbol grid is exact; only the phase is unknown, and a

@@ -304,6 +304,12 @@ async function main(): Promise<void> {
   check(rds.pty === PTY, "PTY decoded", `${rds.pty}`);
   check(rds.ps.trim() === PS.trim(), "programme service name decoded", `"${rds.ps}"`);
   check(rds.psComplete, "all four PS segments arrived");
+  // the panel renders this as `pilot * 100` %, so it must come back in 0..1
+  check(
+    Math.abs(rds.pilot - 0.09) < 0.01,
+    "the recovered pilot is on the panel's fractional scale",
+    `${(rds.pilot * 100).toFixed(1)} % want 9.0 %`,
+  );
 
   console.log("\n3 · RadioText");
   check(rds.rt === RT, "RadioText decoded", `"${rds.rt}"`);
