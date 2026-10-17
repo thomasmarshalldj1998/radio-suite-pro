@@ -136,7 +136,13 @@ jobs:
               hard_missing=1
             fi
           done
-          exit $hard_missing
+          [ "$hard_missing" -eq 0 ] || exit 1
+
+          # The step name promises version checks, but until now it only
+          # proved the files existed. These checks fail the release when
+          # package.json and src/lib/version.ts disagree — 1.1.1 shipped
+          # stamped 1.0.0 exactly that way.
+          bun scripts/verify-version.ts
 
       # Self-healing fallback: if the committed Convex generated types are
       # absent or stale-incomplete, regenerate them in CI. Needs a Convex
@@ -175,6 +181,13 @@ jobs:
             fi
           done
           exit $missing
+
+      # Every suite in scripts/verify-*.ts — the DSP chain, the MPX link, the
+      # FM/RDS encoders and the console render path. Linux only: the logic is
+      # platform-independent, and the Windows/macOS runners are metered.
+      - name: Verify engine
+        if: runner.os == 'Linux'
+        run: bun run verify
 
       - name: Generate icon
         run: bun run desktop:icon
