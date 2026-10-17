@@ -39,7 +39,10 @@ class UdpEndpoint {
   constructor(options = {}) {
     this.onData = options.onData || null;
     this.onError = options.onError || null;
-    this.recvBufferBytes = options.recvBufferBytes || 4 * 1024 * 1024;
+    // 512 KiB is about 1.3 s of composite at 3.07 Mbit/s — enough to ride out
+    // a scheduling hiccup, small enough that the kernel cannot queue up a
+    // latency tail. A live link has no use for ten seconds of backlog.
+    this.recvBufferBytes = options.recvBufferBytes || 512 * 1024;
     /** @type {import("node:dgram").Socket | null} */
     this.socket = null;
     this.boundPort = 0;

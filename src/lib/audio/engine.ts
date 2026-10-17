@@ -18,6 +18,7 @@
  *                                  └─ K-weighted loudness (BS.1770, L/R)
  */
 
+import { GlitchMonitor } from "./glitch";
 import type { ProcessorParams } from "./params";
 import { DEFAULT_PARAMS, DEFAULT_SPLITS, dbToGain } from "./params";
 
@@ -57,6 +58,10 @@ export interface MeterSnapshot {
     frameMs: number;
     driftMs: number;
     throttled: boolean;
+    /** Starved render-thread episodes this session. */
+    stalls: number;
+    /** Epoch ms of the last stall report (0 = never). */
+    glitchAt: number;
   };
   clipIn: boolean;
   clipOut: boolean;
@@ -90,6 +95,8 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
     frameMs: 0,
     driftMs: 0,
     throttled: false,
+    stalls: 0,
+    glitchAt: 0,
   },
   clipIn: false,
   clipOut: false,
@@ -199,6 +206,11 @@ export class AudioEngine {
   private widthGain!: GainNode;
   // latency / stability telemetry
   lowLatency = false;
+  private glitch = new GlitchMonitor();
+  /** Invalidates a pending power-off fade when the engine is re-powered. */
+  private fadeToken = 0;
+  /** Invalidates a pending source switch when another one is requested. */
+  private sourceToken = 0;
   private frameCostMs = 0;
   private meterTick = 0;
   private driftMs = 0;
@@ -248,9 +260,11 @@ export class AudioEngine {
 
   async powerOn(): Promise<void> {
     this.resetLoudness();
+    this.fadeToken += 1; // any pending power-off teardown is now stale
     if (this.ctx) {
       await this.ctx.resume();
       this.powered = true;
+      this.openOutput();
       this.startMeterLoop();
       this.notify();
       return;
@@ -261,28 +275,55 @@ export class AudioEngine {
     if (this.params) this.apply(this.params);
     await ctx.resume();
     this.powered = true;
+    this.openOutput();
     this.setSource(this.sourceKind);
     this.startMeterLoop();
     this.notify();
   }
 
+  /** Fade the output bus in from silence — no click on power-up or resume. */
+  private openOutput() {
+    if (!this.ctx || !this.duckGain) return;
+    const now = this.ctx.currentTime;
+    const gain = this.duckGain.gain;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(0, now);
+    gain.setTargetAtTime(1, now, 0.008);
+  }
+
   powerOff() {
-    this.stopFile();
-    this.disarmMic();
-    this.stopSignal();
-    // the standby source never outlives the on-air chain
-    if (this.backupEl) this.backupEl.pause();
-    this.backupActiveFlag = false;
-    if (this.srcGain) this.srcGain.gain.value = 1;
-    if (this.backupGain) this.backupGain.gain.value = 0;
+    const ctx = this.ctx;
+    const token = ++this.fadeToken;
     this.cancelMeterLoop();
     this.powered = false;
     this.lufsPoints = [];
     this.snapshotValue = { ...SILENT_SNAPSHOT };
-    if (this.ctx) {
-      void this.ctx.suspend();
-    }
     this.notify();
+
+    const teardown = () => {
+      this.stopFile();
+      this.disarmMic();
+      this.stopSignal();
+      // the standby source never outlives the on-air chain
+      if (this.backupEl) this.backupEl.pause();
+      this.backupActiveFlag = false;
+      if (this.srcGain) this.srcGain.gain.value = 1;
+      if (this.backupGain) this.backupGain.gain.value = 0;
+      if (ctx && ctx.state !== "closed") void ctx.suspend();
+    };
+
+    // Suspend only after the bus has faded: stopping the graph at programme
+    // level is a click, and a click on the composite is audible on air.
+    if (ctx && ctx.state === "running" && this.duckGain) {
+      const now = ctx.currentTime;
+      this.duckGain.gain.cancelScheduledValues(now);
+      this.duckGain.gain.setTargetAtTime(0, now, 0.005);
+      window.setTimeout(() => {
+        if (this.fadeToken === token && !this.powered) teardown();
+      }, 45);
+    } else {
+      teardown();
+    }
   }
 
   dispose() {
@@ -305,6 +346,12 @@ export class AudioEngine {
   }
 
   private buildGraph(ctx: AudioContext) {
+    // A context suspended by the platform (sleep, device change, tab
+    // eviction) is a hard glitch. Resume it as soon as we are allowed to;
+    // a deliberate power-off sets `powered` false first, so it is not undone.
+    ctx.onstatechange = () => {
+      if (this.powered && ctx.state === "suspended") void ctx.resume();
+    };
     const g = (v = 1) => {
       const n = ctx.createGain();
       n.gain.value = v;
@@ -820,19 +867,38 @@ export class AudioEngine {
     this.duckGain.gain.setTargetAtTime(1, now + 0.45, 0.08);
   }
 
-  /* ── sources ──────────────────────────────────────────────────────────── */  setSource(kind: SourceKind) {
-    this.sourceKind = kind;
+  /* ── sources ──────────────────────────────────────────────────────────── */
 
+  /**
+   * Switch inputs behind a short fade. Cutting the old source while it is
+   * still at programme level is a click; the input bus is faded out, rebuilt,
+   * and faded back in 20 ms later.
+   */
+  setSource(kind: SourceKind) {
     if (!this.ctx) {
+      this.sourceKind = kind;
       this.notify();
       return;
     }
-    this.stopSignal();
-    this.pauseFile();
-    if (kind === "signal") void this.startSignal();
-    if (kind === "mic") void this.armMic();
-    if (kind === "file" && this.fileBuffer) this.playFile();
-    this.notify();
+    const ctx = this.ctx;
+    const token = ++this.sourceToken;
+    const gain = this.sourceBus.gain;
+    const now = ctx.currentTime;
+    gain.cancelScheduledValues(now);
+    gain.setTargetAtTime(0, now, 0.004);
+    window.setTimeout(() => {
+      if (this.sourceToken !== token || !this.powered) return;
+      this.sourceKind = kind;
+      this.stopSignal();
+      this.pauseFile();
+      if (kind === "signal") void this.startSignal();
+      if (kind === "mic") void this.armMic();
+      if (kind === "file" && this.fileBuffer) this.playFile();
+      const t = ctx.currentTime;
+      gain.cancelScheduledValues(t);
+      gain.setTargetAtTime(1, t, 0.006);
+      this.notify();
+    }, 20);
   }
 
   private async startSignal() {
@@ -1125,6 +1191,7 @@ export class AudioEngine {
         1000;
       this.driftMs =
         this.driftMs === 0 ? drift : this.driftMs * 0.7 + drift * 0.3;
+      this.glitch.update(this.driftMs, now);
       this.clockRefWall = now;
       this.clockRefCtx = ctx.currentTime;
     }
@@ -1302,6 +1369,8 @@ export class AudioEngine {
         frameMs: this.frameCostMs,
         driftMs: this.driftMs,
         throttled: this.frameCostMs > 4,
+        stalls: this.glitch.stalls,
+        glitchAt: this.glitch.lastStallAt,
       },
       clipIn: now < this.clipInUntil,
       clipOut: now < this.clipOutUntil,
@@ -1329,6 +1398,7 @@ export class AudioEngine {
     this.lastIBlockAt = 0;
     this.lastStBlockAt = 0;
     this.samplePeakDb = -120;
+    this.glitch.reset();
     this.notify();
   }
 

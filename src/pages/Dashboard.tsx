@@ -293,6 +293,8 @@ export default function Dashboard() {
   const poweredAtRef = useRef(0);
   const powerBusyRef = useRef(false);
   const alarmCondRef = useRef({ driftSince: 0, corrSince: 0, rdsStall: 0 });
+  /** Epoch ms of the last clock-stall alarm already reported. */
+  const glitchAtRef = useRef(0);
   const paramsRef = useRef(params);
   const openAlarmsRef = useRef(0);
   useEffect(() => {
@@ -393,6 +395,16 @@ export default function Dashboard() {
             "mod",
             "FM overmodulation",
             `Composite demand ${fmSnap.stats.modPct.toFixed(0)}% held over the ${fmSnap.stats.alarmPct}% threshold for 5 s`,
+          );
+        }
+
+        // ── audio-thread starvation: lost render time is lost audio ──
+        if (snap.perf.stalls > 0 && snap.perf.glitchAt > glitchAtRef.current) {
+          glitchAtRef.current = snap.perf.glitchAt;
+          fireAlarm(
+            "glitch",
+            "Audio thread starved",
+            `The graph lost ${Math.abs(snap.perf.driftMs).toFixed(1)} ms of audio per second — the render thread missed its deadline (${snap.perf.stalls} episode${snap.perf.stalls === 1 ? "" : "s"} this session)`,
           );
         }
 

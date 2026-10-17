@@ -59,6 +59,10 @@ export interface LinkHealth {
   concealed: number;
   /** Milliseconds since the newest packet arrived. */
   silentMs: number;
+  /** Current playout delay the buffer is aiming for, ms. */
+  targetMs: number;
+  /** Frames skipped to keep the buffer bounded (latency, not loss). */
+  dropped: number;
 }
 
 export interface SpliceEvent {
@@ -250,8 +254,30 @@ export class MpxPacketiser {
 /* ── receiver: jitter buffer ───────────────────────────────────────────── */
 
 export interface JitterBufferConfig {
-  /** Composite held before playout starts, ms — trades latency for loss cover. */
+  /**
+   * Fixed playout delay, ms — trades latency for loss cover. When
+   * `adaptive` is on this is only the starting value; the controller then
+   * tracks the measured jitter between `minTargetMs` and `maxTargetMs`.
+   */
   targetMs: number;
+  /** Track the network jitter instead of holding a fixed delay. */
+  adaptive: boolean;
+  /** Smallest playout delay the controller may settle on, ms. */
+  minTargetMs: number;
+  /** Largest playout delay the controller may use, ms. */
+  maxTargetMs: number;
+  /**
+   * Hard ceiling on buffered composite, ms. Past it the oldest frames are
+   * dropped — a live feed must never grow an unbounded latency tail.
+   * 0 disables the cap.
+   */
+  maxDepthMs: number;
+  /**
+   * A consumer that has not pulled for this long has stalled (tab hidden,
+   * panel closed); on return the backlog is trimmed instead of replayed.
+   * 0 disables stall detection.
+   */
+  stallMs: number;
   /** A forward gap this long is treated as loss and skipped, ms. */
   gapTimeoutMs: number;
   /** Repeat the previous payload over a gap instead of muting it. */
@@ -261,9 +287,19 @@ export interface JitterBufferConfig {
 
 const DEFAULT_JITTER: Omit<JitterBufferConfig, "sampleRate"> = {
   targetMs: 120,
+  adaptive: false,
+  minTargetMs: 40,
+  maxTargetMs: 200,
+  maxDepthMs: 0,
+  stallMs: 250,
   gapTimeoutMs: 200,
   conceal: true,
 };
+
+/** How much the playout target may fall per control step (ms). */
+const ADAPT_DECAY_MS = 2;
+/** Control rate for the playout-delay controller (ms). */
+const ADAPT_STEP_MS = 250;
 
 interface Held {
   packet: MpxPacket;
@@ -284,6 +320,10 @@ export class MpxJitterBuffer {
   private jitter = 0;
   private lastPayload: Uint8Array | null = null;
   private lastReleased: MpxPacket | null = null;
+  /** Current playout delay (ms) — adapted when the config asks for it. */
+  private playoutMs: number;
+  private lastAdaptAt = 0;
+  private lastPullAt = 0;
   /** Media step between frames, learned from the stream itself. */
   private stepSamples = MPX_LINK_FRAME_SAMPLES;
   private newestTimestamp = -1;
@@ -312,6 +352,7 @@ export class MpxJitterBuffer {
     this.now = now;
     const { sampleRate, ...rest } = config;
     this.config = { sampleRate, ...DEFAULT_JITTER, ...rest };
+    this.playoutMs = this.config.targetMs;
     this.stats.windowStart = now();
   }
 
@@ -351,6 +392,11 @@ export class MpxJitterBuffer {
       this.newestSeq = packet.sequence;
     }
     this.held.set(packet.sequence, { packet, arrival: now });
+    // hard ceiling: a link nobody is draining must not accumulate composite
+    if (this.config.maxDepthMs > 0 && this.held.size > 1) {
+      const depth = this.depthMs();
+      if (depth > this.config.maxDepthMs) this.dropOldest(this.config.maxDepthMs);
+    }
 
     // RFC 3550 interarrival jitter, from the timestamp clock
     const arrivalMs = now;
@@ -391,8 +437,11 @@ export class MpxJitterBuffer {
   }
 
   pull(): MpxPacket | null {
-    if (this.held.size === 0) return null;
     const now = this.now();
+    this.adapt(now);
+    this.catchUp(now);
+    this.lastPullAt = now;
+    if (this.held.size === 0) return null;
     if (this.expect < 0) {
       // start-up: reordering before the first release is normal, so the
       // playout origin is the oldest frame we actually hold
@@ -402,8 +451,8 @@ export class MpxJitterBuffer {
     }
     const next = this.held.get(this.expect);
     if (next) {
-      // hold until the configured playout delay has passed since it arrived
-      if (now - next.arrival < this.config.targetMs) return null;
+      // hold until the current playout delay has passed since it arrived
+      if (now - next.arrival < this.playoutMs) return null;
       this.held.delete(this.expect);
       this.expect = (this.expect + 1) >>> 0;
       this.lastPayload = next.packet.payload;
@@ -461,6 +510,88 @@ export class MpxJitterBuffer {
   }
 
   /**
+   * Move the playout delay with the measured jitter: rise at once when the
+   * network gets spikier, fall slowly (a few ms a second) when it settles, so
+   * latency drains instead of staying permanently inflated after a burst.
+   */
+  private adapt(now: number): void {
+    if (!this.config.adaptive) return;
+    if (now - this.lastAdaptAt < ADAPT_STEP_MS) return;
+    this.lastAdaptAt = now;
+    const frameMs = (this.stepSamples / this.config.sampleRate) * 1000;
+    const want = Math.min(
+      this.config.maxTargetMs,
+      Math.max(this.config.minTargetMs, this.jitter * 2.5 + frameMs * 3),
+    );
+    const next =
+      want > this.playoutMs
+        ? want
+        : Math.max(want, this.playoutMs - ADAPT_DECAY_MS);
+    this.playoutMs = Math.min(
+      this.config.maxTargetMs,
+      Math.max(this.config.minTargetMs, next),
+    );
+  }
+
+  /**
+   * A consumer that stopped pulling (hidden tab, closed panel) leaves frames
+   * behind it; replaying them would add seconds of latency to a live feed.
+   * The first pull after a stall drops down to the playout window instead.
+   */
+  private catchUp(now: number): void {
+    if (this.held.size === 0) return;
+    const stalled =
+      this.config.stallMs > 0 &&
+      this.lastPullAt > 0 &&
+      now - this.lastPullAt >= this.config.stallMs;
+    const limit = stalled
+      ? this.playoutMs
+      : this.playoutMs + Math.max(100, this.playoutMs);
+    if (this.depthMs() > limit) this.dropOldest(limit);
+  }
+
+  /**
+   * Drop the oldest held frames until the buffer spans at most `keepMs` of
+   * composite. The playout cursor follows the oldest frame that survived, so
+   * a trim never makes the receiver wait for a frame that is gone.
+   */
+  private dropOldest(keepMs: number): number {
+    if (this.held.size < 2) return 0;
+    let newest = -Infinity;
+    for (const { packet } of this.held.values()) {
+      if (packet.timestamp > newest) newest = packet.timestamp;
+    }
+    const ordered = [...this.held.entries()].sort(
+      (a, b) => a[1].packet.timestamp - b[1].packet.timestamp,
+    );
+    const from = this.expect;
+    let dropped = 0;
+    /** Deleted frames the playout cursor was still waiting for. */
+    let expected = 0;
+    for (const [seq, held] of ordered) {
+      if (this.held.size < 2) break;
+      const behind = ((newest - held.packet.timestamp) / this.config.sampleRate) * 1000;
+      if (behind <= keepMs) break;
+      if (from >= 0 && sequenceGap(from, seq) < 0x80000000) expected += 1;
+      this.held.delete(seq);
+      this.stats.dropped += 1;
+      dropped += 1;
+    }
+    if (dropped === 0) return 0;
+    const first = this.oldestHeld();
+    if (first && (this.expect < 0 || sequenceGap(this.expect, first[0]) < 0x80000000)) {
+      if (this.expect >= 0) {
+        // sequence numbers the cursor jumps over that never arrived are lost
+        // frames, not latency skips — keep the loss count honest
+        const missing = sequenceGap(this.expect, first[0]) - expected;
+        if (missing > 0) this.stats.lost += missing;
+      }
+      this.expect = first[0];
+    }
+    return dropped;
+  }
+
+  /**
    * Drop everything buffered beyond the playout target and start again from
    * the newest held packet — how a splice jumps onto a link that has been
    * running with its own backlog, without replaying old composite.
@@ -478,7 +609,7 @@ export class MpxJitterBuffer {
     const step = this.stepSamples > 0 ? this.stepSamples : MPX_LINK_FRAME_SAMPLES;
     const windowFrames = Math.max(
       1,
-      Math.round((this.config.targetMs / 1000) * this.config.sampleRate / step),
+      Math.round((this.playoutMs / 1000) * this.config.sampleRate / step),
     );
     let dropped = 0;
     for (const [seq] of [...this.held.entries()]) {
@@ -508,6 +639,9 @@ export class MpxJitterBuffer {
     this.newestSeq = -1;
     this.lastArrival = 0;
     this.firstArrival = 0;
+    this.lastAdaptAt = 0;
+    this.lastPullAt = 0;
+    this.playoutMs = this.config.targetMs;
   }
 
   /** Measured health of this link. */
@@ -527,6 +661,8 @@ export class MpxJitterBuffer {
       reordered: s.reordered,
       concealed: s.concealed,
       silentMs: this.lastArrival === 0 ? Infinity : this.now() - this.lastArrival,
+      targetMs: this.playoutMs,
+      dropped: s.dropped,
     };
   }
 
@@ -548,6 +684,14 @@ export class MpxJitterBuffer {
 
 export interface DualLinkConfig {
   targetMs: number;
+  /** Let each buffer track the measured jitter inside min/max bounds. */
+  adaptive: boolean;
+  minTargetMs: number;
+  maxTargetMs: number;
+  /** Hard ceiling on held composite per link, ms (0 = unbounded). */
+  maxDepthMs: number;
+  /** A consumer silent this long is caught up on return, ms. */
+  stallMs: number;
   gapTimeoutMs: number;
   conceal: boolean;
   sampleRate: number;
@@ -565,6 +709,11 @@ export interface DualLinkConfig {
 
 const DEFAULT_DUAL: DualLinkConfig = {
   targetMs: 120,
+  adaptive: false,
+  minTargetMs: 40,
+  maxTargetMs: 200,
+  maxDepthMs: 0,
+  stallMs: 250,
   gapTimeoutMs: 200,
   conceal: true,
   sampleRate: 192000,
@@ -622,6 +771,11 @@ export class MpxDualLink {
       new MpxJitterBuffer(now, {
         sampleRate: this.config.sampleRate,
         targetMs: this.config.targetMs,
+        adaptive: this.config.adaptive,
+        minTargetMs: this.config.minTargetMs,
+        maxTargetMs: this.config.maxTargetMs,
+        maxDepthMs: this.config.maxDepthMs,
+        stallMs: this.config.stallMs,
         gapTimeoutMs: this.config.gapTimeoutMs,
         conceal: this.config.conceal,
       });

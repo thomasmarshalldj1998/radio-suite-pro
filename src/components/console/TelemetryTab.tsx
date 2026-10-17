@@ -138,6 +138,10 @@ const ALARM_STYLE: Record<AlarmKind, { led: string; chip: string }> = {
     led: "led-hot",
     chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
   },
+  glitch: {
+    led: "led-hot",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
 };
 
 /* ── automatic tolerance alarms ────────────────────────────── */
@@ -148,7 +152,7 @@ function AlarmHistory() {
     <ModuleCard
       className="xl:col-span-12"
       title="Alarm history"
-      subtitle="Automatic tolerance watch · true peak · clipping · loudness drift · phase · FM deviation"
+      subtitle="Automatic tolerance watch · true peak · clipping · loudness drift · phase · FM deviation · clock stalls"
       right={
         events.length > 0 ? (
           <Button
@@ -516,7 +520,7 @@ export function TelemetryTab({
           </span>
         }
       >
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7">
           {[
             {
               label: "Base latency",
@@ -539,6 +543,11 @@ export function TelemetryTab({
                 ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(2)} ms/s`
                 : "—",
               sub: "negative = glitches",
+            },
+            {
+              label: "Clock stalls",
+              value: powered ? `${snap?.perf.stalls ?? 0}` : "—",
+              sub: "render underruns",
             },
             {
               label: "Guard profile",

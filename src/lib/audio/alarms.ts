@@ -26,7 +26,9 @@ export type AlarmKind =
   /** RDS data stale, PI unset or the subcarrier is unmodulated */
   | "rds"
   /** MPX-over-IP link degraded (loss, jitter, single link) */
-  | "link";
+  | "link"
+  /** audio thread starved — the graph fell behind real time */
+  | "glitch";
 
 /** Severity used when an alarm is written to the durable history. */
 export const ALARM_SEVERITY: Record<AlarmKind, "critical" | "warning" | "info"> = {
@@ -40,6 +42,7 @@ export const ALARM_SEVERITY: Record<AlarmKind, "critical" | "warning" | "info"> 
   pilot: "warning",
   rds: "warning",
   link: "warning",
+  glitch: "critical",
 };
 
 export interface AlarmEvent {
@@ -61,6 +64,7 @@ const COOLDOWN_MS: Record<AlarmKind, number> = {
   pilot: 60_000,
   rds: 120_000,
   link: 30_000,
+  glitch: 60_000,
 };
 
 const MAX_EVENTS = 50;
@@ -78,6 +82,7 @@ const lastFired: Record<AlarmKind, number> = {
   pilot: 0,
   rds: 0,
   link: 0,
+  glitch: 0,
 };
 
 const listeners = new Set<() => void>();

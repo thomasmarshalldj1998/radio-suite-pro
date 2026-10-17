@@ -47,6 +47,8 @@ function health(over: Partial<LinkHealth> = {}): LinkHealth {
     reordered: 0,
     concealed: 0,
     silentMs: 5,
+    targetMs: 120,
+    dropped: 0,
     ...over,
   };
 }

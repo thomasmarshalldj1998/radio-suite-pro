@@ -109,6 +109,21 @@ the splice to be running on its buffer, sustained loss or jitter on the serving
 path, and a receiver that never locks to RDS. Each is edge-triggered and the
 alarm store's per-kind cooldown stops a stuck fault from flooding the record.
 
+**Latency, not bufferbloat.** Each path's jitter buffer tracks the measured
+jitter instead of holding a fixed delay: it starts at 120 ms, rises at once
+when the network gets spikier, decays 8 ms/s once it settles, and is clamped to
+40–200 ms. No link may hold more than 240 ms of composite — past that the
+oldest frames are skipped and counted as *Skipped*, not as loss — and a
+consumer that went away for a moment is caught up to the live edge rather than
+replaying the backlog it missed. The receiver is drained on its own 100 ms
+timer, so closing the panel cannot let packets pile up, and the kernel receive
+buffer is requested at 512 KiB (about 1.3 s of composite) rather than a
+multi-second tail that would only ever add latency.
+
+```bash
+bun scripts/verify-bufferbloat.ts   # target adapts, ceiling holds, stall skips
+```
+
 **On compression.** The payload is uncompressed 16-bit PCM on purpose. A
 general-purpose compressor is the wrong tool here — measured with
 `CompressionStream("deflate-raw")` on a real composite frame it returns
@@ -158,6 +173,28 @@ each leg and a station name are generated into the composite, framed, sent over
 two real UDP paths, spliced, and then recovered by the decoder — with a
 quarter of path A removed, the receiver switches to B and the station name,
 RadioText and both tones come back at their original levels and separation.
+
+### Engine stability
+
+- the graph runs with `latencyHint: "interactive"`; base and output latency are
+  reported in **Telemetry → System health** beside the main-thread frame cost,
+  so a growing device buffer is visible rather than guessed at;
+- clock health is sampled once a second by comparing
+  `AudioContext.currentTime` with wall time. Two consecutive seconds more than
+  6 ms behind is a starved render thread: it is counted in **Clock stalls**,
+  fires a critical *Audio thread starved* alarm into the durable history, and
+  clears on the first healthy sample. A single bad second is deliberately not
+  an episode;
+- power-up fades the output bus in over ~8 ms and power-down fades it out
+  before the context is suspended, so the transition is not a click on air;
+- a context the platform suspends on its own (sleep, output-device change) is
+  resumed immediately while the chain is powered;
+- source changes go through the same 20 ms mute-fade, so switching input while
+  on air does not click.
+
+```bash
+bun scripts/verify-glitch.ts        # hold time, no chatter, recovery
+```
 
 ### Download links
 

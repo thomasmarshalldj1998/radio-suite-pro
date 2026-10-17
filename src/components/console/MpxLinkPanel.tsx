@@ -38,7 +38,6 @@ import {
   runLinkSelfTest,
   setReceiveMode,
   subscribeLink,
-  tickLink,
   type SelfTestReport,
 } from "@/lib/audio/mpxlink-runtime";
 import type { FmParams } from "@/lib/audio/params";
@@ -51,7 +50,7 @@ import {
   type UdpConfig,
 } from "@/lib/audio/udp";
 import { cn } from "@/lib/utils";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 /** Composite rate the link runs at, in kHz (192 kHz stereo composite mono sum). */
 const COMPOSITE_KHZ = 192;
@@ -265,10 +264,23 @@ function LinkRow({ label, health, live }: { label: string; health: LinkHealth; l
         <dt className="text-muted-foreground">Jitter</dt>
         <dd className="text-readout text-right">{health.received > 0 ? formatMs(health.jitterMs) : "—"}</dd>
         <dt className="text-muted-foreground">Buffer</dt>
-        <dd className="text-readout text-right">{health.received > 0 ? formatMs(health.depthMs) : "—"}</dd>
+        <dd className="text-readout text-right">
+          {health.received > 0 ? (
+            <>
+              {formatMs(health.depthMs)}{" "}
+              <span className="text-muted-foreground">/ {formatMs(health.targetMs)}</span>
+            </>
+          ) : (
+            "—"
+          )}
+        </dd>
         <dt className="text-muted-foreground">Concealed</dt>
         <dd className="text-readout text-right">
           {health.concealed} <span className="text-muted-foreground">of {health.received}</span>
+        </dd>
+        <dt className="text-muted-foreground">Skipped</dt>
+        <dd className="text-readout text-right">
+          {health.dropped}
         </dd>
       </dl>
     </div>
@@ -326,12 +338,8 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
     setDraft(toDraft(getUdp().config));
   };
 
-  // Receiver servo: drain the splice at a steady rate while receive mode runs.
-  useEffect(() => {
-    if (!link.armed || !link.receive) return;
-    const id = window.setInterval(() => tickLink(), 100);
-    return () => window.clearInterval(id);
-  }, [link.armed, link.receive]);
+  // The receiver is drained by the runtime's own timer whether or not this
+  // panel is mounted, so the store updates here without a local interval.
 
   const setCodec = (codec: MpxCodec | "off") => {
     if (codec === "off") {

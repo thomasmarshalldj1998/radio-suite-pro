@@ -89,7 +89,28 @@ const health0: LinkHealth = {
   reordered: 0,
   concealed: 0,
   silentMs: Infinity,
+  targetMs: 0,
+  dropped: 0,
 };
+
+/**
+ * How the live receiver is configured: the playout delay follows the measured
+ * jitter between a 40 ms floor and a 200 ms ceiling, and no link may ever hold
+ * more than 240 ms of composite. That is the bufferbloat contract — latency
+ * cannot grow past the ceiling and drains back to the floor when the network
+ * settles, even if nothing is pulling for a while.
+ */
+const LIVE_RECEIVER = {
+  sampleRate: COMPOSITE_RATE,
+  targetMs: 120,
+  adaptive: true,
+  minTargetMs: 40,
+  maxTargetMs: 200,
+  maxDepthMs: 240,
+  stallMs: 250,
+  silenceMs: 400,
+  holdMs: 500,
+} as const;
 
 let snapshot: LinkSnapshot = {
   armed: false,
@@ -121,6 +142,8 @@ let carryLength = 0;
 let decoder: CompositeDecoder | null = null;
 
 let lastEmit = 0;
+/** Own drain timer: the receiver must not depend on a panel being mounted. */
+let drainTimer: ReturnType<typeof setInterval> | null = null;
 
 function emit(): void {
   lastEmit = performance.now();
@@ -200,14 +223,10 @@ export function armLink(fm: FmParams | null, codec: MpxCodec = "raw"): void {
   if (fm) acquireStream(fm);
   sender = new MpxPacketiser(0, COMPOSITE_RATE, 1);
   decoder = new CompositeDecoder({ sampleRate: COMPOSITE_RATE });
-  receiver = new MpxDualLink(undefined, {
-    sampleRate: COMPOSITE_RATE,
-    targetMs: 120,
-    silenceMs: 400,
-    holdMs: 500,
-  });
+  receiver = new MpxDualLink(undefined, LIVE_RECEIVER);
   clearSplices();
   detach = subscribeComposite(pushComposite);
+  if (snapshot.receive) startDrain();
   emit();
 }
 
@@ -215,6 +234,7 @@ export function disarmLink(fm?: FmParams | null): void {
   detach?.();
   detach = null;
   sender = null;
+  stopDrain();
   // Drop the receiver too: with the link disarmed nothing drains it, and
   // inbound datagrams would pile up in its buffers.
   receiver = null;
@@ -236,16 +256,49 @@ export function disarmLink(fm?: FmParams | null): void {
 }
 
 export function setReceiveMode(on: boolean): void {
-  snapshot = { ...snapshot, receive: on };
+  snapshot = { ...snapshot, receive: on, content: on ? snapshot.content : null };
   if (on) decoder = new CompositeDecoder({ sampleRate: COMPOSITE_RATE });
   if (on && !receiver) {
-    receiver = new MpxDualLink(undefined, {
-      sampleRate: COMPOSITE_RATE,
-      targetMs: 120,
-      silenceMs: 400,
-      holdMs: 500,
-    });
+    receiver = new MpxDualLink(undefined, LIVE_RECEIVER);
   }
+  if (on) startDrain();
+  else stopDrain();
+  emit();
+}
+
+/**
+ * Pull the receiver on its own clock. The panel's interval used to be the only
+ * thing draining the link, so closing it let inbound packets pile up; this
+ * keeps the buffers flat whether or not anything is watching, and only pays
+ * the decoder's CPU while a panel is actually subscribed.
+ */
+function startDrain(): void {
+  if (drainTimer !== null) return;
+  drainTimer = setInterval(drainLink, 100);
+}
+
+function stopDrain(): void {
+  if (drainTimer === null) return;
+  clearInterval(drainTimer);
+  drainTimer = null;
+}
+
+function drainLink(): void {
+  if (!receiver || !snapshot.receive) return;
+  const decode = listeners.size > 0;
+  for (let i = 0; i < 256; i++) {
+    const packet = receiver.pull();
+    if (!packet) break;
+    if (decode) decoder?.process(toComposite(packet.payload));
+  }
+  snapshot = {
+    ...snapshot,
+    active: receiver.activeLink,
+    forced: receiver.forcedLink,
+    links: receiver.health(),
+    splices: getSplices().slice(0, 8),
+    content: decoder?.snapshot() ?? null,
+  };
   emit();
 }
 
@@ -320,21 +373,8 @@ function toComposite(payload: Uint8Array): Float32Array {
  * wire (or, in loopback, out of the local framer) rather than what was sent.
  */
 export function tickLink(): void {
-  if (!receiver || !snapshot.receive) return;
-  for (let i = 0; i < 64; i++) {
-    const packet = receiver.pull();
-    if (!packet) break;
-    decoder?.process(toComposite(packet.payload));
-  }
-  snapshot = {
-    ...snapshot,
-    active: receiver.activeLink,
-    forced: receiver.forcedLink,
-    links: receiver.health(),
-    splices: getSplices().slice(0, 8),
-    content: decoder?.snapshot() ?? null,
-  };
-  emit();
+  startDrain();
+  drainLink();
 }
 
 /**
