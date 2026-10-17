@@ -77,7 +77,10 @@ export const CHARACTERS: CharacterDef[] = [
       },
       deess: { ...b.deess, maxCutDb: 3 },
       exciter: { ...b.exciter, on: false },
-      stereo: { width: r2(clamp(Math.min(b.stereo.width, 1), 0, 2)) },
+      stereo: {
+        ...b.stereo,
+        width: r2(clamp(Math.min(b.stereo.width, 1), 0, 2)),
+      },
       limiter: { ...b.limiter, releaseMs: 150 },
     }),
   },
@@ -159,7 +162,10 @@ export const CHARACTERS: CharacterDef[] = [
       },
       deess: { ...b.deess, maxCutDb: 8 },
       exciter: { ...b.exciter, on: true, mix: r1(b.exciter.mix || 3.5) },
-      stereo: { width: r2(clamp(b.stereo.width * 1.1, 0, 1.5)) },
+      stereo: {
+        ...b.stereo,
+        width: r2(clamp(b.stereo.width * 1.1, 0, 1.5)),
+      },
       limiter: { ...b.limiter, releaseMs: 50 },
     }),
   },

@@ -194,8 +194,12 @@ export interface ProcessorParams {
     attackMs: number;
     releaseMs: number;
   };
-  /** M/S stereo width: 1 = neutral, >1 widens the side channel. */
-  stereo: { width: number };
+  /**
+   * M/S stereo image: width 1 = neutral, >1 widens the side channel;
+   * lowMonoHz folds the side channel to mono below the crossover so
+   * sub-bass stays centred (FM / club / phone safe). 0 = off.
+   */
+  stereo: { width: number; lowMonoHz: number };
   /** Parallel harmonic exciter (Aphex-style sweetening). */
   exciter: { on: boolean; mix: number; freqHz: number };
   /** FM transmission branch (pre-emphasis + MPX composite generator). */
@@ -302,7 +306,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   },
   density: 5,
   limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
-  stereo: { width: 1 },
+  stereo: { width: 1, lowMonoHz: 120 },
   exciter: { on: false, mix: 3, freqHz: 3200 },
   fm: {
     on: false,

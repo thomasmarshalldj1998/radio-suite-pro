@@ -1,5 +1,6 @@
 import { CompliancePanel } from "@/components/console/CompliancePanel";
 import { LogPanel } from "@/components/console/LogPanel";
+import { EngineChain } from "@/components/console/EngineChain";
 import { LoudnessHistory } from "@/components/console/LoudnessHistory";
 import { CorrelationMeter, LoudnessMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
@@ -295,6 +296,15 @@ export function TelemetryTab({
 
   return (
     <div className="grid gap-4 xl:grid-cols-12">
+      {/* ── engine chain overview ── */}
+      <ModuleCard
+        className="xl:col-span-12"
+        title="Engine chain"
+        subtitle="Live stages · bypass state · measured reduction only"
+      >
+        <EngineChain />
+      </ModuleCard>
+
       {/* ── compliance monitoring ── */}
       <ModuleCard
         className="xl:col-span-12"
@@ -335,9 +345,9 @@ export function TelemetryTab({
         <div className="mt-3">
           <p className="mb-1 flex items-center justify-between text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase">
             <span>Short-term loudness history</span>
-            <span className="text-readout">15 min window · 1 Hz</span>
+            <span className="text-readout">Mom · ST · Int · TP · GR · 5 Hz</span>
           </p>
-          <LoudnessHistory minutes={15} />
+          <LoudnessHistory />
         </div>
 
         <div className="mt-3 grid gap-2 sm:grid-cols-3">
@@ -520,7 +530,7 @@ export function TelemetryTab({
           </span>
         }
       >
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
           {[
             {
               label: "Base latency",
@@ -559,12 +569,62 @@ export function TelemetryTab({
               value: snap?.perf.throttled ? "adaptive · ½ rate" : "adaptive · full",
               sub: "self-tuning",
             },
+            {
+              label: "Clipping",
+              value: !powered
+                ? "—"
+                : snap?.clipIn || snap?.clipOut
+                  ? snap?.clipIn && snap?.clipOut
+                    ? "IN + OUT"
+                    : snap?.clipIn
+                      ? "INPUT"
+                      : "OUTPUT"
+                  : "NONE",
+              sub: "measured peaks",
+              tone:
+                !powered || (!snap?.clipIn && !snap?.clipOut)
+                  ? "ok"
+                  : "hot",
+            },
+            {
+              label: "Phase",
+              value: !powered
+                ? "—"
+                : corr < 0
+                  ? "CHECK"
+                  : corr < 0.5
+                    ? "WIDE"
+                    : "OK",
+              sub: `correlation ${corr.toFixed(2)}`,
+              tone: !powered ? undefined : corr < 0 ? "hot" : corr < 0.5 ? "warn" : "ok",
+            },
+            {
+              label: "Stream",
+              value: !rt.onAir
+                ? slots.some((s) => s.server || s.name)
+                  ? "READY"
+                  : "NO OUTPUT"
+                : `${rt.stats.kbps.toFixed(1)} kbps`,
+              sub: rt.onAir ? "on air" : "encoder state",
+              tone: rt.onAir
+                ? "ok"
+                : slots.some((s) => s.server || s.name)
+                  ? "warn"
+                  : "hot",
+            },
           ].map((s) => (
             <div key={s.label} className="panel-well rounded-md px-2.5 py-2">
               <p className="text-[9px] font-semibold tracking-[0.1em] text-panel-mut uppercase">
                 {s.label}
               </p>
-              <p className="text-readout mt-1 truncate text-[13px] font-medium text-white">
+              <p
+                className={cn(
+                  "text-readout mt-1 truncate text-[13px] font-medium text-white",
+                  (s as { tone?: string }).tone === "ok" && "text-meter-ok",
+                  (s as { tone?: string }).tone === "warn" && "text-meter-warn",
+                  (s as { tone?: string }).tone === "hot" && "text-meter-hot",
+                )}
+              >
                 {s.value}
               </p>
               <p className="mt-0.5 text-[8px] text-panel-mut">{s.sub}</p>

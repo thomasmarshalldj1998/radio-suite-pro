@@ -1177,26 +1177,80 @@ export function ProcessingTab({
               max={2}
               step={0.01}
               format={(v) => `×${v.toFixed(2)}`}
-              onChange={(v) => setParams((p) => ({ ...p, stereo: { width: v } }))}
-              onReset={() => setParams((p) => ({ ...p, stereo: { width: 1 } }))}
+              onChange={(v) =>
+                setParams((p) => ({ ...p, stereo: { ...p.stereo, width: v } }))
+              }
+              onReset={() =>
+                setParams((p) => ({ ...p, stereo: { ...p.stereo, width: 1 } }))
+              }
             />
           </div>
 
           <div className="panel-well mt-2 rounded px-2.5 py-1.5">
             <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-              Correlation
+              Correlation · L/R balance
             </p>
             <p className="text-readout mt-0.5 text-[11px] font-medium text-white">
               {(snap?.correlation ?? 1).toFixed(2)}
               <span className="ml-2 text-[9px] text-panel-mut">
+                L {snap == null || snap.outPeakL <= -99 ? "−∞" : snap.outPeakL.toFixed(1)} · R{" "}
+                {snap == null || snap.outPeakR <= -99 ? "−∞" : snap.outPeakR.toFixed(1)}
+              </span>
+            </p>
+            <p className="mt-1 flex items-center gap-1.5 text-[9px]">
+              <span
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[8px] font-bold tracking-[0.1em] uppercase",
+                  (snap?.correlation ?? 1) < 0
+                    ? "border-meter-hot/50 bg-meter-hot/10 text-meter-hot"
+                    : (snap?.correlation ?? 1) < 0.5
+                      ? "border-meter-warn/50 bg-meter-warn/10 text-meter-warn"
+                      : "border-meter-ok/40 bg-meter-ok/10 text-meter-ok",
+                )}
+              >
+                {(snap?.correlation ?? 1) < 0
+                  ? "Phase risk"
+                  : (snap?.correlation ?? 1) < 0.5
+                    ? "Wide"
+                    : "Mono safe"}
+              </span>
+              <span className="text-panel-mut">
                 {params.stereo.width > 1.4
                   ? "wide — watch multipath"
                   : params.stereo.width < 0.8
                     ? "collapsing toward mono"
-                    : "healthy"}
+                    : "measured on the output bus"}
               </span>
             </p>
           </div>
+
+          <div className="mt-2 divide-y divide-border/60 rounded-lg border border-border/60 bg-card">
+            <CtrlRow label="Low-end mono">
+              <Slider
+                className="w-28"
+                min={0}
+                max={300}
+                step={5}
+                value={[params.stereo.lowMonoHz]}
+                onValueChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    stereo: { ...p.stereo, lowMonoHz: v[0] },
+                  }))
+                }
+                aria-label="Low-end mono crossover"
+              />
+              <Val>
+                {params.stereo.lowMonoHz > 0
+                  ? `${params.stereo.lowMonoHz} Hz`
+                  : "Off"}
+              </Val>
+            </CtrlRow>
+          </div>
+          <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+            Bass below the crossover folds to mono — centred subs for FM,
+            clubs and phones. 0 Hz disables.
+          </p>
         </ChainBlock>
           </>
         )}

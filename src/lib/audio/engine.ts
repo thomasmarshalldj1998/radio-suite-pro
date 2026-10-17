@@ -239,6 +239,12 @@ export class AudioEngine {
   private widthDry!: GainNode;
   private widthWet!: GainNode;
   private widthGain!: GainNode;
+  /** Low-end mono: side highs pass, side lows fold back to centred. */
+  private sideDry!: GainNode;
+  private sideWet!: GainNode;
+  private sideLp!: BiquadFilterNode;
+  private sideLpNeg!: GainNode;
+  private sideWetInv!: GainNode;
   // latency / stability telemetry
   lowLatency = false;
   private glitch = new GlitchMonitor();
@@ -819,10 +825,28 @@ export class AudioEngine {
     const wMerge = ctx.createChannelMerger(2);
     mid.connect(wMerge, 0);
     mid.connect(wMerge, 1);
-    side.connect(wMerge, 0);
+    // Low-end mono matrix: dry side always available; wet side carries
+    // side − lowpassed(side), i.e. bass folds to mono below the crossover.
+    this.sideDry = g(1);
+    this.sideWet = g(0);
+    this.sideLp = ctx.createBiquadFilter();
+    this.sideLp.type = "lowpass";
+    this.sideLp.frequency.value = 120;
+    this.sideLp.Q.value = 0.707;
+    this.sideLpNeg = g(-1);
+    side.connect(this.sideDry);
+    side.connect(this.sideLp);
+    side.connect(this.sideWet);
+    this.sideLp.connect(this.sideLpNeg);
+    this.sideLpNeg.connect(this.sideWet);
+    this.sideDry.connect(wMerge, 0);
     const sideInv = g(-1);
-    side.connect(sideInv);
+    this.sideDry.connect(sideInv);
     sideInv.connect(wMerge, 1);
+    this.sideWet.connect(wMerge, 0);
+    this.sideWetInv = g(-1);
+    this.sideWet.connect(this.sideWetInv);
+    this.sideWetInv.connect(wMerge, 1);
     wMerge.connect(this.duckGain);
 
     this.monitorGain = g(dbToGain(-6));
@@ -1042,6 +1066,10 @@ export class AudioEngine {
     const widen = Math.abs(params.stereo.width - 1) > 0.01;
     this.ramp(this.widthGain?.gain, params.stereo.width);
     this.crossfade(this.widthWet, this.widthDry, widen);
+    // low-end mono: 0 = off, otherwise fold side-bass below the crossover
+    const lm = Math.min(500, Math.max(0, params.stereo.lowMonoHz ?? 120));
+    if (this.sideLp) this.sideLp.frequency.setTargetAtTime(Math.max(40, lm || 120), ctx.currentTime, 0.01);
+    this.crossfade(this.sideWet, this.sideDry, lm > 0);
 
     this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
     this.ramp(this.monitorGain.gain, dbToGain(params.monitorDb));
@@ -1939,6 +1967,11 @@ export class AudioEngine {
 
   get sampleRate(): number {
     return this.ctx?.sampleRate ?? 0;
+  }
+
+  /** Last applied params (null until the console applies a chain). */
+  get appliedParams(): ProcessorParams | null {
+    return this.params;
   }
 
   get fftSize(): number {
