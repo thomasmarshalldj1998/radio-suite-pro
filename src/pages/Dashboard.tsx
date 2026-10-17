@@ -283,6 +283,20 @@ export default function Dashboard() {
   const [activePreset, setActivePreset] = useState("Omnia · General");
   /** A/B compare: true = monitoring the unprocessed source (chain bypassed). */
   const [compare, setCompare] = useState(false);
+  /**
+   * Reference match: the processed loudness stashed at the Source flip plus
+   * the live match readout (original / processed / applied trim). While
+   * comparing, the HUD tick trims the bypassed source to the stashed
+   * processed loudness so the A/B compares tone, not level.
+   */
+  const procRef = useRef<{ lufs: number; tp: number } | null>(null);
+  const matchKeyRef = useRef("");
+  const [match, setMatch] = useState<{
+    orig: number;
+    proc: number;
+    trim: number;
+    silent: boolean;
+  } | null>(null);
 
   // preset baseline (what REVERT restores) + engine power timestamp
   const [baseline, setBaseline] = useState<{ params: ProcessorParams; name: string }>(
@@ -490,6 +504,27 @@ export default function Dashboard() {
         );
       }
 
+      // ── reference match: while monitoring Source, trim the bypassed feed
+      // to the processed loudness stashed at the flip. lufsIn meters the
+      // input pre-chain, so it stays a valid original-loudness reference in
+      // compare mode; on silence the last trim is held, never wound up. ──
+      if (powered && compareRef.current && procRef.current) {
+        const proc = procRef.current;
+        const orig = snap.lufsIn;
+        if (orig > -69 && proc.lufs > -70) {
+          const trim = Math.min(12, Math.max(-12, proc.lufs - orig));
+          engine.setCompareMatchDb(trim);
+          const key = `${orig.toFixed(1)}|${proc.lufs.toFixed(1)}|${trim.toFixed(1)}`;
+          if (key !== matchKeyRef.current) {
+            matchKeyRef.current = key;
+            setMatch({ orig, proc: proc.lufs, trim, silent: false });
+          }
+        } else if (matchKeyRef.current !== "silent") {
+          matchKeyRef.current = "silent";
+          setMatch({ orig: -70, proc: proc.lufs, trim: 0, silent: true });
+        }
+      }
+
       // ── compliance: BS.1770 loudness + BS.412 multiplex power ──
       sampleLoudness({
         powered,
@@ -565,6 +600,26 @@ export default function Dashboard() {
     const id = window.setInterval(tick, 500);
     return () => window.clearInterval(id);
   }, [engine, fireAlarm]);
+
+  // reference-match stash: capture the processed loudness once, on the
+  // false→true flip only (re-stashing mid-compare would capture the source
+  // itself). Powering the chain off mid-compare also releases the trim.
+  const comparePrevRef = useRef(false);
+  useEffect(() => {
+    if (compare && !comparePrevRef.current) {
+      const s = engine.snapshot();
+      procRef.current = s.lufsS > -70 ? { lufs: s.lufsS, tp: s.truePeak } : null;
+      matchKeyRef.current = "";
+      setMatch(null);
+    }
+    if (!compare && comparePrevRef.current) {
+      procRef.current = null;
+      matchKeyRef.current = "";
+      setMatch(null);
+      engine.setCompareMatchDb(0);
+    }
+    comparePrevRef.current = compare;
+  }, [compare, engine]);
 
   // persistence + engine sync
   useEffect(() => {
@@ -1021,6 +1076,7 @@ export default function Dashboard() {
                 setParams={setParams}
                 compare={compare}
                 setCompare={setCompare}
+                match={match}
                 section={dspSection}
                 onSectionChange={setDspSection}
               />

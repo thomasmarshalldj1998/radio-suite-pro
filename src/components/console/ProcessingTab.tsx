@@ -274,6 +274,7 @@ export function ProcessingTab({
   setParams,
   compare,
   setCompare,
+  match,
   section,
   onSectionChange,
 }: {
@@ -282,6 +283,11 @@ export function ProcessingTab({
   /** A/B: true = monitoring the unprocessed source (chain bypassed). */
   compare: boolean;
   setCompare: (v: boolean) => void;
+  /**
+   * Reference match: live level-matched A/B readout (original / processed /
+   * applied trim), or a silent flag while the source meters nothing.
+   */
+  match: { orig: number; proc: number; trim: number; silent: boolean } | null;
   /** Active DSP section — controlled by the console shell (deep-linkable). */
   section: DspSection;
   onSectionChange: (s: DspSection) => void;
@@ -357,7 +363,18 @@ export function ProcessingTab({
         <span className="ml-auto flex items-center gap-2 pl-3">
           {compare && (
             <span className="rounded border border-amber-led/45 bg-amber-led/10 px-2 py-1 text-[8px] font-bold tracking-[0.16em] text-amber-led uppercase">
-              Source · chain bypassed · guard armed
+              {match?.silent
+                ? "Source · silent — match held"
+                : "Source · chain bypassed · guard armed"}
+            </span>
+          )}
+          {compare && match && !match.silent && (
+            <span
+              className="rounded border border-emerald-400/40 bg-emerald-400/10 px-2 py-1 text-[8px] font-bold tracking-[0.16em] text-emerald-300 uppercase"
+              title={`Bypassed source trimmed ${match.trim >= 0 ? "+" : ""}${match.trim.toFixed(1)} dB to the processed loudness — the A/B compares tone, not level`}>
+              Matched {match.trim >= 0 ? "+" : ""}
+              {match.trim.toFixed(1)} dB · SRC {match.orig.toFixed(1)} / PROC{" "}
+              {match.proc.toFixed(1)} LUFS
             </span>
           )}
           <Seg

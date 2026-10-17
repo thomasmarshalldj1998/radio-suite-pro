@@ -282,6 +282,7 @@ export class AudioEngine {
   private limDry!: GainNode;
   private outputGain!: GainNode;
   private duckGain!: GainNode;
+  private matchGain!: GainNode;
   private monitorGain!: GainNode;
   private streamGain!: GainNode;
   private streamDest!: MediaStreamAudioDestinationNode;
@@ -850,7 +851,9 @@ export class AudioEngine {
     wMerge.connect(this.duckGain);
 
     this.monitorGain = g(dbToGain(-6));
-    this.duckGain.connect(this.monitorGain);
+    this.matchGain = g(1);
+    this.duckGain.connect(this.matchGain);
+    this.matchGain.connect(this.monitorGain);
     this.monitorGain.connect(ctx.destination);
 
     this.streamGain = g(1);
@@ -1106,6 +1109,22 @@ export class AudioEngine {
 
   setMonitorMuted(muted: boolean) {
     this.ramp(this.monitorGain.gain, muted ? 0 : dbToGain(this.params?.monitorDb ?? -6));
+  }
+
+  /**
+   * Reference-match trim on the monitor path (Source compare A/B).
+   * Raises/lowers the bypassed source so it plays at the processed chain's
+   * loudness — the ear compares tone, not level. Clamped to ±12 dB and
+   * glided (τ ≈ 0.25 s) so live tracking never clicks. The encoder send taps
+   * duckGain upstream, so the stream/record feed is never touched.
+   */
+  setCompareMatchDb(db: number) {
+    if (!this.ctx) return;
+    const clamped = Math.min(12, Math.max(-12, Number.isFinite(db) ? db : 0));
+    const p = this.matchGain.gain;
+    const now = this.ctx.currentTime;
+    p.cancelScheduledValues(now);
+    p.setTargetAtTime(dbToGain(clamped), now, 0.25);
   }
 
   /** Momentary duck of the program bus (talk-over). */
