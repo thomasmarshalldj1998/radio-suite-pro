@@ -1097,6 +1097,7 @@ export default function Dashboard() {
             {tab === "stations" && <StationsTab />}
             {tab === "telemetry" && (
               <TelemetryTab
+                params={params}
                 onConfigureStream={() => {
                   setTab("dsp");
                   setDspSection("stream");

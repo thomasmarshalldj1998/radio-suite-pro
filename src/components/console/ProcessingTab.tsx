@@ -4,6 +4,16 @@ import { Fader } from "@/components/console/Fader";
 import { Knob } from "@/components/console/Knob";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
+import {
+  PsyAgc,
+  PsyEq,
+  PsyLimiter,
+  PsyMultiband,
+  PsyOutput,
+  PsyPreamp,
+  PsyStereo,
+  PsyStream,
+} from "@/components/console/PsyPanels";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -1368,6 +1378,27 @@ export function ProcessingTab({
           <div className="min-w-0 flex-1">
             <EncoderPanel params={params} setParams={setParams} />
           </div>
+        )}
+        {/* v3.0 psychoacoustics — appended after existing cards; nothing above moved */}
+        {section === "preamp" && (
+          <PsyPreamp params={params} setParams={setParams} />
+        )}
+        {section === "agc" && <PsyAgc params={params} setParams={setParams} />}
+        {section === "eq" && <PsyEq params={params} setParams={setParams} />}
+        {section === "stereo" && (
+          <PsyStereo params={params} setParams={setParams} />
+        )}
+        {section === "multiband" && (
+          <PsyMultiband params={params} setParams={setParams} />
+        )}
+        {section === "limiter" && (
+          <PsyLimiter params={params} setParams={setParams} />
+        )}
+        {section === "output" && (
+          <PsyOutput params={params} setParams={setParams} />
+        )}
+        {section === "stream" && (
+          <PsyStream params={params} setParams={setParams} />
         )}
       </div>
     </div>

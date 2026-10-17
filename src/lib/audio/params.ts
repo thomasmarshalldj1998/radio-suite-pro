@@ -32,6 +32,8 @@ export interface BandCompParams {
  * placed ahead of the limiter so sibilance is tamed before it drives the
  * final stage instead of after it has already squashed the programme.
  */
+import { DEFAULT_PSY, type PsyParams } from "./psycho";
+
 export interface DeessParams {
   on: boolean;
   /** Centre of the detection band (Hz) — 6 kHz … 10 kHz. */
@@ -208,6 +210,11 @@ export interface ProcessorParams {
   outputGainDb: number;
   monitorDb: number;
   duckDb: number;
+  /**
+   * Psychoacoustic layer (v3.0): all modules default bypassed/neutral, so
+   * existing presets and the default chain sound byte-identical with it.
+   */
+  psy: PsyParams;
 }
 
 export const EQ_FREQS = [60, 200, 700, 2500, 6000, 12000] as const;
@@ -339,6 +346,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   outputGainDb: 0,
   monitorDb: -6,
   duckDb: 12,
+  psy: structuredClone(DEFAULT_PSY),
 };
 
 export interface BuiltinPreset {

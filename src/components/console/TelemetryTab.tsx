@@ -18,7 +18,15 @@ import {
   useOutputs,
   type OutputStatusKind,
 } from "@/lib/audio/outputs";
-import { LUFS_TARGET, TRUE_PEAK_TARGET } from "@/lib/audio/params";
+import {
+  LUFS_TARGET,
+  TRUE_PEAK_TARGET,
+  type ProcessorParams,
+} from "@/lib/audio/params";
+import {
+  AdvisorStrip,
+  PerceptualBar,
+} from "@/components/console/PsyPanels";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
@@ -230,9 +238,12 @@ const statusCls = (kind: OutputStatusKind) =>
  */
 export function TelemetryTab({
   onConfigureStream,
+  params,
 }: {
   /** Jump to the Stream TX page (wired to the console tab state). */
   onConfigureStream?: () => void;
+  /** Chain params — feeds the perceptual dashboard + advisor only. */
+  params?: ProcessorParams;
 }) {
   const snap = useMeterSnapshot();
   const { slots } = useOutputs();
@@ -296,6 +307,13 @@ export function TelemetryTab({
 
   return (
     <div className="grid gap-4 xl:grid-cols-12">
+      {/* ── v3.0 perceptual dashboard + advisor (appended, nothing moved) ── */}
+      {params && (
+        <div className="grid gap-4 xl:col-span-12">
+          <PerceptualBar params={params} />
+          <AdvisorStrip params={params} />
+        </div>
+      )}
       {/* ── engine chain overview ── */}
       <ModuleCard
         className="xl:col-span-12"

@@ -283,6 +283,9 @@ export class AudioEngine {
   private outputGain!: GainNode;
   private duckGain!: GainNode;
   private matchGain!: GainNode;
+  /** v3.0 tilt pair: 0 dB shelves are bit-transparent passthrough. */
+  private tiltLo!: BiquadFilterNode;
+  private tiltHi!: BiquadFilterNode;
   private monitorGain!: GainNode;
   private streamGain!: GainNode;
   private streamDest!: MediaStreamAudioDestinationNode;
@@ -810,7 +813,20 @@ export class AudioEngine {
     this.widthWet = g(0);
     postGuard.connect(this.widthDry);
     postGuard.connect(this.widthWet);
-    this.widthDry.connect(this.duckGain);
+    // v3.0 perceptual tilt sits ahead of the duck/meter taps, so the
+    // analysers, the LUFS engine and the encoder send all hear it. Both
+    // shelves default to 0 dB — exact unity passthrough until enabled.
+    this.tiltLo = ctx.createBiquadFilter();
+    this.tiltLo.type = "lowshelf";
+    this.tiltLo.frequency.value = 1000;
+    this.tiltLo.gain.value = 0;
+    this.tiltHi = ctx.createBiquadFilter();
+    this.tiltHi.type = "highshelf";
+    this.tiltHi.frequency.value = 1000;
+    this.tiltHi.gain.value = 0;
+    this.widthDry.connect(this.tiltLo);
+    this.tiltLo.connect(this.tiltHi);
+    this.tiltHi.connect(this.duckGain);
     this.widthGain = g(1);
     this.widthWet.connect(this.widthGain);
     const wSplit = ctx.createChannelSplitter(2);
@@ -848,7 +864,7 @@ export class AudioEngine {
     this.sideWetInv = g(-1);
     this.sideWet.connect(this.sideWetInv);
     this.sideWetInv.connect(wMerge, 1);
-    wMerge.connect(this.duckGain);
+    wMerge.connect(this.tiltLo);
 
     this.monitorGain = g(dbToGain(-6));
     this.matchGain = g(1);
@@ -1076,6 +1092,19 @@ export class AudioEngine {
 
     this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
     this.ramp(this.monitorGain.gain, dbToGain(params.monitorDb));
+
+    // ── v3.0 psychoacoustic layer ──
+    // latency profile: low drops the ceiling guard to 2× oversampling;
+    // balanced and max both run the full 4× path (max additionally hosts
+    // staged oversampled modules as they land).
+    this.setLowLatency(params.psy.latency === "low");
+    // perceptual tilt: slope = treble-minus-bass pivot 1 kHz, split evenly
+    // across the two shelves. Off / 0 dB = exact unity.
+    const slope = params.psy.tilt.on ? params.psy.tilt.slopeDb : 0;
+    this.ramp(this.tiltLo?.gain, -slope / 2, 0.03);
+    this.ramp(this.tiltHi?.gain, slope / 2, 0.03);
+    // every other psy module is STORED (parameter-complete, no DSP yet):
+    // engaged or not, the graph above is the whole audible path.
   }
 
   /** Low-latency profile: lighter 2× oversampling on the ceiling guard. */
