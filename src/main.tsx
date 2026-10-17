@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import { AudioSync } from "@/components/console/AudioSync";
+import { AudioWakeBanner } from "@/components/console/AudioWakeBanner";
 import { RequireAuth } from "@/components/RequireAuth";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import {
@@ -141,6 +142,7 @@ function AppTree() {
   return (
     <>
       <AudioSync />
+      <AudioWakeBanner />
       <Router>
         <RouteSyncer />
         <Suspense fallback={<RouteLoading />}>

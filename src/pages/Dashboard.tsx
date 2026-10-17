@@ -460,7 +460,10 @@ export default function Dashboard() {
       }
 
       // ── dead-air watchdog → standby take-over / automatic return ──
-      const foEvent = evaluateFailover(snap.srcLevelDb, powered);
+      // A suspended AudioContext freezes every analyser at zero — that is an
+      // asleep output, not dead programme, so the watchdog pauses with it.
+      const ctxRunning = engine.ctx?.state === "running";
+      const foEvent = evaluateFailover(snap.srcLevelDb, powered && ctxRunning);
       const fo = getFailover();
       if (foEvent) {
         fireAlarm(
@@ -472,7 +475,11 @@ export default function Dashboard() {
             ? `Programme sat below ${fo.config.thresholdDb} dBFS for ${(foEvent.deadMs / 1000).toFixed(1)} s; the standby source was cross-faded in automatically`
             : `Programme stayed healthy for ${Math.round(fo.config.returnMs / 1000)} s, so the chain returned to the live feed`,
         );
-      } else if (!fo.active && fo.deadMs > Math.max(fo.config.holdMs, 3000)) {
+      } else if (
+        ctxRunning &&
+        !fo.active &&
+        fo.deadMs > Math.max(fo.config.holdMs, 3000)
+      ) {
         fireAlarm(
           "silence",
           "Dead air",
