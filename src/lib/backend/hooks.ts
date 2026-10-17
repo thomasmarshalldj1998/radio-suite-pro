@@ -112,6 +112,7 @@ export function useSaveSchedule(): (args: ScheduleInput) => Promise<unknown> {
   return useBackend().saveSchedule;
 }
 
+/** Delete one dayparting slot. */
 export function useRemoveSchedule(): (id: string) => Promise<void> {
   return useBackend().removeSchedule;
 }
