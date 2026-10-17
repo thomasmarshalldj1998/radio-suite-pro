@@ -229,6 +229,9 @@ export default function Landing() {
             <a href="#download" className="transition-colors hover:text-foreground">
               Download
             </a>
+            <Link to="/studio" className="transition-colors hover:text-foreground">
+              Studio
+            </Link>
           </nav>
           <div className="flex shrink-0 items-center gap-2">
             {/* below sm the header carries the single primary CTA so the

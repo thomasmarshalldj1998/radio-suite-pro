@@ -29,6 +29,43 @@ The convex server has a separate set of environment variables that are accessibl
 
 Currently, these variables include auth-specific keys: JWKS, JWT_PRIVATE_KEY, and SITE_URL.
 
+## Studio workspace (`/studio`)
+
+`src/pages/Studio.tsx` is a self-contained broadcast processor surface: one
+file holds the rack styling, the Web Audio graph, the demo program generator,
+the meters and the scopes. It is reachable from the landing-page nav or
+directly at `/studio`, and starts on a click because browsers only allow audio
+after a gesture.
+
+- **Signal path** — INPUT → PREAMP → DE-CLIPPER → AGC → SUB-BASS → DYN-EQ →
+  MULTIBAND (5) → TRANSIENT SNAP → LIMITER → OUTPUT, shown as a numbered ribbon
+  and wired in exactly that order. The AGC is the only macro leveler ahead of
+  the band split, so the five lanes always start from a controlled level.
+- **Delivery targets** — −14.0 LUFS (AES71 web default), −16.0 LUFS
+  (podcast) and −23.0 LUFS (EBU R128). The optional slow servo trims the gain
+  into the limiter toward the selected target.
+- **Restoration** — de-clipper with 0…+12 dB reconstruction drive, threshold
+  and dry/wet, using a 4× oversampled concave peak-rebuild curve.
+- **Sub-harmonic synth** — pitch-tracked octave-down sine plus upper harmonics
+  (small-speaker bass), 0…100 % drive, 30–60 Hz cutoff.
+- **Transient snap** — 0…+6 dB attack boost and sensitivity on a high-band
+  parallel path ahead of the limiter.
+- **Telemetry** — vector scope (L vs R, three trace colours, −1…+1 correlation)
+  and a rolling 60 s LUFS chart for momentary, short-term and integrated
+  loudness against the target, plus a three-second silence-gate banner.
+- **Workflow** — A/B morph (0–100 % interpolation of every numeric parameter),
+  preset library, and auto-speech sensing that switches the AGC and all five
+  band compressors to a faster profile while voice is detected.
+
+The DSP helpers and the engine class are exported so the verification scripts
+drive the real implementation rather than a copy:
+
+```bash
+bun scripts/verify-studio-render.ts  # SSR markup: chain order, meters, tabs, targets
+bun scripts/verify-studio-dsp.ts     # morph, de-clipper curve, loudness gating, pitch, correlation
+bun scripts/verify-studio-engine.ts  # headless graph build + a finite measurement frame
+```
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with
