@@ -191,7 +191,7 @@ export function SpectrumCanvas({
           ctx.font = "8px 'JetBrains Mono', monospace";
           for (const f of splits) {
             const x = Math.round(logToX(f, w)) + 0.5;
-            ctx.strokeStyle = "rgba(74,144,226,0.32)";
+            ctx.strokeStyle = "rgba(47,181,181,0.4)";
             ctx.setLineDash([3, 5]);
             ctx.beginPath();
             ctx.moveTo(x, 14);
@@ -199,7 +199,7 @@ export function SpectrumCanvas({
             ctx.stroke();
             ctx.setLineDash([]);
             if (x > 20 && x < w - 20) {
-              ctx.fillStyle = "rgba(74,144,226,0.8)";
+              ctx.fillStyle = "rgba(47,181,181,0.85)";
               ctx.fillText(f >= 1000 ? `${+(f / 1000).toFixed(1)}k` : `${f}`, x, 11);
             }
           }
@@ -230,7 +230,7 @@ export function SpectrumCanvas({
           ctx.lineTo(w, mid);
           ctx.lineTo(0, mid);
           ctx.closePath();
-          ctx.fillStyle = "rgba(74,144,226,0.10)";
+          ctx.fillStyle = "rgba(47,181,181,0.10)";
           ctx.fill();
           // the curve itself, with a soft glow
           ctx.beginPath();
@@ -244,9 +244,9 @@ export function SpectrumCanvas({
             if (px === 0) ctx.moveTo(px, y);
             else ctx.lineTo(px, y);
           }
-          ctx.strokeStyle = n > 0 ? "rgba(96,165,250,0.95)" : "rgba(255,255,255,0.5)";
+          ctx.strokeStyle = n > 0 ? "rgba(47,181,181,0.95)" : "rgba(255,255,255,0.5)";
           ctx.lineWidth = 1.5;
-          ctx.shadowColor = "rgba(74,144,226,0.65)";
+          ctx.shadowColor = "rgba(47,181,181,0.65)";
           ctx.shadowBlur = 6;
           ctx.stroke();
           ctx.shadowBlur = 0;

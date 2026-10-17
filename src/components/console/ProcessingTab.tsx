@@ -386,11 +386,11 @@ export function ProcessingTab({
           </div>
           <div className="flex items-center gap-3 text-[9px] text-panel-mut">
             <span className="flex items-center gap-1.5">
-              <span className="inline-block h-0.5 w-4 rounded bg-[#60a5fa]" />
+              <span className="inline-block h-0.5 w-4 rounded bg-[#2fb5b5]" />
               EQ response
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2.5 w-0 border-l border-dashed border-[#4a90e2]" />
+              <span className="inline-block h-2.5 w-0 border-l border-dashed border-[#2fb5b5]" />
               Crossovers
             </span>
             <span className="flex items-center gap-1.5">

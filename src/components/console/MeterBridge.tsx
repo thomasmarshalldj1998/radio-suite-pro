@@ -13,10 +13,10 @@ import { cn } from "@/lib/utils";
 import { RotateCcw } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
-/* Meter-bridge palette — LED hardware colours on the ultra-dark deck. */
+/* Meter-bridge palette — teal info, amber program, alarm red/green. */
 const LED = {
-  cyan: "#22d3ee",
-  blue: "#4a90e2",
+  cyan: "#2fb5b5",
+  blue: "#e5a93b",
   red: "#ff3b30",
   green: "#4cd964",
   amber: "#ffcc00",
@@ -262,7 +262,7 @@ export function MeterBridge({
             <Bar
               caption="ENH"
               numeric={params.exciter.on ? `${params.exciter.mix.toFixed(1)}` : "off"}
-              numericTone={params.exciter.on ? "text-cyan-400" : undefined}
+              numericTone={params.exciter.on ? "text-teal-300" : undefined}
               get={() => exciterMix}
               min={0}
               max={12}
@@ -471,7 +471,7 @@ export function MeterBridge({
               onChange={(e) => onDensity(Number(e.target.value))}
               aria-label="Master density: 1 open, 10 dense"
               aria-valuetext={`${params.density} of ${DENSITY_MAX} — ${densityProfile(params.density).label}`}
-              className="h-1.5 w-full cursor-pointer accent-[#22d3ee]"
+              className="h-1.5 w-full cursor-pointer accent-[#e5a93b]"
             />
             <div
               className="flex items-center justify-between"

@@ -301,7 +301,7 @@ export function PresetPanel({
                   className={cn(
                     "rounded-lg border px-3 py-2.5 text-left transition-all",
                     active
-                      ? "border-signal bg-signal/15 shadow-[0_0_16px_rgba(91,156,240,0.25)]"
+                      ? "border-signal bg-signal/15 shadow-[0_0_16px_rgba(229,169,59,0.28)]"
                       : "border-border/60 bg-muted/40 hover:border-signal/40 hover:bg-accent",
                   )}
                 >

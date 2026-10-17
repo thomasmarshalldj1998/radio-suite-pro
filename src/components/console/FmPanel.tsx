@@ -100,7 +100,7 @@ function MpxSpectrumCanvas({ height = 120 }: { height?: number }) {
         ctx.closePath();
         ctx.fillStyle = "rgba(74,144,226,0.18)";
         ctx.fill();
-        ctx.strokeStyle = "#4a90e2";
+        ctx.strokeStyle = "#2fb5b5";
         ctx.lineWidth = 1;
         ctx.stroke();
         // peak hold

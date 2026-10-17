@@ -858,7 +858,7 @@ export default function Dashboard() {
                 onClick={() => void startEngine("start")}
                 disabled={powerBusy}
                 aria-label="Start the audio engine"
-                className="h-9 cursor-pointer gap-1.5 border-signal bg-signal px-2.5 text-[11px] font-bold tracking-[0.1em] text-white uppercase shadow-[0_0_18px_rgba(91,156,240,0.4)] hover:bg-signal-strong sm:px-3"
+                className="h-9 cursor-pointer gap-1.5 border-signal bg-signal px-2.5 text-[11px] font-bold tracking-[0.1em] text-signal-fg uppercase shadow-[0_0_18px_rgba(229,169,59,0.4)] hover:bg-signal-strong sm:px-3"
               >
                 <Power className="size-3.5" />
                 {/* phones keep the transport on one row — icon + short label */}

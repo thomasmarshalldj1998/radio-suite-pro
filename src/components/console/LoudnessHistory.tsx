@@ -145,7 +145,7 @@ export function LoudnessHistory({
         // current-value dot + readout
         const lx = ((buf.length - 1) / (windowS - 1)) * w;
         const ly = yOf(buf[buf.length - 1].v);
-        ctx.fillStyle = "#4a90e2";
+        ctx.fillStyle = "#2fb5b5";
         ctx.beginPath();
         ctx.arc(lx, ly, 2.5, 0, Math.PI * 2);
         ctx.fill();
