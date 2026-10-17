@@ -9,6 +9,7 @@ import {
   type DspSection,
 } from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
+import { CompactView } from "@/components/console/CompactView";
 import { Button } from "@/components/ui/button";
 import {
   useAlarms,
@@ -50,6 +51,7 @@ import { cn } from "@/lib/utils";
 import { APP_NAME, APP_VERSION } from "@/lib/version";
 import {
   Activity,
+  Gauge,
   LayoutDashboard,
   Power,
   Radio,
@@ -75,6 +77,7 @@ const START_TIMEOUT_MS = 12_000;
 
 export type TabId =
   | "overview"
+  | "compact"
   | "dsp"
   | "presets"
   | "stations"
@@ -101,6 +104,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     hint: "Group console · stations · alarms",
   },
   { id: "telemetry", label: "Telemetry", icon: Activity, hint: "Compliance · diagnostics · health" },
+  { id: "compact", label: "Compact", icon: Gauge, hint: "Single-screen broadcast overview" },
 ];
 
 /**
@@ -1093,6 +1097,13 @@ export default function Dashboard() {
                 />
                 <ScheduleCard params={params} activeName={activePreset} />
               </div>
+            )}
+            {tab === "compact" && (
+              <CompactView
+                params={params}
+                setParams={setParams}
+                presetName={activePreset}
+              />
             )}
             {tab === "stations" && <StationsTab />}
             {tab === "telemetry" && (

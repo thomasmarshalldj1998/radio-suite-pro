@@ -7,6 +7,7 @@ import type { TabId } from "@/pages/Dashboard";
 /** Sidebar groups: console pages first, station pages second. */
 const GROUP_OF: Record<TabId, "Console" | "Station"> = {
   overview: "Console",
+  compact: "Console",
   dsp: "Console",
   presets: "Console",
   stations: "Station",
