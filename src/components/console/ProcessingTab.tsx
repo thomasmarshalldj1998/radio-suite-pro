@@ -778,6 +778,21 @@ export function ProcessingTab({
               )}
             </CtrlRow>
             <CtrlRow label="Target">
+              <Seg
+                ariaLabel="Streaming loudness standard"
+                value={[-14, -16, -23].includes(params.rider.targetLufs) ? String(params.rider.targetLufs) : "custom"}
+                options={[
+                  { value: "-14", label: "−14 AES71" },
+                  { value: "-16", label: "−16" },
+                  { value: "-23", label: "−23 R128" },
+                  { value: "custom", label: "Custom" },
+                ]}
+                onChange={(v) => {
+                  if (v === "custom") return;
+                  const t = Number(v);
+                  setParams((p) => ({ ...p, rider: { ...p.rider, targetLufs: t } }));
+                }}
+              />
               <SliderRow
                 min={-32}
                 max={-14}
@@ -853,6 +868,27 @@ export function ProcessingTab({
               <Val className="min-w-0">
                 ±{params.rider.maxRideDb.toFixed(2)} dB
               </Val>
+            </CtrlRow>
+            <CtrlRow label="Speech">
+              <Seg
+                ariaLabel="Auto-speech sensing"
+                value={params.agc.speechSense ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    agc: { ...p.agc, speechSense: v === "on" },
+                  }))
+                }
+              />
+              <span className="text-[10px] text-muted-foreground">
+                {snap?.speechFast
+                  ? "Mic speech — fast envelopes"
+                  : "Mic programme halves AGC/MB timing"}
+              </span>
             </CtrlRow>
             <CtrlRow label="GR">
               <GainReductionMeter

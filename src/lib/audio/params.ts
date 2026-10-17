@@ -181,6 +181,13 @@ export interface ProcessorParams {
      * 0 = off.
      */
     windowDb: number;
+    /**
+     * Auto-speech sensing: while the mic feed carries programme, halve AGC
+     * and multiband attack/release so speech transients stay ahead of the
+     * gain. Detection lives in the engine (mic + live level); the flag is
+     * reported back in the meter snapshot.
+     */
+    speechSense: boolean;
   };
   /** High-frequency dynamic de-esser ahead of the limiter. */
   deess: DeessParams;
@@ -302,6 +309,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     releaseMs: 400,
     makeupDb: 4,
     windowDb: 0,
+    speechSense: false,
   },
   deess: {
     on: true,

@@ -5,6 +5,7 @@ import {
   subscribeAlarms,
 } from "@/lib/audio/alarms";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
+import { getFailover } from "@/lib/audio/failover";
 import { isConfigured, useOutputs } from "@/lib/audio/outputs";
 import type { ProcessorParams } from "@/lib/audio/params";
 import { getRuntime, subscribeRuntime } from "@/lib/audio/runtime";
@@ -166,6 +167,13 @@ export function MeterBridge({
       }),
     [],
   );
+  const [foSnap, setFoSnap] = useState(getFailover);
+  useEffect(() => {
+    const id = window.setInterval(() => setFoSnap(getFailover()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+  const silenceSecs = foSnap.deadMs / 1000;
+  const silenceAlarm = powered && !foSnap.active && silenceSecs > 3;
   const { slots } = useOutputs();
   const configuredIdx = slots.findIndex(isConfigured);
   const alarms = useSyncExternalStore(subscribeAlarms, getAlarms);
@@ -179,6 +187,18 @@ export function MeterBridge({
 
   return (
     <div className="border-b border-rack-line bg-[#0b0d11]">
+      {/* silence-gate banner: programme below threshold for > 3 s */}
+      {silenceAlarm && (
+        <div
+          role="alert"
+          className="flex animate-pulse items-center justify-center gap-2 border-b border-red-500/50 bg-red-500/15 px-3 py-1"
+        >
+          <span className="text-[10px] font-bold tracking-[0.2em] text-red-300 uppercase">
+            Silence gate — no programme for {silenceSecs.toFixed(0)} s
+            (threshold {foSnap.config.thresholdDb.toFixed(0)} dBFS)
+          </span>
+        </div>
+      )}
       {/* deck label strip — phones/tablets where the sidebar is hidden */}
       <div className="rack-rail flex items-center justify-between gap-3 px-3 py-1.5 sm:px-4 lg:hidden">
         <span className="flex items-center gap-2 text-[9px] font-bold tracking-[0.22em] text-panel-mut uppercase">

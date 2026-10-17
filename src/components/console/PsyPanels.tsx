@@ -418,7 +418,7 @@ export function PsyPreamp({
       <PsyBlock
         module="clock"
         title="Input quality"
-        subtitle="Live meters · crest · coherence · clock"
+        subtitle="Live meters · crest · coherence · clock · clip detect"
       >
         <CtrlRow label="Crest">
           <Num>{Number.isFinite(crest) ? `${crest.toFixed(2)} dB` : "—"}</Num>
@@ -434,6 +434,16 @@ export function PsyPreamp({
         </CtrlRow>
         <CtrlRow label="Codec damage">
           <Num>— / 100</Num>
+        </CtrlRow>
+        <CtrlRow label="Clip events">
+          <Num>{snap ? snap.clipEvents.toFixed(0) : "—"}</Num>
+        </CtrlRow>
+        <CtrlRow label="Last clip">
+          <Num>
+            {snap && snap.clipAt > 0
+              ? new Date(snap.clipAt).toLocaleTimeString()
+              : "none"}
+          </Num>
         </CtrlRow>
       </PsyBlock>
     </>

@@ -6,6 +6,7 @@ import { FailoverCard } from "@/components/console/FailoverCard";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { SourceModule } from "@/components/console/SourceModule";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
+import { VectorScope } from "@/components/console/VectorScope";
 import { StereoLevelMeter } from "@/components/console/Meters";
 import type { SignalMode } from "@/lib/audio/engine";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
@@ -179,6 +180,7 @@ export function InputTab({
         }
       >
         <SpectrumCanvas mode="live" height={180} />
+        <VectorScope height={180} />
 
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {[

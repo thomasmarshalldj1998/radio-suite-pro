@@ -85,8 +85,13 @@ export interface MeterSnapshot {
   };
   clipIn: boolean;
   clipOut: boolean;
+  /** Output clip events this session + wall-clock of the latest one. */
+  clipEvents: number;
+  clipAt: number;
   /** Pre-gate programme-bus level (dBFS) — the dead-air detector's source. */
   srcLevelDb: number;
+  /** Speech-sense profile engaged (faster AGC/MB envelopes). */
+  speechFast: boolean;
   /** True while the standby source is feeding the chain (failover active). */
   backupActive: boolean;
 }
@@ -122,7 +127,10 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   },
   clipIn: false,
   clipOut: false,
+  clipEvents: 0,
+  clipAt: 0,
   srcLevelDb: -120,
+  speechFast: false,
   backupActive: false,
 };
 
@@ -176,6 +184,12 @@ export class AudioEngine {
   private lufsPoints: LufsPoint[] = [];
   private clipInUntil = 0;
   private clipOutUntil = 0;
+  private clipEvents = 0;
+  private clipAt = 0;
+  /** Live speech profile: mic programme detected while sense is armed. */
+  private speechFast = false;
+  private scopeBufL = new Float32Array(4096);
+  private scopeBufR = new Float32Array(4096);
 
   // integrated loudness (BS.1770-4 gated) + LRA (EBU Tech 3342)
   private iBlocks: number[] = [];
@@ -995,11 +1009,11 @@ export class AudioEngine {
       this.ramp(comp.ratio, Math.min(20, Math.max(1, band.ratio * dens.ratioScale)));
       this.ramp(
         comp.attack,
-        (Math.max(band.attackMs, 0) * dens.timeScale) / 1000,
+        (Math.max(band.attackMs, 0) * dens.timeScale * (this.speechFast ? 0.5 : 1)) / 1000,
       );
       this.ramp(
         comp.release,
-        (Math.max(band.releaseMs, 10) * dens.timeScale) / 1000,
+        (Math.max(band.releaseMs, 10) * dens.timeScale * (this.speechFast ? 0.5 : 1)) / 1000,
       );
       this.ramp(makeup.gain, dbToGain(band.makeupDb));
     });
@@ -1026,8 +1040,12 @@ export class AudioEngine {
     this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
     this.ramp(this.agcComp.ratio, params.agc.ratio);
     this.ramp(this.agcComp.knee, params.agc.kneeDb);
-    this.ramp(this.agcComp.attack, Math.max(params.agc.attackMs, 0) / 1000);
-    this.ramp(this.agcComp.release, Math.max(params.agc.releaseMs, 10) / 1000);
+    // auto-speech profile: halve the levelling envelopes while mic
+    // programme is present (engagement is transition-detected in the meter
+    // loop below, so these ramps glide instead of jumping)
+    const spd = this.speechFast ? 0.5 : 1;
+    this.ramp(this.agcComp.attack, (Math.max(params.agc.attackMs, 0) * spd) / 1000);
+    this.ramp(this.agcComp.release, (Math.max(params.agc.releaseMs, 10) * spd) / 1000);
     this.ramp(this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
     this.crossfade(this.agcWetPre, this.agcDry, params.agc.on);
     this.windowGate.configure({ windowDb: params.agc.windowDb });
@@ -1708,7 +1726,14 @@ export class AudioEngine {
       this.truePeak(this.outBufL),
       this.truePeak(this.outBufR),
     );
-    if (Math.max(outPeakL, outPeakR) > -0.2) this.clipOutUntil = now + 600;
+    const clipping = Math.max(outPeakL, outPeakR) > -0.2;
+    // rising-edge counter + timestamp: the clip-event detector behind the
+    // restoration panel (detection is measured; reconstruction stays stored)
+    if (clipping && !(now < this.clipOutUntil)) {
+      this.clipEvents += 1;
+      this.clipAt = Date.now();
+    }
+    if (clipping) this.clipOutUntil = now + 600;
     const denom = Math.sqrt(eL * eR);
     const correlation = denom > 1e-9 ? Math.max(-1, Math.min(1, dot / denom)) : 1;
 
@@ -1777,6 +1802,17 @@ export class AudioEngine {
       this.ramp(this.riderGain.gain, 1, 0.05);
     };
 
+    // auto-speech sensing: mic programme present while the sense flag is
+    // armed → halve the levelling envelopes with a full (ramped) re-apply
+    const wantSpeech =
+      !!this.params?.agc.speechSense &&
+      this.sourceKind === "mic" &&
+      srcLevelDb > -50;
+    if (wantSpeech !== this.speechFast) {
+      this.speechFast = wantSpeech;
+      if (this.params) this.apply(this.params);
+    }
+
     this.snapshotValue = {
       t: now,
       powered: true,
@@ -1813,6 +1849,9 @@ export class AudioEngine {
       },
       clipIn: now < this.clipInUntil,
       clipOut: now < this.clipOutUntil,
+      clipEvents: this.clipEvents,
+      clipAt: this.clipAt,
+      speechFast: this.speechFast,
       srcLevelDb,
       backupActive: this.backupActiveFlag,
     };
@@ -1837,6 +1876,8 @@ export class AudioEngine {
     this.lastIBlockAt = 0;
     this.lastStBlockAt = 0;
     this.samplePeakDb = -120;
+    this.clipEvents = 0;
+    this.clipAt = 0;
     this.glitch.reset();
     this.notify();
   }
@@ -1990,6 +2031,27 @@ export class AudioEngine {
 
   snapshot(): MeterSnapshot {
     return this.snapshotValue;
+  }
+
+  /**
+   * Raw post-chain L/R frames for the vector scope. Copies the first N
+   * samples of the output analysers (fftSize 4096) — the scope draws L vs
+   * R as a Lissajous figure. Empty arrays while the graph is down.
+   */
+  getScopeFrames(n = 512): { l: Float32Array; r: Float32Array } {
+    const N = Math.min(2048, Math.max(64, Math.floor(n)));
+    const empty = { l: new Float32Array(0), r: new Float32Array(0) };
+    if (!this.ctx || !this.powered) return empty;
+    try {
+      this.outAnalyserL.getFloatTimeDomainData(this.scopeBufL);
+      this.outAnalyserR.getFloatTimeDomainData(this.scopeBufR);
+    } catch {
+      return empty;
+    }
+    return {
+      l: this.scopeBufL.slice(0, N),
+      r: this.scopeBufR.slice(0, N),
+    };
   }
 
   subscribe(cb: (s: MeterSnapshot) => void): () => void {
