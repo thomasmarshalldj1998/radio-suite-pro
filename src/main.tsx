@@ -13,6 +13,7 @@ import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import {
   BrowserRouter,
+  HashRouter,
   Navigate,
   Route,
   Routes,
@@ -125,11 +126,19 @@ function RouteSyncer() {
 }
 
 
-/** App routes + toaster — mounted under whichever backend binding applies. */
+/** App routes + toaster — mounted under whichever backend binding applies.
+ *
+ * Desktop uses HashRouter: on the app:// scheme BrowserRouter paths like
+ * /dashboard or /index.html can land on the "*" NotFound route (blank 404)
+ * depending on the initial URL and history handling. Hash routes
+ * (#/dashboard) never hit the protocol handler, so the console always
+ * boots to index.html once and routes client-side from there.
+ */
 function AppTree() {
+  const Router = IS_DESKTOP ? HashRouter : BrowserRouter;
   return (
     <>
-      <BrowserRouter>
+      <Router>
         <RouteSyncer />
         <Suspense fallback={<RouteLoading />}>
           <Routes>
@@ -137,6 +146,18 @@ function AppTree() {
               path="/"
               element={
                 IS_DESKTOP ? <Navigate to="/dashboard" replace /> : <Landing />
+              }
+            />
+            {/* Old desktop shells loaded app://…/index.html directly — treat
+                it as root so they redirect instead of hitting NotFound. */}
+            <Route
+              path="/index.html"
+              element={
+                IS_DESKTOP ? (
+                  <Navigate to="/dashboard" replace />
+                ) : (
+                  <Landing />
+                )
               }
             />
             <Route
@@ -155,7 +176,7 @@ function AppTree() {
             <Route path="*" element={<NotFound />} />
           </Routes>
         </Suspense>
-      </BrowserRouter>
+      </Router>
       <Toaster />
     </>
   );

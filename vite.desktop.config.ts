@@ -18,6 +18,9 @@ import { defineConfig } from "vite";
  * other.
  */
 export default defineConfig({
+  // Relative asset URLs so the renderer loads under app:// as well as
+  // file:// — absolute "/assets/…" paths 404 on custom schemes.
+  base: "./",
   plugins: [react(), tailwindcss()],
   worker: { format: "es" },
   resolve: {
