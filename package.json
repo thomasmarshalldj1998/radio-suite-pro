@@ -14,7 +14,7 @@
     "verify": "bun scripts/run-verify.ts",
     "format": "prettier --write .",
     "preview": "vite preview",
-    "desktop:icon": "node scripts/make-icon.mjs",
+    "desktop:icon": "node scripts/make-icon.mjs && node scripts/make-installer-art.mjs",
     "desktop:build:renderer": "tsc -b && vite build --config vite.desktop.config.ts",
     "desktop:build": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml",
     "desktop:build:win": "bun run desktop:build:renderer && electron-builder --config electron-builder.yml --win --x64",
