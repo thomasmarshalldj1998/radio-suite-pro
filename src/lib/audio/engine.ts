@@ -188,6 +188,13 @@ export class AudioEngine {
   private clipAt = 0;
   /** Live speech profile: mic programme detected while sense is armed. */
   private speechFast = false;
+  /**
+   * Graph-complete invariant: set at the end of buildGraph, cleared by
+   * dispose. apply() and the meter loop refuse to touch nodes/analysers
+   * until it is true, so teardown races (power-off fades, device-change
+   * rebuilds, HMR module reloads) can never dereference a torn-down graph.
+   */
+  private graphReady = false;
   private scopeBufL = new Float32Array(4096);
   private scopeBufR = new Float32Array(4096);
 
@@ -470,6 +477,7 @@ export class AudioEngine {
   }
 
   dispose() {
+    this.graphReady = false;
     this.powerOff();
     this.backupSrc = null;
     this.backupEl = null;
@@ -955,6 +963,7 @@ export class AudioEngine {
     this.ksBufInR = new Float32Array(this.inKsAnalyserR.fftSize);
     this.specBufPre = new Uint8Array(this.preSpec.frequencyBinCount);
     this.specBufPost = new Uint8Array(this.postSpec.frequencyBinCount);
+    this.graphReady = true;
   }
 
   /* ── parameter application ────────────────────────────────────────────── */
@@ -962,7 +971,7 @@ export class AudioEngine {
   apply(params: ProcessorParams) {
     this.params = params;
     const ctx = this.ctx;
-    if (!ctx) return; // applied on powerOn
+    if (!ctx || !this.graphReady) return; // applied on powerOn
 
     this.ramp(this.inputGain.gain, dbToGain(params.inputGainDb));
 
@@ -1132,6 +1141,7 @@ export class AudioEngine {
   }
 
   private crossfade(wet: GainNode, dry: GainNode, on: boolean) {
+    if (!wet || !dry) return; // teardown race: nodes not (or no longer) built
     this.ramp(wet.gain, on ? 1 : 0, 0.015);
     this.ramp(dry.gain, on ? 0 : 1, 0.015);
   }
@@ -1565,7 +1575,7 @@ export class AudioEngine {
 
   private computeMeters() {
     const ctx = this.ctx;
-    if (!ctx || !this.powered) return;
+    if (!ctx || !this.powered || !this.graphReady) return;
     const t0 = performance.now();
     // adaptive stability: if metering starts costing real main-thread time,
     // halve its rate instead of competing with the UI

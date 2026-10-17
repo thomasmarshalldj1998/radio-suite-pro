@@ -263,7 +263,11 @@ export default function Dashboard() {
     (kind: AlarmKind, title: string, detail: string) => {
       if (!fireSessionAlarm(kind, title, detail)) return;
       const severity = ALARM_SEVERITY[kind];
-      void pushAlarm({ kind, severity, title, detail });
+      // the durable write is best-effort: a half-initialised backend binding
+      // (stale HMR module, torn-down provider) must never break the HUD tick
+      if (typeof pushAlarm === "function") {
+        void pushAlarm({ kind, severity, title, detail });
+      }
       queueRemoteAlarm({ kind, severity, title, detail, at: Date.now() });
     },
     [pushAlarm],
