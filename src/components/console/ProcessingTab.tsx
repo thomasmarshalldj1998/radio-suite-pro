@@ -1,7 +1,13 @@
 import { EncoderPanel } from "@/components/console/EncoderPanel";
 import { BandGrBar, StereoLevelMeter, GainReductionMeter } from "@/components/console/Meters";
 import { Fader } from "@/components/console/Fader";
-import { Knob } from "@/components/console/Knob";
+import {
+  DigitalCtrl,
+  TransferCurve,
+  compCurve,
+  limitCurve,
+} from "@/components/console/DigitalCtrl";
+import { densityProfile } from "@/lib/audio/tools";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import {
@@ -564,6 +570,18 @@ export function ProcessingTab({
               <Val>{secs(params.gate.holdMs)}</Val>
             </CtrlRow>
           </div>
+          <TransferCurve
+            title="Gate transfer"
+            subtitle={`Opens at ${sgn(params.gate.thresholdDb)} dB · dot ≈ live input`}
+            curve={(x) =>
+              !params.gate.on || x >= params.gate.thresholdDb ? x : -60
+            }
+            inputDb={
+              snap ? Math.max(snap.inPeakL, snap.inPeakR) : Number.NaN
+            }
+            grDb={0}
+            live={snap?.powered ?? false}
+          />
         </ChainBlock>
           </>
         )}
@@ -845,6 +863,20 @@ export function ProcessingTab({
               />
             </CtrlRow>
           </div>
+          <TransferCurve
+            title="AGC transfer"
+            subtitle="Exact curve from threshold/ratio/knee · dot ≈ live"
+            curve={compCurve(
+              params.agc.thresholdDb,
+              params.agc.ratio,
+              params.agc.kneeDb,
+            )}
+            inputDb={
+              snap ? Math.max(snap.inPeakL, snap.inPeakR) : Number.NaN
+            }
+            grDb={snap?.gr.agc ?? 0}
+            live={snap?.powered ?? false}
+          />
         </ChainBlock>
           </>
         )}
@@ -1123,6 +1155,24 @@ export function ProcessingTab({
               />
             </CtrlRow>
           </div>
+          <TransferCurve
+            title="Limiter transfer"
+            subtitle={`Drive ${params.limiter.on ? `+${densityProfile(params.density).driveDb.toFixed(2)}` : "+0.00"} dB into ceiling · dot ≈ live`}
+            curve={limitCurve(
+              params.limiter.on
+                ? densityProfile(params.density).driveDb
+                : 0,
+              params.limiter.ceilingDb,
+            )}
+            inputDb={
+              snap
+                ? Math.max(snap.outPeakL, snap.outPeakR) +
+                  (snap.gr.limiter ?? 0)
+                : Number.NaN
+            }
+            grDb={snap?.gr.limiter ?? 0}
+            live={snap?.powered ?? false}
+          />
           <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
             The fast peak stage does the lifting; a 4×-oversampled per-sample
             soft-clip guard downstream of the output trim makes{" "}
@@ -1195,9 +1245,8 @@ export function ProcessingTab({
           subtitle="Width · correlation"
         >
           <div className="flex items-start justify-around gap-2">
-            <Knob
+            <DigitalCtrl
               label="Width"
-              size={52}
               bipolar
               value={params.stereo.width}
               min={0.5}
@@ -1290,9 +1339,8 @@ export function ProcessingTab({
           subtitle="Trim · monitor · out meter"
         >
           <div className="flex items-start justify-around gap-2">
-            <Knob
+            <DigitalCtrl
               label="Trim"
-              size={52}
               bipolar
               value={params.outputGainDb}
               min={-24}
@@ -1302,9 +1350,8 @@ export function ProcessingTab({
               onChange={(v) => setParams((p) => ({ ...p, outputGainDb: v }))}
               onReset={() => setParams((p) => ({ ...p, outputGainDb: 0 }))}
             />
-            <Knob
+            <DigitalCtrl
               label="Monitor"
-              size={52}
               value={params.monitorDb}
               min={-60}
               max={0}

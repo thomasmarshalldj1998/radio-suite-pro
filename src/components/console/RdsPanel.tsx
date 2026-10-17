@@ -11,7 +11,7 @@
  * The status column reports what the generator is actually sending: measured
  * group rate, how long each field takes to cycle, and the live PS window.
  */
-import { Knob } from "@/components/console/Knob";
+import { DigitalCtrl } from "@/components/console/DigitalCtrl";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import { Input } from "@/components/ui/input";
@@ -420,7 +420,7 @@ export function RdsPanel({
             </div>
 
             <div className="flex flex-col justify-end gap-1.5">
-              <Knob
+              <DigitalCtrl
                 label="Text delay"
                 value={mpx.rdsDelayMs / 1000}
                 min={0}

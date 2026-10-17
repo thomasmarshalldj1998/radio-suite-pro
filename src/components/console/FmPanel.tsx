@@ -1,4 +1,4 @@
-import { Knob } from "@/components/console/Knob";
+import { DigitalCtrl } from "@/components/console/DigitalCtrl";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import { getFm, subscribeFm, type FmSnapshot } from "@/lib/audio/fm";
@@ -321,19 +321,18 @@ export function FmPanel({
           </CtrlRow>
 
           <div className="mt-3 flex flex-wrap items-start justify-center gap-4">
-            <Knob
+            <DigitalCtrl
               label="Pilot"
               value={fm.mpx.pilotPct}
               min={0}
               max={15}
               step={0.1}
-              accent
               format={(v) => `${v.toFixed(1)} %`}
               onChange={(v) => setMpx({ pilotPct: v })}
               onReset={() => setMpx({ pilotPct: 9 })}
               disabled={!fm.mpx.on || !fm.on}
             />
-            <Knob
+            <DigitalCtrl
               label="RDS"
               value={fm.mpx.rdsPct}
               min={0}
@@ -344,7 +343,7 @@ export function FmPanel({
               onReset={() => setMpx({ rdsPct: 3.3 })}
               disabled={!fm.mpx.on || !fm.on}
             />
-            <Knob
+            <DigitalCtrl
               label="SCA"
               value={fm.mpx.scaPct}
               min={0}
@@ -355,7 +354,7 @@ export function FmPanel({
               onReset={() => setMpx({ scaPct: 0 })}
               disabled={!fm.mpx.on || !fm.on}
             />
-            <Knob
+            <DigitalCtrl
               label="Ceiling"
               value={fm.mpx.ceilingPct}
               min={80}
@@ -366,7 +365,7 @@ export function FmPanel({
               onReset={() => setMpx({ ceilingPct: 100 })}
               disabled={!fm.on}
             />
-            <Knob
+            <DigitalCtrl
               label="Alarm"
               value={fm.mpx.alarmPct}
               min={85}

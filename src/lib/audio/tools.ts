@@ -7,6 +7,7 @@
  *  2  PHASE_STAGE_RATIOS — the staggered allpass cascade that rotates phase
  *  3  densityProfile  — the Less–More macro: ratios, timing, limiter drive
  *  4  de-esser        — band clamp + the parallel-subtract cut coefficient
+ *  5  transfer curves — exact static transfers drawn by the console
  */
 
 /* ── 1 · AGC window gate ──────────────────────────────────────────────── */
@@ -183,4 +184,30 @@ export function deessAlpha(cutDb: number): number {
   if (!(cutDb > 0)) return 0;
   const cut = Math.min(60, cutDb);
   return Math.min(0.999, 1 - Math.pow(10, -cut / 20));
+}
+
+/* ── 5 · transfer curves (drawn by the console, exact from settings) ──── */
+
+/** Exact soft-knee compressor transfer from threshold/ratio/knee. */
+export function compCurve(
+  thresholdDb: number,
+  ratio: number,
+  kneeDb: number,
+): (xDb: number) => number {
+  const r = Math.max(1, ratio);
+  const k = Math.max(0.01, kneeDb);
+  return (x) => {
+    if (x <= thresholdDb - k / 2) return x;
+    if (x >= thresholdDb + k / 2) return thresholdDb + (x - thresholdDb) / r;
+    const d = x - thresholdDb + k / 2;
+    return x + ((1 / r - 1) * (d * d)) / (2 * k);
+  };
+}
+
+/** Limiter transfer: density drive into a hard ceiling. */
+export function limitCurve(
+  driveDb: number,
+  ceilingDb: number,
+): (xDb: number) => number {
+  return (x) => Math.min(x + driveDb, ceilingDb);
 }
