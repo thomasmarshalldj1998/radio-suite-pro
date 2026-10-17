@@ -41,6 +41,9 @@ export interface SignalpathAudioState {
   outputId: string;
   micStatus: string;
   micLabel: string;
+  /** 0 = engine off; drives the Devices window status badge. */
+  sampleRate: number;
+  contextState: string;
 }
 
 export interface SignalpathAudioCommand {

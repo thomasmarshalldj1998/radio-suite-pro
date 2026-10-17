@@ -1,3 +1,7 @@
+import {
+  AudioDevicesPanel,
+  useLocalAudioController,
+} from "@/components/console/AudioDevicesPanel";
 import { FailoverCard } from "@/components/console/FailoverCard";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { SourceModule } from "@/components/console/SourceModule";
@@ -41,6 +45,7 @@ export function InputTab({
   const engine = getEngine();
   const snap = useSnap();
   const powered = snap.powered;
+  const audio = useLocalAudioController();
 
   const [source, setSourceState] = useState(engine.sourceKind);
   const [genOn, setGenOn] = useState(engine.generatorOn);
@@ -105,6 +110,11 @@ export function InputTab({
 
   return (
     <div className="grid gap-4 xl:grid-cols-12">
+      {/* ── sound hardware: input / output device selector ── */}
+      <div className="xl:col-span-12">
+        <AudioDevicesPanel controller={audio} />
+      </div>
+
       {/* ── program source & preamp ── */}
       <div className="xl:col-span-7">
         <SourceModule params={params} setParams={setParams} />

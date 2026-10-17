@@ -28,6 +28,8 @@ export function AudioSync() {
         outputId: engine.outputDeviceId,
         micStatus: engine.micStatus,
         micLabel: engine.micLabel,
+        sampleRate: engine.sampleRate,
+        contextState: engine.ctx?.state ?? "closed",
       };
       const key = JSON.stringify(s);
       if (key !== last) {
