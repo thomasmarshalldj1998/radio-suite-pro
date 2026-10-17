@@ -595,6 +595,16 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
                 <div className="text-readout mt-1 truncate text-[10px]">
                   {link.content.rds.rt || "—"}
                 </div>
+                {link.content.rds.rtPlusTags.length > 0 && (
+                  <div className="text-muted-foreground mt-0.5 flex flex-wrap gap-x-2 text-[9px]">
+                    {link.content.rds.rtPlusTags.map((tag) => (
+                      <span key={`${tag.type}-${tag.text}`} className="truncate">
+                        {tag.name.replace(/^Item\./, "")}:{" "}
+                        <span className="text-foreground/90">{tag.text}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-1.5 flex flex-col gap-1">
                   <LevelBar label="L" rms={link.content.audio.rmsL} />
                   <LevelBar label="R" rms={link.content.audio.rmsR} />
@@ -604,7 +614,10 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
                     {link.content.rds.groups} groups · {link.content.rds.bits} bits · phase{" "}
                     {link.content.rds.phase}
                   </span>
-                  <span>{link.content.rds.errors} bad blocks</span>
+                  <span>
+                    {link.content.rds.errors} bad blocks · pilot{" "}
+                    {(link.content.rds.pilot * 100).toFixed(0)} %
+                  </span>
                 </div>
               </>
             ) : (

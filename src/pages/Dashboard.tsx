@@ -31,6 +31,8 @@ import {
 import { getEngine } from "@/lib/audio/engine";
 import { getFm, stopFm, syncFm } from "@/lib/audio/fm";
 import { getOutputs, isConfigured } from "@/lib/audio/outputs";
+import { evaluateLinkHealth } from "@/lib/audio/linkwatch";
+import { getLink } from "@/lib/audio/mpxlink-runtime";
 import {
   DEFAULT_PARAMS,
   cloneParams,
@@ -436,6 +438,13 @@ export default function Dashboard() {
             }
           }
         }
+      }
+
+      // ── composite-over-IP: path switches, a dead pair, a receiver that
+      // never locks. The link runs independently of the engine's power state,
+      // so this is evaluated every tick, not only when the chain is up.
+      for (const alert of evaluateLinkHealth(getLink(), Date.now())) {
+        fireAlarm("link", alert.title, alert.detail);
       }
 
       // ── dead-air watchdog → standby take-over / automatic return ──

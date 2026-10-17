@@ -103,6 +103,23 @@ The kernel's receive buffer is the burst ceiling: the endpoint reports what it
 was actually granted, and a default Linux buffer holds roughly 1.3 s of
 composite.
 
+Transport faults reach the durable alarm history through
+`src/lib/audio/linkwatch.ts`: a path switch, both paths quiet long enough for
+the splice to be running on its buffer, sustained loss or jitter on the serving
+path, and a receiver that never locks to RDS. Each is edge-triggered and the
+alarm store's per-kind cooldown stops a stuck fault from flooding the record.
+
+**On compression.** The payload is uncompressed 16-bit PCM on purpose. A
+general-purpose compressor is the wrong tool here — measured with
+`CompressionStream("deflate-raw")` on a real composite frame it returns
+1.00:1, because the multiplex is wideband and noise-like once programme and
+RDS are in it. FLAC is the right codec (linear prediction on a smooth signal),
+but no FLAC *decoder* is in the dependency set, so a receiver — including this
+console's own decode path — could not read the stream back. A private codec
+would compress but break interop with real exciters and STL receivers, which
+expect PCM or FLAC. PCM at 3.07 Mbit/s per path is what those boxes accept, so
+that is what goes on the wire.
+
 ```bash
 bun scripts/verify-udp.ts           # real loopback sockets, both paths
 bun scripts/verify-udp-renderer.ts  # renderer bridge wiring and attribution
@@ -118,9 +135,11 @@ demodulates it back into programme material:
   57 kHz);
 - the 38 kHz difference signal is mixed down, filtered to 15 kHz and matrixed
   with the main channel into left and right;
-- the 57 kHz data subcarrier is mixed down, biphase-sliced, differentially
-  decoded and block-synchronised against the RDS (26,16) code, which yields
-  PI, PTY, the programme service name and RadioText from the wire.
+-the 57 kHz data subcarrier is mixed down, biphase-sliced, differentially
+decoded and block-synchronised against the RDS (26,16) code, which yields
+PI, PTY, the programme service name and RadioText from the wire;
+RadioText Plus (11A) is decoded too, so the artist and title come back as
+their own fields rather than one string.
 
 Bit timing is not tracked with a loop. Both ends run off the same composite
 sample clock, so the symbol grid is exact; only the phase is unknown, and a

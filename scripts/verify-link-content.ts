@@ -67,8 +67,9 @@ const RIGHT_AMP = 0.1;
 
 const PS = "SIGNAL  ";
 /** Three RadioText segments: the schedule carries two per cycle, so a full
- *  text arrives in well under two seconds on a healthy link. */
-const RT = "Kind of Blue";
+ *  text arrives in well under two seconds on a healthy link. The separator is
+ *  what makes the encoder emit two RadioText Plus tags. */
+const RT = "Miles - Blue";
 const PI = 0xc479;
 const PTY = 10;
 
@@ -307,6 +308,17 @@ async function main(): Promise<void> {
   console.log("\n3 · RadioText");
   check(rds.rt === RT, "RadioText decoded", `"${rds.rt}"`);
   check(rds.rtPlus, "the 3A announcement for RT+ was heard");
+  const tagText = rds.rtPlusTags.map((t) => `${t.name}="${t.text}"`).join(" ");
+  check(
+    rds.rtPlusTags.some((t) => t.name === "Item.Artist" && t.text === "Miles"),
+    "RT+ artist tag decoded from 11A",
+    tagText,
+  );
+  check(
+    rds.rtPlusTags.some((t) => t.name === "Item.Title" && t.text === "Blue"),
+    "RT+ title tag decoded from 11A",
+    tagText,
+  );
   check(rds.groups >= 30, "groups decoded at the expected rate", `${rds.groups} groups in ${SECONDS} s`);
   check(rds.errors === 0, "no block failed its syndrome", `${rds.errors}`);
 
@@ -354,6 +366,11 @@ async function main(): Promise<void> {
   check(dRds.locked, "RDS is locked again after the switch");
   check(dRds.ps.trim() === PS.trim(), "programme service name still decodes", `"${dRds.ps}"`);
   check(dRds.rt === RT, "RadioText still decodes", `"${dRds.rt}"`);
+  check(
+    dRds.rtPlusTags.length === 2,
+    "RT+ tags still decode after the switch",
+    dRds.rtPlusTags.map((t) => `${t.name}="${t.text}"`).join(" "),
+  );
   // The first second carries the damage; what matters is the programme after
   // the splice settled, so measure the tail rather than the whole capture.
   const dLeft = toneAmplitude(tail(damaged.captured.left, 3), LEFT_HZ);

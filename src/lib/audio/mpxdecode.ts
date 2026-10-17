@@ -24,7 +24,15 @@
  * that satisfy the RDS syndrome. A splice simply hands the job to another
  * slicer, and a bank resolution of 1/8 bit keeps the worst-case skew at 1/16.
  */
-import { Biquad, RDS_BIT_RATE, RDS_OFFSET, RDS_POLY } from "./mpx";
+import { Biquad, RDS_BIT_RATE, RDS_OFFSET, RDS_POLY, RDS_RTPLUS_TAG_NAMES } from "./mpx";
+
+/** A RadioText Plus tag, resolved against the RadioText that is on air. */
+export interface RdsTag {
+  type: number;
+  /** Content-type name, e.g. "Item.Title". */
+  name: string;
+  text: string;
+}
 
 /** Composite rate the link carries. */
 export const DECODE_RATE = 192000;
@@ -52,6 +60,8 @@ export interface RdsSnapshot {
   rt: string;
   /** Heard the 3A announcement that names group 11A as the RT+ carrier. */
   rtPlus: boolean;
+  /** Tags from the 11A payload, resolved against the received RadioText. */
+  rtPlusTags: RdsTag[];
   /** Pilot amplitude in the composite, 0…1. Zero means no coherent reference. */
   pilot: number;
 }
@@ -166,6 +176,9 @@ export class CompositeDecoder {
   private psSeen = 0;
   private rtChars = new Array<string>(64).fill(" ");
   private rtPlus = false;
+  /** Raw tag positions from the last 11A group; text is resolved on read. */
+  private rtTagFields: { type: number; start: number; len: number }[] = [];
+  private rtItemToggle = -1;
   private abFlag = -1;
 
   // metering
@@ -421,6 +434,26 @@ export class CompositeDecoder {
     if (type === 3 && versionB === 0) {
       // ODA announcement: block C names the application
       if (c === 0x4bd7) this.rtPlus = true;
+      return;
+    }
+    if (type === 11 && versionB === 0) {
+      // RadioText Plus: two tags, each a content type, a start offset in
+      // RadioText and a length that is transmitted minus one.
+      const toggle = (b >> 4) & 1;
+      if (toggle !== this.rtItemToggle) {
+        this.rtItemToggle = toggle;
+        this.rtTagFields = [];
+      }
+      const type1 = ((b & 0b111) << 3) | ((c >> 13) & 0b111);
+      const start1 = (c >> 7) & 0x3f;
+      const len1 = ((c >> 1) & 0x3f) + 1;
+      const type2 = ((c & 1) << 5) | ((d >> 11) & 0x1f);
+      const start2 = (d >> 5) & 0x3f;
+      const len2 = (d & 0x1f) + 1;
+      const fields: { type: number; start: number; len: number }[] = [];
+      if (type1 !== 0) fields.push({ type: type1, start: start1, len: len1 });
+      if (type2 !== 0) fields.push({ type: type2, start: start2, len: len2 });
+      this.rtTagFields = fields;
     }
   }
 
@@ -442,7 +475,15 @@ export class CompositeDecoder {
     if (this.meterN >= this.sampleRate / 4) this.closeMeter();
     let best = this.slicers[this.winner];
     for (const s of this.slicers) if (s.groups > best.groups) best = s;
-    const rt = this.rtChars.join("").split("\r")[0].replace(/\s+$/, "");
+    const rtFull = this.rtChars.join("").split("\r")[0];
+    const rt = rtFull.replace(/\s+$/, "");
+    const rtPlusTags: RdsTag[] = this.rtTagFields
+      .filter((f) => f.start + f.len <= rtFull.length)
+      .map((f) => ({
+        type: f.type,
+        name: RDS_RTPLUS_TAG_NAMES[f.type] ?? `type ${f.type}`,
+        text: rtFull.slice(f.start, f.start + f.len).trim(),
+      }));
     return {
       rds: {
         locked: best.syncIdx >= 0,
@@ -457,6 +498,7 @@ export class CompositeDecoder {
         psComplete: this.psSeen === 0b1111,
         rt,
         rtPlus: this.rtPlus,
+        rtPlusTags,
         pilot: this.pilotMag,
       },
       audio: {
