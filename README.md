@@ -74,6 +74,39 @@ Cross-build notes:
   landing page and the sign-in page remain web-only.
 - Media/fullscreen permissions are granted in the main process; microphone
   use is declared for macOS in `electron-builder.yml`.
+- `electron/preload.cjs` exposes one narrow bridge, `window.signalpath.udp`,
+  backed by `electron/udp-link.cjs`. It is what lets the composite-over-IP
+  link put its packets on real UDP sockets; the browser build has no sockets
+  and loops the framed stream back into its own receiver instead.
+
+### Composite over IP (UDP)
+
+The link carries the FM branch's 192 kHz composite as numbered datagrams —
+28-byte header (magic, version, codec, link, sequence, timestamp, rate,
+length, CRC-32) plus 16-bit PCM — one composite frame per packet, 187.5
+packets/s, 3.07 Mbit/s per path.
+
+Two independent paths are carried: each has its own destination and its own
+listen port, each packet goes out on both with its own link number in the
+header, and whatever arrives on a socket is decoded into the link receiver on
+that path. A path that goes silent or crosses the loss/jitter thresholds is
+spliced away without the composite ever stopping.
+
+```
+Link A  destination 192.0.2.10:9220   listen 9210
+Link B  destination 192.0.2.11:9220   listen 9212
+```
+
+A datagram is 2076 bytes, so a path with a standard 1500-byte MTU will
+fragment it — set the interface MTU to 2300 (or jumbo frames) end to end.
+The kernel's receive buffer is the burst ceiling: the endpoint reports what it
+was actually granted, and a default Linux buffer holds roughly 1.3 s of
+composite.
+
+```bash
+bun scripts/verify-udp.ts           # real loopback sockets, both paths
+bun scripts/verify-udp-renderer.ts  # renderer bridge wiring and attribution
+```
 
 ### Download links
 

@@ -2,10 +2,13 @@
  * Composite-over-IP panel — the 192 kHz MPX signal as a packet stream.
  *
  * The sender frames the composite of the FM branch into numbered packets
- * (28-byte header, CRC-32, FLAC or raw PCM payload) and meters exactly what
- * would go out. Receive mode runs the other half: two independent paths land
- * in two jitter buffers, the healthy one feeds the splice, and a damaged link
- * is replaced without the composite ever going silent.
+ * (28-byte header, CRC-32, 16-bit PCM payload) and meters exactly what goes
+ * out. On the desktop build the stream leaves through two real UDP sockets and
+ * whatever arrives on them is decoded straight back into the receiver; without
+ * a socket the same packets loop back locally, so the console behaves the same
+ * either way. Receive mode runs the other half: two independent paths land in
+ * two jitter buffers, the healthy one feeds the splice, and a damaged link is
+ * replaced without the composite ever going silent.
  *
  * The self-test drives the whole path — framer, network model, jitter buffers,
  * splice — with a deterministic clock on a deliberately damaged primary, so the
@@ -14,6 +17,7 @@
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { CtrlRow, Seg, Val } from "@/components/console/controls";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   MPX_LINK_FRAME_SAMPLES,
   MPX_LINK_HEADER_BYTES,
@@ -22,7 +26,9 @@ import {
 import {
   LINK_RATE,
   armLink,
+  connectUdp,
   disarmLink,
+  disconnectUdp,
   forceLink,
   getLink,
   runLinkSelfTest,
@@ -33,8 +39,15 @@ import {
 } from "@/lib/audio/mpxlink-runtime";
 import type { FmParams } from "@/lib/audio/params";
 import type { MpxCodec } from "@/lib/audio/mpxlink";
+import {
+  getUdp,
+  setUdpConfig,
+  subscribeUdp,
+  type EndpointState,
+  type UdpConfig,
+} from "@/lib/audio/udp";
 import { cn } from "@/lib/utils";
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 /** Composite rate the link runs at, in kHz (192 kHz stereo composite mono sum). */
 const COMPOSITE_KHZ = 192;
@@ -47,6 +60,137 @@ function formatKbps(kbps: number): string {
 function formatMs(ms: number): string {
   if (!Number.isFinite(ms)) return "—";
   return `${ms.toFixed(0)} ms`;
+}
+
+/** Text mirror of the socket settings, so a half-typed port never commits. */
+interface UdpDraft {
+  hostA: string;
+  portA: string;
+  listenA: string;
+  hostB: string;
+  portB: string;
+  listenB: string;
+}
+
+const toDraft = (config: UdpConfig): UdpDraft => ({
+  hostA: config.hostA,
+  portA: String(config.portA),
+  listenA: String(config.listenA),
+  hostB: config.hostB,
+  portB: String(config.portB),
+  listenB: String(config.listenB),
+});
+
+/** Map a path's field patch onto the A/B draft keys. */
+const prefixA = (patch: { host?: string; port?: string; listen?: string }) => ({
+  ...(patch.host !== undefined ? { hostA: patch.host } : {}),
+  ...(patch.port !== undefined ? { portA: patch.port } : {}),
+  ...(patch.listen !== undefined ? { listenA: patch.listen } : {}),
+});
+const prefixB = (patch: { host?: string; port?: string; listen?: string }) => ({
+  ...(patch.host !== undefined ? { hostB: patch.host } : {}),
+  ...(patch.port !== undefined ? { portB: patch.port } : {}),
+  ...(patch.listen !== undefined ? { listenB: patch.listen } : {}),
+});
+
+function udpPathsLabel(endpoints: EndpointState[]): string {
+  const open = endpoints.filter((e) => e.open).length;
+  return open === 2 ? "both paths" : open === 1 ? "one path" : "no path";
+}
+
+const fromDraft = (draft: UdpDraft): UdpConfig => ({
+  hostA: draft.hostA,
+  portA: Number(draft.portA),
+  listenA: Number(draft.listenA),
+  hostB: draft.hostB,
+  portB: Number(draft.portB),
+  listenB: Number(draft.listenB),
+});
+
+/** One path: where its datagrams go, where it listens, what the socket says. */
+function PathRow({
+  label,
+  host,
+  port,
+  listen,
+  onChange,
+  onCommit,
+  disabled,
+  endpoint,
+}: {
+  label: string;
+  host: string;
+  port: string;
+  listen: string;
+  onChange: (patch: { host?: string; port?: string; listen?: string }) => void;
+  onCommit: () => void;
+  disabled: boolean;
+  endpoint: EndpointState;
+}) {
+  const field =
+    "text-readout h-6 rounded border border-border/70 bg-background/60 px-1.5 text-[10px] " +
+    "focus-visible:ring-1 focus-visible:ring-signal/60 focus-visible:outline-none " +
+    "disabled:cursor-not-allowed disabled:opacity-60";
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5">
+        <span className="text-muted-foreground w-9 shrink-0 text-[9px] font-semibold tracking-[0.08em] uppercase">
+          {label}
+        </span>
+        <Input
+          value={host}
+          disabled={disabled}
+          onChange={(e) => onChange({ host: e.target.value })}
+          onBlur={onCommit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onCommit();
+          }}
+          className={cn(field, "min-w-0 flex-1")}
+          aria-label={`${label} destination host`}
+        />
+        <Input
+          value={port}
+          disabled={disabled}
+          inputMode="numeric"
+          onChange={(e) => onChange({ port: e.target.value })}
+          onBlur={onCommit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onCommit();
+          }}
+          className={cn(field, "w-12 shrink-0 text-center")}
+          aria-label={`${label} destination port`}
+        />
+      </div>
+      <div className="flex items-center gap-1.5 pl-10">
+        <span className="text-muted-foreground text-[9px]">listen</span>
+        <Input
+          value={listen}
+          disabled={disabled}
+          inputMode="numeric"
+          onChange={(e) => onChange({ listen: e.target.value })}
+          onBlur={onCommit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onCommit();
+          }}
+          className={cn(field, "w-12 shrink-0 text-center")}
+          aria-label={`${label} listen port`}
+        />
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-[9px]",
+            endpoint.error ? "text-meter-hot" : "text-muted-foreground",
+          )}
+          title={endpoint.error ?? undefined}
+        >
+          {endpoint.error
+            ? endpoint.error
+            : endpoint.open
+              ? `:${endpoint.boundPort} · ${endpoint.sent} out · ${endpoint.received} in`
+              : "closed"}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 function LinkRow({ label, health, live }: { label: string; health: LinkHealth; live: boolean }) {
@@ -150,6 +294,15 @@ function SelfTestBlock({ report }: { report: SelfTestReport }) {
 
 export function MpxLinkPanel({ fm }: { fm: FmParams }) {
   const link = useSyncExternalStore(subscribeLink, getLink, getLink);
+  const udp = useSyncExternalStore(subscribeUdp, getUdp, getUdp);
+  const [draft, setDraft] = useState<UdpDraft>(() => toDraft(getUdp().config));
+  const [busy, setBusy] = useState(false);
+
+  const commit = () => {
+    setUdpConfig(fromDraft(draft));
+    // the config coerces out-of-range values back; show what was accepted
+    setDraft(toDraft(getUdp().config));
+  };
 
   // Receiver servo: drain the splice at a steady rate while receive mode runs.
   useEffect(() => {
@@ -159,11 +312,27 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
   }, [link.armed, link.receive]);
 
   const setCodec = (codec: MpxCodec | "off") => {
-    if (codec === "off") disarmLink(fm);
-    else if (link.armed) {
+    if (codec === "off") {
+      if (udp.open) void disconnectUdp();
+      disarmLink(fm);
+    } else if (link.armed) {
       disarmLink(fm);
       armLink(fm, codec);
     } else armLink(fm, codec);
+  };
+
+  const toggleTransport = async (want: "loop" | "udp") => {
+    if (want === "loop") {
+      if (udp.open) await disconnectUdp();
+      return;
+    }
+    if (!udp.available || busy) return;
+    setBusy(true);
+    try {
+      await connectUdp(fm);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const packetMs = (MPX_LINK_FRAME_SAMPLES / (COMPOSITE_KHZ * 1000)) * 1000;
@@ -175,24 +344,23 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
       title="Composite over IP"
       subtitle={`${COMPOSITE_KHZ} kHz MPX · dual link · hitless splice`}
       enabled={link.armed}
-      onToggle={() => setCodec(link.armed ? "off" : "flac")}
+      onToggle={() => setCodec(link.armed ? "off" : "raw")}
     >
       <div className="grid gap-4 lg:grid-cols-12">
         {/* ── send / receive configuration ── */}
         <div className="lg:col-span-7">
           <div className="divide-y divide-border/50 rounded border border-border/60 bg-card/30">
-            <CtrlRow label="Codec">
+            <CtrlRow label="Payload">
               <Seg
-                value={link.armed ? link.codec : "off"}
+                value={link.armed ? "raw" : "off"}
                 options={[
                   { value: "off", label: "Off" },
-                  { value: "flac", label: "FLAC" },
-                  { value: "raw", label: "PCM" },
+                  { value: "raw", label: "PCM 16" },
                 ]}
                 onChange={setCodec}
-                ariaLabel="Composite link codec"
+                ariaLabel="Composite link payload format"
               />
-              <Val>{link.armed ? formatKbps(link.kbps) : "idle"}</Val>
+              <Val>{link.armed ? `${formatKbps(link.kbps)} /path` : "idle"}</Val>
             </CtrlRow>
             <CtrlRow label="Receive">
               <Seg
@@ -228,20 +396,83 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
             </CtrlRow>
           </div>
 
+          {/* ── transport: where the packets actually go ── */}
+          <div className="mt-3 rounded border border-border/60 bg-card/30">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 px-3 py-2">
+              <span className="text-muted-foreground text-[10px] font-semibold tracking-[0.1em] uppercase">
+                Transport
+              </span>
+              <div className="flex items-center gap-2">
+                {busy && (
+                  <span className="text-muted-foreground text-[9px] tracking-[0.08em] uppercase">
+                    opening…
+                  </span>
+                )}
+                <Seg
+                  value={udp.open ? "udp" : "loop"}
+                  options={[
+                    { value: "loop", label: "Local" },
+                    { value: "udp", label: "UDP" },
+                  ]}
+                  onChange={(v) => void toggleTransport(v)}
+                  ariaLabel="Composite link transport"
+                />
+              </div>
+            </div>
+            {udp.available ? (
+              <div className="grid gap-2.5 p-3 sm:grid-cols-2">
+                <PathRow
+                  label="A"
+                  host={draft.hostA}
+                  port={draft.portA}
+                  listen={draft.listenA}
+                  disabled={udp.open || busy}
+                  endpoint={udp.endpoints[0]}
+                  onChange={(patch) => setDraft((d) => ({ ...d, ...prefixA(patch) }))}
+                  onCommit={commit}
+                />
+                <PathRow
+                  label="B"
+                  host={draft.hostB}
+                  port={draft.portB}
+                  listen={draft.listenB}
+                  disabled={udp.open || busy}
+                  endpoint={udp.endpoints[1]}
+                  onChange={(patch) => setDraft((d) => ({ ...d, ...prefixB(patch) }))}
+                  onCommit={commit}
+                />
+              </div>
+            ) : (
+              <p className="text-muted-foreground px-3 py-2 text-[9px] leading-3.5">
+                UDP sockets live in the desktop app — the browser build can only loop the framer
+                back into its own receiver.
+              </p>
+            )}
+            {udp.open && (
+              <p className="text-muted-foreground border-t border-border/50 px-3 py-1.5 text-[9px]">
+                {udp.packetsSent} packets on {udpPathsLabel(udp.endpoints)} · {udp.packetsReceived}{" "}
+                received
+                {udp.invalid > 0 ? ` · ${udp.invalid} rejected` : ""}
+                {udp.kbps > 0 ? ` · ${formatKbps(udp.kbps)}` : ""}
+              </p>
+            )}
+          </div>
+
           <div className="mt-3 grid gap-2 text-[9px] text-muted-foreground sm:grid-cols-2">
             <p className="leading-3.5">
               {!fm.on
                 ? "The FM exciter is off — there is no composite to frame. Switch the exciter on to feed the link."
                 : link.armed
-                  ? link.transporting
-                    ? `Transport attached — ${link.packets} packets out, ${formatKbps(link.kbps)} on the wire.`
-                    : "Framing and metering only — no transport is attached, so packets are built but not sent."
+                  ? link.transport === "udp"
+                    ? `On the wire — ${link.packets} packets per path, ${formatKbps(link.kbps)} each.`
+                    : `Loopback — ${link.packets} packets framed and fed back into the local receiver.`
                   : "Off — the composite stays inside the console."}
             </p>
             <p className="leading-3.5">
               {MPX_LINK_FRAME_SAMPLES} samples a packet · {packetMs.toFixed(2)} ms ·{" "}
-              {MPX_LINK_HEADER_BYTES} B header + payload · {LINK_RATE.toFixed(1)} packets/s · PCM
-              needs {rawKbps.toFixed(0)} kbit/s, FLAC typically a third of that.
+              {MPX_LINK_HEADER_BYTES} B header · {LINK_RATE.toFixed(1)} packets/s · 16-bit PCM needs{" "}
+              {rawKbps.toFixed(0)} kbit/s per path. A datagram is {payloadBytes + MPX_LINK_HEADER_BYTES}{" "}
+              B, so links under a ~2300 B MTU fragment it.
             </p>
           </div>
 
@@ -289,13 +520,16 @@ export function MpxLinkPanel({ fm }: { fm: FmParams }) {
                 {link.fps > 0 ? `${link.fps.toFixed(1)} /s` : "—"}
               </dd>
               <dt className="text-muted-foreground">Wire</dt>
-              <dd className="text-readout text-right">{formatKbps(link.kbps)}</dd>
+              <dd className="text-readout text-right">
+                {formatKbps(link.kbps)}
+                <span className="text-muted-foreground"> /path</span>
+              </dd>
               <dt className="text-muted-foreground">Sent</dt>
               <dd className="text-readout text-right">
                 {(link.bytes / 1024).toFixed(0)} KiB
                 <span className="text-muted-foreground">
                   {" "}
-                  · {link.transporting ? "transport" : "loopback"}
+                  · {link.transport === "udp" ? "UDP" : link.transport === "custom" ? "custom" : "loopback"}
                 </span>
               </dd>
             </dl>

@@ -17,6 +17,7 @@
  */
 import { acquireStream, releaseStream, subscribeComposite } from "./fm";
 import type { FmParams } from "./params";
+import { closeUdp, getUdp, openUdp, sendPacket, setUdpInbound, udpPaths } from "./udp";
 import {
   DEFAULT_SIMULATOR,
   MPX_LINK_FRAME_SAMPLES,
@@ -53,6 +54,8 @@ export interface LinkSnapshot {
   fps: number;
   /** A transport is attached (otherwise packets are framed but not sent). */
   transporting: boolean;
+  /** Which transport: the desktop UDP bridge, a plug-in, or none. */
+  transport: "none" | "udp" | "custom";
   /** Receive mode: arriving packets are put through the receiver. */
   receive: boolean;
   active: number;
@@ -83,12 +86,13 @@ const health0: LinkHealth = {
 
 let snapshot: LinkSnapshot = {
   armed: false,
-  codec: "flac",
+  codec: "raw",
   packets: 0,
   bytes: 0,
   kbps: 0,
   fps: 0,
   transporting: false,
+  transport: "none",
   receive: false,
   active: 0,
   forced: null,
@@ -138,7 +142,40 @@ export function setMpxTransport(
   send: ((wire: Uint8Array, packet: MpxPacket) => void) | null,
 ): void {
   transport = send;
-  snapshot = { ...snapshot, transporting: send !== null };
+  snapshot = {
+    ...snapshot,
+    transporting: send !== null,
+    transport: send === null ? "none" : "custom",
+  };
+  emit();
+}
+
+/**
+ * Put the framed stream on real UDP sockets (desktop build). Each path gets
+ * its own socket and its own header, and whatever arrives on either socket is
+ * decoded straight into the link receiver — so the two links the panel shows
+ * are the two links on the wire.
+ */
+export async function connectUdp(fm: FmParams | null): Promise<void> {
+  if (!snapshot.armed) armLink(fm, "raw");
+  setUdpInbound((packet) => {
+    if (snapshot.receive) receiver?.push(packet);
+  });
+  await openUdp();
+  const up = getUdp().open;
+  transport = up ? null : transport;
+  snapshot = {
+    ...snapshot,
+    transporting: up,
+    transport: up ? "udp" : "none",
+  };
+  emit();
+}
+
+export async function disconnectUdp(): Promise<void> {
+  await closeUdp();
+  setUdpInbound(null);
+  snapshot = { ...snapshot, transporting: false, transport: "none" };
   emit();
 }
 
@@ -147,7 +184,7 @@ export function setMpxTransport(
  * be asked to forward its composite, which is the same switch the MPX encoder
  * uses — the panel passes the current FM parameters.
  */
-export function armLink(fm: FmParams | null, codec: MpxCodec = "flac"): void {
+export function armLink(fm: FmParams | null, codec: MpxCodec = "raw"): void {
   if (detach) return;
   snapshot = { ...snapshot, armed: true, codec };
   if (fm) acquireStream(fm);
@@ -167,6 +204,9 @@ export function disarmLink(fm?: FmParams | null): void {
   detach?.();
   detach = null;
   sender = null;
+  // Drop the receiver too: with the link disarmed nothing drains it, and
+  // inbound datagrams would pile up in its buffers.
+  receiver = null;
   carry = null;
   carryLength = 0;
   if (fm) releaseStream(fm);
@@ -228,8 +268,11 @@ function pushComposite(mono: Float32Array): void {
     read += take;
     if (carryLength === bytesPerFrame) {
       const packet = framer.push(snapshot.codec, carry.slice());
-      if (receiver && snapshot.receive) receiver.push(packet);
-      transport?.(encodePacket(packet), packet);
+      // Loopback monitoring only when nothing external is feeding the
+      // receiver — otherwise the console would count its own packets twice.
+      if (receiver && snapshot.receive && udpPaths() === 0) receiver.push(packet);
+      if (snapshot.transport === "udp") sendPacket(packet);
+      else transport?.(encodePacket(packet), packet);
       carryLength = 0;
     }
   }

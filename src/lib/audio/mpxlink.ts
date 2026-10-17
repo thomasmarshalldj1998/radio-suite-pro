@@ -92,6 +92,26 @@ export function crc32(bytes: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
+/** Offset of the CRC field inside the header. */
+const CRC_OFFSET = 24;
+
+/**
+ * CRC over a whole packet with the CRC field itself read as zero.
+ *
+ * Encoding computes it on a buffer whose field is already zero; decoding must
+ * reach the same value without writing to the caller's bytes — a decoder that
+ * mutates its input cannot decode the same datagram twice.
+ */
+function crc32Zeroed(bytes: Uint8Array): number {
+  const table = (crcTable ??= buildCrcTable());
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = i >= CRC_OFFSET && i < CRC_OFFSET + 4 ? 0 : bytes[i];
+    c = table[(c ^ byte) & 0xff] ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 /** Serialise a packet: 28-byte little-endian header, then the payload. */
 export function encodePacket(p: MpxPacket): Uint8Array {
   const out = new Uint8Array(MPX_LINK_HEADER_BYTES + p.payload.byteLength);
@@ -122,10 +142,8 @@ export function decodePacket(buf: Uint8Array): MpxPacket | null {
   if (!codec) return null;
   const length = view.getUint32(20, true);
   if (MPX_LINK_HEADER_BYTES + length !== buf.byteLength) return null;
-  const want = view.getUint32(24, true);
-  view.setUint32(24, 0, true);
-  const got = crc32(buf);
-  if (got !== want) return null;
+  const want = view.getUint32(CRC_OFFSET, true);
+  if (crc32Zeroed(buf) !== want) return null;
   return {
     codec,
     sequence: view.getUint32(8, true),

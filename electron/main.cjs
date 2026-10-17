@@ -6,10 +6,20 @@
  * module workers, WASM codecs and the audio worklet all behave exactly like
  * they do over http — which file:// cannot offer.
  */
-const { app, BrowserWindow, Menu, protocol, net, session, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  ipcMain,
+  protocol,
+  net,
+  session,
+  shell,
+} = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
+const { UdpEndpoint } = require("./udp-link.cjs");
 
 const DIST = path.join(__dirname, "..", "dist-desktop");
 const isMac = process.platform === "darwin";
@@ -17,6 +27,72 @@ const isMac = process.platform === "darwin";
 const DEV_URL = process.env.SIGNALPATH_DEV_URL || "";
 
 let mainWindow = null;
+
+/* ── composite-over-IP links: one UDP socket per path ───────────────────── */
+
+/** @type {Map<"a" | "b", InstanceType<typeof UdpEndpoint>>} */
+const links = new Map();
+
+function closeAllLinks() {
+  for (const endpoint of links.values()) endpoint.close();
+  links.clear();
+}
+
+/** Only the console's own document may drive the sockets. */
+function fromApp(event) {
+  return Boolean(mainWindow) && event.sender === mainWindow.webContents;
+}
+
+function linkEndpoint(id) {
+  let endpoint = links.get(id);
+  if (!endpoint) {
+    endpoint = new UdpEndpoint({
+      onData: (bytes) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("mpx:data", id, bytes);
+        }
+      },
+    });
+    links.set(id, endpoint);
+  }
+  return endpoint;
+}
+
+const linkId = (value) => (value === "b" ? "b" : "a");
+
+ipcMain.handle("mpx:open", async (event, args) => {
+  if (!fromApp(event)) return { ok: false, error: "not the console window" };
+  const id = linkId(args?.id);
+  const endpoint = linkEndpoint(id);
+  endpoint.close();
+  try {
+    const port = await endpoint.open({
+      listenPort: args?.listenPort ?? 0,
+      listenHost: args?.listenHost ?? "0.0.0.0",
+      host: args?.host,
+      port: args?.port,
+    });
+    return { ok: true, port };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+ipcMain.on("mpx:send", (event, id, bytes) => {
+  if (!fromApp(event)) return;
+  const endpoint = links.get(linkId(id));
+  if (!endpoint || !endpoint.open) return;
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return;
+  endpoint.send(bytes);
+});
+
+ipcMain.handle("mpx:close", (event, id) => {
+  if (!fromApp(event)) return { ok: false };
+  const which = linkId(id);
+  links.get(which)?.close();
+  links.delete(which);
+  return { ok: true };
+});
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -60,11 +136,15 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
-  mainWindow.on("closed", () => (mainWindow = null));
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+    closeAllLinks();
+  });
 
   // External links leave the app; everything else stays on app://.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -135,6 +215,8 @@ if (!app.requestSingleInstanceLock()) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
+
+  app.on("before-quit", closeAllLinks);
 
   // A broadcast console quits when its last window closes — on every OS.
   app.on("window-all-closed", () => app.quit());
