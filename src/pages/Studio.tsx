@@ -226,8 +226,12 @@ type TabId =
   | "enhance"
   | "multiband"
   | "output"
+  | "stream"
   | "scope"
   | "presets";
+
+type CodecId = "off" | "mp3-64" | "mp3-128" | "mp3-320" | "aac-he-64" | "opus-96";
+type GenreId = "pop" | "rock" | "hiphop" | "edm" | "acoustic" | "talk";
 
 type BandId = "low" | "mid1" | "mid2" | "mid3" | "high";
 type TraceMode = "cyan" | "amber" | "green";
@@ -271,6 +275,56 @@ export interface Params {
   speechOn: boolean;
   autoLoudness: boolean;
   target: number;
+  // ── streaming & automation ──
+  codec: CodecId;
+  hfComp: boolean;
+  duckOn: boolean;
+  duckDepthDb: number;
+  duckReleaseMs: number;
+  duckMicOpen: boolean;
+  duckAuto: boolean;
+  genre: GenreId | "auto";
+  metadata: string;
+  backupOn: boolean;
+  talentMode: boolean;
+}
+
+/**
+ * Codec preview profiles. This is an emulation, not a real encoder: each
+ * profile band-limits the monitor feed, adds the short comb that stands in for
+ * pre-echo, and tells the HF compensation how much upper-band limiting the
+ * bitrate needs.
+ */
+export const CODEC_PROFILES: Record<
+  CodecId,
+  { label: string; bitrate: number; lowpass: number; comb: number; hfTrimDb: number }
+> = {
+  off: { label: "Preview bypassed", bitrate: 0, lowpass: 20000, comb: 0, hfTrimDb: 0 },
+  "mp3-64": { label: "MP3 · 64 kbps", bitrate: 64, lowpass: 11000, comb: 0.35, hfTrimDb: 3 },
+  "mp3-128": { label: "MP3 · 128 kbps", bitrate: 128, lowpass: 15500, comb: 0.22, hfTrimDb: 1.6 },
+  "mp3-320": { label: "MP3 · 320 kbps", bitrate: 320, lowpass: 19500, comb: 0.08, hfTrimDb: 0.4 },
+  "aac-he-64": { label: "AAC-HE · 64 kbps", bitrate: 64, lowpass: 16500, comb: 0.3, hfTrimDb: 2.4 },
+  "opus-96": { label: "Opus · 96 kbps", bitrate: 96, lowpass: 20000, comb: 0.12, hfTrimDb: 0.8 },
+};
+
+export const GENRE_PROFILES: Record<
+  GenreId,
+  { label: string; toneLow: number; toneHigh: number; bandThreshold: number; lowGain: number }
+> = {
+  pop: { label: "Pop", toneLow: 0.8, toneHigh: 1.2, bandThreshold: 0, lowGain: 0.4 },
+  rock: { label: "Rock", toneLow: -0.6, toneHigh: 1.6, bandThreshold: -0.8, lowGain: 0.6 },
+  hiphop: { label: "Hip-Hop", toneLow: 2.4, toneHigh: -0.4, bandThreshold: -1.6, lowGain: 1.2 },
+  edm: { label: "EDM", toneLow: 2, toneHigh: 1.4, bandThreshold: -1, lowGain: 1 },
+  acoustic: { label: "Acoustic", toneLow: 0, toneHigh: 0.8, bandThreshold: 0.8, lowGain: 0 },
+  talk: { label: "Talk", toneLow: -2.8, toneHigh: -0.8, bandThreshold: 1, lowGain: -0.4 },
+};
+
+/** Genre tag out of a metadata line — `[EDM]`, `genre=hiphop`, `#talk`. */
+export function parseGenreTag(metadata: string): GenreId | null {
+  const match = /(?:\[|genre\s*=\s*|#)\s*(pop|rock|hip-?hop|edm|acoustic|talk)\b/i.exec(metadata);
+  if (!match) return null;
+  const raw = match[1].toLowerCase().replace("-", "");
+  return raw as GenreId;
 }
 
 const BANDS: {
@@ -328,6 +382,17 @@ export const PRESET_A: Params = {
   speechOn: true,
   autoLoudness: true,
   target: -14,
+  codec: "off",
+  hfComp: true,
+  duckOn: true,
+  duckDepthDb: 6,
+  duckReleaseMs: 250,
+  duckMicOpen: false,
+  duckAuto: true,
+  genre: "auto",
+  metadata: "",
+  backupOn: true,
+  talentMode: false,
 };
 
 export const PRESET_B: Params = {
@@ -359,6 +424,10 @@ export const PRESET_B: Params = {
   ceilingDb: -1.5,
   limiterReleaseMs: 90,
   target: -16,
+  codec: "mp3-128",
+  duckDepthDb: 8,
+  duckReleaseMs: 180,
+  genre: "talk",
 };
 
 const PRESET_LIBRARY: { name: string; note: string; params: Params }[] = [
@@ -434,6 +503,17 @@ export function morphParams(a: Params, b: Params, t: number): Params {
     speechOn: t < 0.5 ? a.speechOn : b.speechOn,
     autoLoudness: a.autoLoudness,
     target: t < 0.5 ? a.target : b.target,
+    codec: t < 0.5 ? a.codec : b.codec,
+    hfComp: t < 0.5 ? a.hfComp : b.hfComp,
+    duckOn: t < 0.5 ? a.duckOn : b.duckOn,
+    duckDepthDb: n(a.duckDepthDb, b.duckDepthDb),
+    duckReleaseMs: n(a.duckReleaseMs, b.duckReleaseMs),
+    duckMicOpen: t < 0.5 ? a.duckMicOpen : b.duckMicOpen,
+    duckAuto: t < 0.5 ? a.duckAuto : b.duckAuto,
+    genre: t < 0.5 ? a.genre : b.genre,
+    metadata: a.metadata,
+    backupOn: t < 0.5 ? a.backupOn : b.backupOn,
+    talentMode: t < 0.5 ? a.talentMode : b.talentMode,
   };
 }
 
@@ -558,6 +638,38 @@ function buildDemo(ctx: AudioContext): AudioBuffer {
   return buffer;
 }
 
+/** Standby loop: a slow ambient bed, deliberately unlike the demo programme. */
+function buildBackup(ctx: AudioContext): AudioBuffer {
+  const sr = ctx.sampleRate;
+  const len = Math.floor(sr * 8);
+  const buffer = ctx.createBuffer(2, len, sr);
+  const L = buffer.getChannelData(0);
+  const R = buffer.getChannelData(1);
+  const chord = [110, 138.59, 164.81, 220];
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    const swell = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.08 * t - Math.PI / 2);
+    let l = 0;
+    let r = 0;
+    for (let k = 0; k < chord.length; k++) {
+      const f = chord[k];
+      l += Math.sin(2 * Math.PI * f * t + k * 0.7);
+      r += Math.sin(2 * Math.PI * f * t + k * 0.7 + 0.45);
+    }
+    const pulse = Math.exp(-((t % 1) * 7)) * Math.sin(2 * Math.PI * 55 * t) * 0.22;
+    L[i] = (l * 0.035 * swell + pulse) * 0.9;
+    R[i] = (r * 0.035 * swell + pulse) * 0.9;
+  }
+  let peak = 0;
+  for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));
+  const scale = peak > 0 ? 0.6 / peak : 1;
+  for (let i = 0; i < len; i++) {
+    L[i] *= scale;
+    R[i] *= scale;
+  }
+  return buffer;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Frame
  * ────────────────────────────────────────────────────────────────────────── */
@@ -580,6 +692,11 @@ interface Frame {
   silenceMs: number;
   speech: boolean;
   normDb: number;
+  duckDb: number;
+  backup: boolean;
+  genre: string;
+  talent: boolean;
+  codec: string;
 }
 
 const EMPTY_FRAME: Frame = {
@@ -600,6 +717,11 @@ const EMPTY_FRAME: Frame = {
   silenceMs: 0,
   speech: false,
   normDb: 0,
+  duckDb: 0,
+  backup: false,
+  genre: "—",
+  talent: false,
+  codec: "off",
 };
 
 interface LufsPoint {
@@ -654,6 +776,32 @@ export class StudioEngine {
   private normGain: GainNode;
   private outGain: GainNode;
   private limiter: DynamicsCompressorNode;
+  // voice-duck sidechain (low-mid shelf + bus trim)
+  private duckShelf: BiquadFilterNode;
+  private duckGain: GainNode;
+  // talent monitor / on-air paths
+  private mainPath: GainNode;
+  private talentPath: GainNode;
+  private talentShaper: WaveShaperNode;
+  private monitorMerge: GainNode;
+  // codec preview insert
+  private codecHp: BiquadFilterNode;
+  private codecLp: BiquadFilterNode;
+  private codecComb: DelayNode;
+  private codecCombGain: GainNode;
+  private codecSum: GainNode;
+  private codecBypass: GainNode;
+  private codecOut: GainNode;
+  // silence backup source
+  private backupGain: GainNode;
+  private backupSrc: AudioBufferSourceNode | null = null;
+  private backupBuffer: AudioBuffer | null = null;
+  private backupActive = false;
+  private backupHealthyMs = 0;
+  /** Silence needed before the backup source takes over (ms). */
+  backupHoldMs = 5000;
+  /** Healthy program needed before the backup is released (ms). */
+  backupReturnMs = 2000;
 
   // analysers
   private inL: AnalyserNode;
@@ -674,6 +822,8 @@ export class StudioEngine {
   private bufL = new Float32Array(2048);
   private bufR = new Float32Array(2048);
   private bufK = new Float32Array(2048);
+  /** Program fade — the backup crossfades against this, not the source bus. */
+  private programFade: GainNode;
   private bufS = new Float32Array(1024);
   private pitchBuf = new Float32Array(2048);
   private scopeBufL = new Float32Array(2048);
@@ -724,14 +874,18 @@ export class StudioEngine {
     };
 
     this.srcGain = gain(1);
+    this.programFade = gain(1);
     this.pre = gain(1);
-    this.srcGain.connect(this.pre);
+    this.srcGain.connect(this.programFade);
+    this.programFade.connect(this.pre);
 
-    // INPUT meters (post preamp trim, pre processing)
+    // INPUT meters (post preamp trim, pre processing). They sit on the source
+    // bus ahead of the backup crossfade, so the silence gate keeps hearing the
+    // real program even while the standby is on air.
     const inSplit = ctx.createChannelSplitter(2);
     this.inL = an();
     this.inR = an();
-    this.pre.connect(inSplit);
+    this.srcGain.connect(inSplit);
     inSplit.connect(this.inL, 0);
     inSplit.connect(this.inR, 1);
 
@@ -786,7 +940,13 @@ export class StudioEngine {
     this.dynLow = filt("peaking", 120, 1);
     this.dynMid = filt("peaking", 900, 1);
     this.dynHigh = filt("peaking", 5000, 1);
-    this.subMix.connect(this.dynLow);
+    // voice-duck sidechain: a low-mid shelf and a bus trim, driven by the
+    // DJ-mic detection, sit between the AGC and the band split
+    this.duckShelf = filt("lowshelf", 260);
+    this.duckGain = gain(1);
+    this.subMix.connect(this.duckShelf);
+    this.duckShelf.connect(this.duckGain);
+    this.duckGain.connect(this.dynLow);
     this.dynLow.connect(this.dynMid);
     this.dynMid.connect(this.dynHigh);
 
@@ -859,6 +1019,10 @@ export class StudioEngine {
     this.hfShelf.connect(this.normGain);
     this.normGain.connect(this.outGain);
 
+    // standby source joins the chain ahead of the preamp
+    this.backupGain = gain(0);
+    this.backupGain.connect(this.pre);
+
     // LIMITER (final ceiling, then the device)
     this.limiter = ctx.createDynamicsCompressor();
     this.limiter.threshold.value = -1;
@@ -867,11 +1031,44 @@ export class StudioEngine {
     this.limiter.attack.value = 0.001;
     this.limiter.release.value = 0.12;
     this.outGain.connect(this.limiter);
-    this.limiter.connect(ctx.destination);
 
-    // OUTPUT taps
+    // two monitor paths: the on-air chain (through the limiter) and the
+    // talent feed, which skips the limiter's look-ahead entirely
+    this.mainPath = gain(1);
+    this.talentPath = gain(0);
+    this.talentShaper = ctx.createWaveShaper();
+    this.talentShaper.oversample = "none";
+    this.talentShaper.curve = softClipCurve(1.1);
+    this.monitorMerge = gain(1);
+    this.limiter.connect(this.mainPath);
+    this.mainPath.connect(this.monitorMerge);
+    this.outGain.connect(this.talentShaper);
+    this.talentShaper.connect(this.talentPath);
+    this.talentPath.connect(this.monitorMerge);
+
+    // codec preview insert — band-limit plus a short pre-echo comb
+    this.codecHp = filt("highpass", 28, 0.707);
+    this.codecLp = filt("lowpass", 20000, 0.707);
+    this.codecComb = ctx.createDelay(0.05);
+    this.codecComb.delayTime.value = 0.0032;
+    this.codecCombGain = gain(0);
+    this.codecSum = gain(0);
+    this.codecBypass = gain(1);
+    this.codecOut = gain(1);
+    this.monitorMerge.connect(this.codecBypass);
+    this.codecBypass.connect(this.codecOut);
+    this.monitorMerge.connect(this.codecHp);
+    this.codecHp.connect(this.codecLp);
+    this.codecLp.connect(this.codecSum);
+    this.codecLp.connect(this.codecComb);
+    this.codecComb.connect(this.codecCombGain);
+    this.codecCombGain.connect(this.codecSum);
+    this.codecSum.connect(this.codecOut);
+    this.codecOut.connect(ctx.destination);
+
+    // OUTPUT taps follow the selected monitor path
     const outSplit = ctx.createChannelSplitter(2);
-    this.limiter.connect(outSplit);
+    this.monitorMerge.connect(outSplit);
     this.outL = an();
     this.outR = an();
     this.scopeL = an(2048);
@@ -900,12 +1097,12 @@ export class StudioEngine {
     // speech detector — voice band and a low band for the sub gate
     const vHp = filt("highpass", 280, 0.707);
     const vLp = filt("lowpass", 3400, 0.707);
-    this.pre.connect(vHp);
+    this.srcGain.connect(vHp);
     vHp.connect(vLp);
     this.voiceAn = an();
     vLp.connect(this.voiceAn);
     const lowLp = filt("lowpass", 180, 0.707);
-    this.pre.connect(lowLp);
+    this.srcGain.connect(lowLp);
     this.lowAn = an();
     lowLp.connect(this.lowAn);
 
@@ -958,6 +1155,43 @@ export class StudioEngine {
     this.micNode = node;
   }
 
+  /** Standby loop takes over the chain after a long silence. */
+  private enterBackup(): void {
+    if (!this.backupBuffer) this.backupBuffer = buildBackup(this.ctx);
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.backupBuffer;
+    src.loop = true;
+    src.connect(this.backupGain);
+    src.start();
+    this.backupSrc = src;
+    this.backupActive = true;
+    this.backupHealthyMs = 0;
+    const now = this.ctx.currentTime;
+    this.programFade.gain.setTargetAtTime(0, now, 0.08);
+    this.backupGain.gain.setTargetAtTime(1, now, 0.08);
+  }
+
+  /** Programme is healthy again — hand the chain back. */
+  private leaveBackup(): void {
+    const now = this.ctx.currentTime;
+    this.programFade.gain.setTargetAtTime(1, now, 0.08);
+    this.backupGain.gain.setTargetAtTime(0, now, 0.08);
+    this.backupActive = false;
+    this.backupHealthyMs = 0;
+    const src = this.backupSrc;
+    this.backupSrc = null;
+    if (src) {
+      setTimeout(() => {
+        try {
+          src.stop();
+        } catch {
+          /* already stopped */
+        }
+        src.disconnect();
+      }, 400);
+    }
+  }
+
   private stopSource(): void {
     try {
       this.demo?.stop();
@@ -989,6 +1223,15 @@ export class StudioEngine {
 
   dispose(): void {
     this.stopSource();
+    if (this.backupSrc) {
+      try {
+        this.backupSrc.stop();
+      } catch {
+        /* already stopped */
+      }
+      this.backupSrc.disconnect();
+      this.backupSrc = null;
+    }
     this.suspend();
     void this.ctx.close();
   }
@@ -998,9 +1241,14 @@ export class StudioEngine {
   apply(p: Params): void {
     const now = this.ctx.currentTime;
     this.target = p.target;
+    const genre = this.genreActive ? GENRE_PROFILES[this.genreActive] : null;
+    const trim =
+      this.hfComp && this.codecId !== "off"
+        ? CODEC_PROFILES[this.codecId].hfTrimDb
+        : 0;
     this.pre.gain.setTargetAtTime(dbToGain(p.inputGainDb), now, 0.02);
-    this.toneLow.gain.setTargetAtTime(p.toneLowDb, now, 0.03);
-    this.toneHigh.gain.setTargetAtTime(p.toneHighDb, now, 0.03);
+    this.toneLow.gain.setTargetAtTime(p.toneLowDb + (genre?.toneLow ?? 0), now, 0.03);
+    this.toneHigh.gain.setTargetAtTime(p.toneHighDb + (genre?.toneHigh ?? 0), now, 0.03);
 
     // de-clipper: soft-knee peak reconstruction above the threshold
     const mix = clamp(p.declipMix / 100, 0, 1);
@@ -1035,20 +1283,44 @@ export class StudioEngine {
     BANDS.forEach((band, i) => {
       const b = p.bands[band.id];
       const comp = this.bandComp[i];
-      comp.threshold.setTargetAtTime(b.thresholdDb, now, 0.03);
+      // genre profile shifts the whole split; HF compensation leans harder on
+      // the top band so low-bitrate encoders get less pre-echo to chew on
+      const threshold =
+        b.thresholdDb +
+        (genre?.bandThreshold ?? 0) -
+        (band.id === "high" ? trim : 0);
+      const release = b.releaseMs * (band.id === "high" && trim > 0 ? 0.75 : 1);
+      comp.threshold.setTargetAtTime(threshold, now, 0.03);
       comp.ratio.setTargetAtTime(clamp(b.ratio, 1, 20), now, 0.03);
       comp.attack.setTargetAtTime(Math.max(b.attackMs, 0.5) / 1000, now, 0.02);
-      comp.release.setTargetAtTime(Math.max(b.releaseMs, 20) / 1000, now, 0.02);
-      this.bandGain[i].gain.setTargetAtTime(dbToGain(b.gainDb), now, 0.03);
+      comp.release.setTargetAtTime(Math.max(release, 20) / 1000, now, 0.02);
+      const makeup = b.gainDb + (band.id === "low" ? (genre?.lowGain ?? 0) : 0);
+      this.bandGain[i].gain.setTargetAtTime(dbToGain(makeup), now, 0.03);
     });
 
     if (!p.transientOn) this.transGain.gain.setTargetAtTime(0, now, 0.02);
     this.side.gain.setTargetAtTime(clamp(p.width / 100, 0, 2), now, 0.04);
-    this.hfShelf.gain.setTargetAtTime(p.hf * 0.12, now, 0.03);
+    this.hfShelf.gain.setTargetAtTime(p.hf * 0.12 - trim * 0.6, now, 0.03);
     this.limiter.threshold.setTargetAtTime(p.ceilingDb, now, 0.03);
     this.limiter.release.setTargetAtTime(Math.max(p.limiterReleaseMs, 20) / 1000, now, 0.03);
     this.outGain.gain.setTargetAtTime(dbToGain(p.outputGainDb), now, 0.03);
     this.normGain.gain.setTargetAtTime(dbToGain(this.normDb), now, 0.25);
+
+    // codec preview: band-limit + short pre-echo comb, crossfaded in
+    const profile = CODEC_PROFILES[p.codec];
+    const preview = p.codec !== "off";
+    this.codecLp.frequency.setTargetAtTime(profile.lowpass, now, 0.03);
+    this.codecCombGain.gain.setTargetAtTime(preview ? profile.comb * 0.55 : 0, now, 0.03);
+    this.codecBypass.gain.setTargetAtTime(preview ? 0 : 1, now, 0.02);
+    this.codecSum.gain.setTargetAtTime(preview ? 1 : 0, now, 0.02);
+
+    // talent feed bypasses the limiter's look-ahead
+    this.mainPath.gain.setTargetAtTime(p.talentMode ? 0 : 1, now, 0.02);
+    this.talentPath.gain.setTargetAtTime(p.talentMode ? 1 : 0, now, 0.02);
+
+    this.frame.codec = p.codec;
+    this.frame.genre = genre?.label ?? "—";
+    this.frame.talent = p.talentMode;
   }
 
   /* ── measurement ────────────────────────────────────────────────────── */
@@ -1135,6 +1407,17 @@ export class StudioEngine {
     }
     f.silenceMs = this.silentSince === 0 ? 0 : now - this.silentSince;
 
+    // silence backup: after the hold the standby loop takes the chain, and it
+    // releases only after the program has been healthy for the return window
+    if (this.backupOn && !this.backupActive && f.silenceMs >= this.backupHoldMs) {
+      this.enterBackup();
+    }
+    if (this.backupActive) {
+      this.backupHealthyMs = f.silenceMs === 0 ? this.backupHealthyMs + 100 : 0;
+      if (this.backupHealthyMs >= this.backupReturnMs) this.leaveBackup();
+    }
+    f.backup = this.backupActive;
+
     // speech detection from voice-band energy ratio
     this.voiceAn.getFloatTimeDomainData(this.bufS);
     const voice = rms(this.bufS);
@@ -1149,6 +1432,18 @@ export class StudioEngine {
     if (!this.speech && this.speechHold >= 300) this.speech = true;
     if (this.speech && this.speechQuiet >= 1500) this.speech = false;
     f.speech = this.speech;
+
+    // voice ducking: the DJ mic (manual switch, or the voice detector on the
+    // demo program) pulls the bed down and the low-mid shelf with it
+    const wantDuck =
+      this.duckOn &&
+      (this.duckMicOpen || (this.duckAuto && this.speech && this.sourceMode === "demo"))
+        ? this.duckDepthDb
+        : 0;
+    this.duckDb = wantDuck;
+    this.duckGain.gain.setTargetAtTime(dbToGain(-wantDuck * 0.5), now, 0.06);
+    this.duckShelf.gain.setTargetAtTime(-wantDuck * 0.8, now, 0.08);
+    f.duckDb = wantDuck;
 
     // dynamic EQ — cut where a detector band is hot
     const amounts = [0, 1, 2].map((i) => {
@@ -1210,8 +1505,13 @@ export class StudioEngine {
 
     // speech profile for AGC + bands
     const fast = this.speech && this.speechOn;
+    const ducked = this.duckDb > 0;
     const agcAttack = Math.max((fast ? this.appliedAttack * 0.55 : this.appliedAttack) / 1000, 0.0005);
-    const agcRelease = Math.max((fast ? this.appliedRelease * 0.45 : this.appliedRelease) / 1000, 0.02);
+    // while the mic is open the release is the operator's duck recovery time,
+    // so the bed comes back at a predictable rate
+    const agcRelease = ducked
+      ? Math.max(this.duckReleaseMs / 1000, 0.02)
+      : Math.max((fast ? this.appliedRelease * 0.45 : this.appliedRelease) / 1000, 0.02);
     this.agc.attack.setTargetAtTime(agcAttack, now, 0.05);
     this.agc.release.setTargetAtTime(agcRelease, now, 0.05);
     BANDS.forEach((band, i) => {
@@ -1235,6 +1535,18 @@ export class StudioEngine {
   private autoLoudness = true;
   private speechOn = true;
   private bandParams: Record<BandId, BandParams> = defaultBands();
+  // streaming & automation state
+  private codecId: CodecId = "off";
+  private hfComp = true;
+  private duckOn = true;
+  private duckDepthDb = 6;
+  private duckReleaseMs = 250;
+  private duckMicOpen = false;
+  private duckAuto = true;
+  private duckDb = 0;
+  private genreActive: GenreId | null = null;
+  private backupOn = true;
+  private talentMode = false;
 
   setControlState(p: Params): void {
     this.dynEqScale = clamp(p.dynEq / 100, 0, 1);
@@ -1247,6 +1559,18 @@ export class StudioEngine {
     this.autoLoudness = p.autoLoudness;
     this.speechOn = p.speechOn;
     this.bandParams = p.bands;
+    this.codecId = p.codec;
+    this.hfComp = p.hfComp;
+    this.duckOn = p.duckOn;
+    this.duckDepthDb = p.duckDepthDb;
+    this.duckReleaseMs = p.duckReleaseMs;
+    this.duckMicOpen = p.duckMicOpen;
+    this.duckAuto = p.duckAuto;
+    this.genreActive =
+      p.genre === "auto" ? parseGenreTag(p.metadata) : (p.genre as GenreId);
+    this.backupOn = p.backupOn;
+    this.talentMode = p.talentMode;
+    if (!this.backupOn && this.backupActive) this.leaveBackup();
   }
 
   scope(): { l: Float32Array; r: Float32Array } {
@@ -1381,6 +1705,17 @@ export function detectPitch(buf: Float32Array, sr: number): number {
     }
   }
   return best > 0.28 && bestLag > 0 ? sr / bestLag : 0;
+}
+
+export /** Gentle tanh limiter for the talent feed — no look-ahead, just soft knee. */
+function softClipCurve(drive: number): Float32Array<ArrayBuffer> {
+  const n = 2048;
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.tanh(x * drive) / Math.tanh(drive);
+  }
+  return curve;
 }
 
 export function declipCurve(driveDb: number, thresholdDb: number): Float32Array<ArrayBuffer> {
@@ -2152,6 +2487,142 @@ function OutputPanel({ p, frame, setParam }: PanelCtx) {
   );
 }
 
+function StreamPanel({ p, frame, setParam }: PanelCtx) {
+  const profile = CODEC_PROFILES[p.codec];
+  const preview = p.codec !== "off";
+  const trim = preview && p.hfComp ? profile.hfTrimDb : 0;
+  return (
+    <div className="sp-grid">
+      <Card
+        className="sp-col-6"
+        title="Codec preview"
+        subtitle="Listen through the delivery codec before it leaves the building"
+        right={<span className={`sp-tag ${preview ? "cyan" : ""}`}>{preview ? `${profile.bitrate} kbps` : "bypass"}</span>}
+      >
+        <div className="sp-row">
+          <span className="sp-row-label">Preview codec</span>
+          <select
+            className="sp-select"
+            aria-label="Codec preview"
+            value={p.codec}
+            onChange={(e) => setParam("codec", e.target.value as CodecId)}
+          >
+            {(Object.keys(CODEC_PROFILES) as CodecId[]).map((id) => (
+              <option key={id} value={id}>{CODEC_PROFILES[id].label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="sp-row">
+          <span className="sp-row-label">Auto-codec HF compensation<i>pre-echo guard</i></span>
+          <Toggle label={p.hfComp ? "On" : "Off"} on={p.hfComp} onChange={(v) => setParam("hfComp", v)} />
+        </div>
+        <div className="sp-kv"><span>Bandwidth</span><b className="sp-mono">{preview ? `${(profile.lowpass / 1000).toFixed(1)} kHz` : "full band"}</b></div>
+        <div className="sp-kv"><span>HF limiting trim</span><b className="sp-mono">{trim.toFixed(1)} dB</b></div>
+        <div className="sp-kv"><span>Pre-echo model</span><b className="sp-mono">{preview ? "3.2 ms comb" : "off"}</b></div>
+        <p className="sp-note">
+          The preview monitors through a band-limited copy of the output with a
+          short comb that stands in for pre-echo, so 64 kbps artefacts are
+          audible without leaving the console. With compensation on, the top
+          band is limited harder and the HF shelf backed off before delivery,
+          which is what stops those artefacts at the encoder.
+        </p>
+      </Card>
+
+      <Card
+        className="sp-col-6"
+        title="Voice-ducking sidechain"
+        subtitle="DJ mic open · low-mid duck · faster AGC release"
+        right={<span className={`sp-tag ${frame.duckDb > 0 ? "amber" : ""}`}>{frame.duckDb > 0 ? `−${frame.duckDb.toFixed(0)} dB` : "idle"}</span>}
+      >
+        <div className="sp-row">
+          <span className="sp-row-label">Sidechain<i>auto or manual</i></span>
+          <Toggle label={p.duckOn ? "Armed" : "Off"} on={p.duckOn} onChange={(v) => setParam("duckOn", v)} />
+        </div>
+        <div className="sp-row">
+          <span className="sp-row-label">DJ mic open<i>manual trigger</i></span>
+          <Toggle label={p.duckMicOpen ? "Open" : "Closed"} on={p.duckMicOpen} onChange={(v) => setParam("duckMicOpen", v)} />
+        </div>
+        <div className="sp-row">
+          <span className="sp-row-label">Follow voice detector</span>
+          <Toggle label={p.duckAuto ? "Auto" : "Manual"} on={p.duckAuto} onChange={(v) => setParam("duckAuto", v)} />
+        </div>
+        <Slider label="Duck depth" value={p.duckDepthDb} min={0} max={12} step={0.5}
+          onChange={(v) => setParam("duckDepthDb", v)} format={(v) => `${v.toFixed(1)} dB`} />
+        <Slider label="Recovery release" value={p.duckReleaseMs} min={60} max={600} step={10}
+          onChange={(v) => setParam("duckReleaseMs", v)} format={(v) => `${v.toFixed(0)} ms`} />
+        <p className="sp-note">
+          When the mic opens the bed drops {p.duckDepthDb.toFixed(1)} dB and a 260 Hz
+          low-mid shelf steps back; the AGC release is shortened while the duck is
+          active so the music recovers quickly. The detector can be the manual mic
+          switch or the voice-band energy tracker.
+        </p>
+      </Card>
+
+      <Card
+        className="sp-col-6"
+        title="Metadata-driven preset trigger"
+        subtitle="Switch EQ and multiband profiles from the now-playing tag"
+        right={<span className={`sp-tag ${frame.genre !== "—" ? "cyan" : ""}`}>{frame.genre}</span>}
+      >
+        <div className="sp-row">
+          <span className="sp-row-label">Now playing / tags</span>
+          <input
+            className="sp-select"
+            style={{ width: "100%" }}
+            aria-label="Metadata tags"
+            placeholder="Artist - Title  [EDM]"
+            value={p.metadata}
+            onChange={(e) => setParam("metadata", e.target.value)}
+          />
+        </div>
+        <div className="sp-row">
+          <span className="sp-row-label">Genre profile</span>
+          <select
+            className="sp-select"
+            aria-label="Genre profile"
+            value={p.genre}
+            onChange={(e) => setParam("genre", e.target.value as GenreId | "auto")}
+          >
+            <option value="auto">Auto (parse tag)</option>
+            {(Object.keys(GENRE_PROFILES) as GenreId[]).map((id) => (
+              <option key={id} value={id}>{GENRE_PROFILES[id].label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="sp-kv"><span>Active profile</span><b>{frame.genre}</b></div>
+        <div className="sp-kv"><span>EQ tilt</span><b className="sp-mono">{p.genre === "auto" ? "from tag" : `${GENRE_PROFILES[p.genre].toneLow.toFixed(1)} / ${GENRE_PROFILES[p.genre].toneHigh.toFixed(1)} dB`}</b></div>
+        <div className="sp-kv"><span>Band threshold shift</span><b className="sp-mono">{p.genre === "auto" ? "—" : `${GENRE_PROFILES[p.genre].bandThreshold.toFixed(1)} dB`}</b></div>
+        <p className="sp-note">
+          A tag such as <b>[EDM]</b>, <b>genre=hiphop</b> or <b>#talk</b> in the
+          metadata switches the tone tilt and the multiband threshold offset the
+          moment the track changes. Set the selector to a fixed genre to lock it.
+        </p>
+      </Card>
+
+      <Card className="sp-col-6" title="Failover & monitoring" subtitle="Silence backup · talent monitor">
+        <div className="sp-row">
+          <span className="sp-row-label">Silence backup<i>5 s hold</i></span>
+          <Toggle label={p.backupOn ? "Armed" : "Off"} on={p.backupOn} onChange={(v) => setParam("backupOn", v)} />
+        </div>
+        <div className="sp-kv"><span>Backup source</span><b className="sp-mono">{frame.backup ? "on air" : "standby"}</b></div>
+        <div className="sp-kv"><span>Programme silence</span><b className="sp-mono">{(frame.silenceMs / 1000).toFixed(1)} s</b></div>
+        <div className="sp-row" style={{ marginTop: 10 }}>
+          <span className="sp-row-label">Talent monitor<i>bypass look-ahead</i></span>
+          <Toggle label={p.talentMode ? "Low latency" : "On air"} on={p.talentMode} onChange={(v) => setParam("talentMode", v)} />
+        </div>
+        <div className="sp-kv"><span>Monitor path</span><b>{frame.talent ? "pre-limiter" : "full chain"}</b></div>
+        <div className="sp-kv"><span>Look-ahead</span><b className="sp-mono">{frame.talent ? "0 samples" : "limiter window"}</b></div>
+        <p className="sp-note">
+          The backup loop crossfades in after five seconds below −55 dBFS and hands
+          the chain back once the real programme has been healthy for two seconds.
+          Talent mode feeds the headphones from before the limiter, with a soft clip
+          as the only safety — the on-air chain is untouched.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
 function ScopePanel({
   engine, running, p, frame, trace, setTrace,
 }: PanelCtx & { engine: StudioEngine | null; trace: TraceMode; setTrace: (m: TraceMode) => void }) {
@@ -2286,6 +2757,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "enhance", label: "Enhancers & Sub" },
   { id: "multiband", label: "Multiband 5-Band" },
   { id: "output", label: "Limiter & Output" },
+  { id: "stream", label: "Streaming & Automation" },
   { id: "scope", label: "Telemetry Scope" },
   { id: "presets", label: "Preset Morph" },
 ];
@@ -2302,6 +2774,7 @@ const TAB_STAGES: Record<TabId, string[]> = {
   enhance: ["SUB-BASS", "TRANSIENT"],
   multiband: ["MULTIBAND"],
   output: ["LIMITER", "OUTPUT"],
+  stream: ["LIMITER", "OUTPUT"],
   scope: [],
   presets: [],
 };
@@ -2511,6 +2984,8 @@ export default function Studio() {
         return <MultibandPanel {...panelCtx} />;
       case "output":
         return <OutputPanel {...panelCtx} />;
+      case "stream":
+        return <StreamPanel {...panelCtx} />;
       case "scope":
         return (
           <ScopePanel
@@ -2614,6 +3089,11 @@ export default function Studio() {
               <span className="sp-deck-title">
                 <b className="sp-mono">{p.target.toFixed(1)}</b> LUFS target
               </span>
+              {p.codec !== "off" ? (
+                <span className="sp-tag cyan">preview {CODEC_PROFILES[p.codec].bitrate}k</span>
+              ) : null}
+              {frame.backup ? <span className="sp-tag amber">backup on air</span> : null}
+              {frame.talent ? <span className="sp-tag amber">talent monitor</span> : null}
             </span>
           </div>
           <div className="sp-meters">

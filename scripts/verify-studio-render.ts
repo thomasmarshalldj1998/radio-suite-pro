@@ -92,11 +92,12 @@ const TABS = [
   "Enhancers &amp; Sub",
   "Multiband 5-Band",
   "Limiter &amp; Output",
+  "Streaming &amp; Automation",
   "Telemetry Scope",
   "Preset Morph",
 ];
 const missingTabs = TABS.filter((t) => !html.includes(t));
-check(missingTabs.length === 0, "all eight workspace tabs render", missingTabs.join(", ") || `${TABS.length} tabs`);
+check(missingTabs.length === 0, "all nine workspace tabs render", missingTabs.join(", ") || `${TABS.length} tabs`);
 check(/sp-tab active"[^>]*>Input \/ Preamp/.test(html), "the input panel is the default tab");
 
 console.log("\n6 · loudness targets");

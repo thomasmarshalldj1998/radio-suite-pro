@@ -18,6 +18,8 @@
  * 10  the true-peak estimate catches an inter-sample peak
  */
 import {
+  CODEC_PROFILES,
+  GENRE_PROFILES,
   PRESET_A,
   PRESET_B,
   correlation,
@@ -25,8 +27,8 @@ import {
   detectPitch,
   gatedLoudness,
   morphParams,
+  parseGenreTag,
   truePeak,
-  type Params,
 } from "../src/pages/Studio";
 
 let passed = 0;
@@ -161,6 +163,25 @@ check(Math.abs(truePeak(dc, dc) - 0.5) < 1e-6, "DC peak reads its level");
 const ramp = new Float32Array(64);
 for (let i = 0; i < ramp.length; i++) ramp[i] = Math.min(1, i / 40);
 check(truePeak(ramp, ramp) >= 1 - 1e-6, "an inter-sample peak is caught", truePeak(ramp, ramp).toFixed(4));
+
+/* ── 11: genre tags + codec table ─────────────────────────────────────── */
+
+console.log("\n11 · genre + codec tables");
+check(parseGenreTag("Artist - Track [EDM]") === "edm", "a bracketed tag is parsed");
+check(parseGenreTag("genre=hiphop") === "hiphop", "a genre= tag is parsed");
+check(parseGenreTag("new track #talk") === "talk", "a hash tag is parsed");
+check(parseGenreTag("no tag here") === null, "plain metadata triggers nothing");
+check(GENRE_PROFILES.edm.toneLow > 0 && GENRE_PROFILES.talk.toneLow < 0, "profiles tilt the low end in the right direction");
+check(
+  CODEC_PROFILES["mp3-64"].lowpass < CODEC_PROFILES["mp3-320"].lowpass,
+  "lower bitrates are band-limited harder",
+  `${CODEC_PROFILES["mp3-64"].lowpass} Hz vs ${CODEC_PROFILES["mp3-320"].lowpass} Hz`,
+);
+check(
+  CODEC_PROFILES["mp3-64"].hfTrimDb > CODEC_PROFILES["mp3-128"].hfTrimDb,
+  "HF compensation scales with the bitrate",
+  `${CODEC_PROFILES["mp3-64"].hfTrimDb} dB vs ${CODEC_PROFILES["mp3-128"].hfTrimDb} dB`,
+);
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);
 process.exit(failed === 0 ? 0 : 1);

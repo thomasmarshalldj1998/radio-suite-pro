@@ -56,6 +56,16 @@ after a gesture.
 - **Workflow** — A/B morph (0–100 % interpolation of every numeric parameter),
   preset library, and auto-speech sensing that switches the AGC and all five
   band compressors to a faster profile while voice is detected.
+- **Streaming & automation** — codec preview through MP3 64/128/320, AAC-HE 64k
+  and Opus 96k (band-limited monitor plus a 3.2 ms pre-echo comb), with
+  auto-codec HF compensation that limits the top band harder and backs off the
+  HF shelf as the bitrate falls; a voice-duck sidechain (depth, recovery time,
+  manual mic switch or the voice detector) that drops the bed and a 260 Hz
+  low-mid shelf; a metadata preset trigger that reads `[EDM]`, `genre=hiphop`
+  or `#talk` and shifts the tone tilt and band thresholds; a five-second
+  silence backup that crossfades to a standby loop and returns after two
+  seconds of healthy programme; and a low-latency talent monitor that feeds
+  the headphones from before the limiter, with a soft clip as its only guard.
 
 The DSP helpers and the engine class are exported so the verification scripts
 drive the real implementation rather than a copy:

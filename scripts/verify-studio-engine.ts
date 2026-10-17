@@ -75,13 +75,15 @@ class FakeCompressor extends FakeNode {
   reduction = -3;
 }
 
+let fakeLevel = 0.5;
+
 class FakeAnalyser extends FakeNode {
   fftSize = 2048;
   smoothingTimeConstant = 0;
   private phase = 0;
   getFloatTimeDomainData(out: Float32Array) {
     for (let i = 0; i < out.length; i++) {
-      out[i] = Math.sin((2 * Math.PI * 100 * (i + this.phase)) / 48000) * 0.5;
+      out[i] = Math.sin((2 * Math.PI * 100 * (i + this.phase)) / 48000) * fakeLevel;
     }
     this.phase += 7;
   }
@@ -174,6 +176,13 @@ class FakeContext {
     this.oscillators.push(n);
     return n;
   }
+  delays: { delayTime: FakeParam }[] = [];
+  createDelay() {
+    const node = new FakeNode() as FakeNode & { delayTime: FakeParam };
+    node.delayTime = new FakeParam();
+    this.delays.push(node);
+    return node;
+  }
   createChannelSplitter() {
     return new FakeNode();
   }
@@ -222,7 +231,9 @@ check(ctx.compressors.length === 7, "AGC + 5 bands + limiter are all compressors
 check(ctx.oscillators.length === 2, "sub and upper-harmonic oscillators exist", `${ctx.oscillators.length}`);
 check(ctx.filters.length >= 20, "the filter network is built", `${ctx.filters.length} biquads`);
 check(ctx.analysers.length === 15, "all meter and detector taps exist", `${ctx.analysers.length} analysers`);
-check(ctx.shapers.length === 1 && ctx.shapers[0].oversample === "4x", "the de-clipper is a 4× overshaper");
+check(ctx.shapers.length === 2, "de-clipper and talent safety shapers both exist", `${ctx.shapers.length}`);
+check(ctx.shapers.some((s) => s.oversample === "4x"), "the de-clipper is a 4× overshaper");
+check(ctx.delays.length === 1, "the codec preview has its pre-echo delay", `${ctx.delays.length}`);
 
 /* ── 2-4: measurement ──────────────────────────────────────────────────── */
 
@@ -272,6 +283,95 @@ for (let i = 0; i < 8; i++) engine.tickNow();
 const raised = ctx.oscillators[0].frequency.value;
 check(raised > 30 && raised <= 60.01, "a 60 Hz cutoff lets it rise", `${raised.toFixed(1)} Hz`);
 
+/* ── 5c: streaming & automation ─────────────────────────────────────── */
+
+console.log("\n5c · codec preview");
+const codecOn = { ...PRESET_A, codec: "mp3-64" as const, hfComp: true };
+engine.setControlState(codecOn);
+engine.apply(codecOn);
+engine.tickNow();
+check(
+  ctx.filters.some((f) => f.type === "lowpass" && Math.abs(f.frequency.value - 11000) < 2),
+  "the 64 kbps profile band-limits at 11 kHz",
+);
+const highBandCut = ctx.compressors[5].threshold.value;
+const expectedCut = PRESET_A.bands.high.thresholdDb - 3;
+check(Math.abs(highBandCut - expectedCut) < 0.05, "HF compensation trims the top band", `${highBandCut.toFixed(1)} dB`);
+const codecOffHf = { ...PRESET_A, codec: "off" as const, hfComp: true };
+engine.setControlState(codecOffHf);
+engine.apply(codecOffHf);
+check(
+  Math.abs(ctx.compressors[5].threshold.value - PRESET_A.bands.high.thresholdDb) < 0.05,
+  "with preview off the band is untouched",
+  `${ctx.compressors[5].threshold.value.toFixed(1)} dB`,
+);
+
+console.log("\n5d · voice ducking");
+const duck = { ...PRESET_A, duckOn: true, duckMicOpen: true, duckDepthDb: 6 };
+engine.setControlState(duck);
+engine.apply(duck);
+engine.tickNow();
+check(Math.abs(engine.frame.duckDb - 6) < 0.01, "an open mic ducks the bed", `${engine.frame.duckDb} dB`);
+check(
+  Math.abs(ctx.compressors[0].release.value - 0.25) < 0.001,
+  "the AGC release follows the duck recovery time",
+  `${(ctx.compressors[0].release.value * 1000).toFixed(0)} ms`,
+);
+const duckClosed = { ...duck, duckMicOpen: false, duckAuto: false };
+engine.setControlState(duckClosed);
+engine.apply(duckClosed);
+engine.tickNow();
+check(engine.frame.duckDb === 0, "a closed mic releases the duck");
+
+console.log("\n5e · metadata trigger");
+const talk = { ...PRESET_A, genre: "talk" as const };
+engine.setControlState(talk);
+engine.apply(talk);
+check(engine.frame.genre === "Talk", "an explicit genre selects its profile", engine.frame.genre);
+const talkTilt = ctx.filters[0].gain.value;
+const hiphop = { ...PRESET_A, genre: "hiphop" as const };
+engine.setControlState(hiphop);
+engine.apply(hiphop);
+const hiphopTilt = ctx.filters[0].gain.value;
+check(hiphopTilt > talkTilt + 3, "the genre profile really moves the tone stage", `${talkTilt.toFixed(1)} dB → ${hiphopTilt.toFixed(1)} dB`);
+const talkGenre = { ...PRESET_A, genre: "talk" as const };
+engine.setControlState(talkGenre);
+engine.apply(talkGenre);
+const talkLowBand = ctx.compressors[1].threshold.value;
+engine.setControlState(hiphop);
+engine.apply(hiphop);
+const hiphopLowBand = ctx.compressors[1].threshold.value;
+check(
+  hiphopLowBand < talkLowBand - 2,
+  "the genre profile also shifts the multiband thresholds",
+  `${talkLowBand.toFixed(1)} dB talk vs ${hiphopLowBand.toFixed(1)} dB hip-hop`,
+);
+const auto = { ...PRESET_A, genre: "auto" as const, metadata: "Artist - Track [EDM]" };
+engine.setControlState(auto);
+engine.apply(auto);
+check(engine.frame.genre === "EDM", "a metadata tag switches the profile", engine.frame.genre);
+
+console.log("\n5f · talent monitor");
+const talent = { ...PRESET_A, talentMode: true };
+engine.setControlState(talent);
+engine.apply(talent);
+check(engine.frame.talent, "talent mode reports the pre-limiter path");
+
+console.log("\n5g · silence backup");
+engine.backupHoldMs = 300;
+engine.backupReturnMs = 150;
+fakeLevel = 0;
+engine.tickNow();
+await new Promise((r) => setTimeout(r, 380));
+engine.tickNow();
+check(engine.frame.backup, "a 300 ms hold brings the backup on air", `${engine.frame.silenceMs.toFixed(0)} ms`);
+fakeLevel = 0.5;
+engine.tickNow();
+engine.tickNow();
+check(!engine.frame.backup, "healthy programme hands the chain back");
+engine.backupHoldMs = 5000;
+engine.backupReturnMs = 2000;
+
 /* ── 6: demo program ───────────────────────────────────────────────────── */
 
 console.log("\n6 · demo source");
@@ -283,9 +383,9 @@ try {
   check(false, "the demo program starts", (err as Error).message);
 }
 if (started) {
-  check(ctx.sources.length >= 1, "a buffer source was created");
-  check((ctx.sources[0].buffer?.length ?? 0) > 48000, "the generated loop is at least a second long", `${ctx.sources[0].buffer?.length} frames`);
-  const demo = ctx.sources[0].buffer;
+  check(ctx.sources.length >= 2, "the backup and demo buffers were both created", `${ctx.sources.length} sources`);
+  const demo = ctx.sources[ctx.sources.length - 1].buffer;
+  check((demo?.length ?? 0) > 48000, "the generated loop is at least a second long", `${demo?.length} frames`);
   if (demo) {
     const left = demo.getChannelData(0);
     const right = demo.getChannelData(1);
