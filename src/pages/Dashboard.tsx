@@ -1033,6 +1033,7 @@ export default function Dashboard() {
                   dirty={dirty}
                   onApply={applyPreset}
                   onRevert={revertPreset}
+                  onPreview={(p) => setParams(coerceParams(p))}
                 />
                 <ScheduleCard params={params} activeName={activePreset} />
               </div>

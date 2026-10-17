@@ -16,6 +16,14 @@ import {
   applyCharacter,
   type CharacterId,
 } from "@/lib/audio/character";
+import { diffParams, interpolateParams } from "@/lib/audio/morph";
+import {
+  SNAPSHOT_SLOTS,
+  clearSnapshot,
+  loadSnapshots,
+  saveSnapshot,
+  type SnapshotSlot,
+} from "@/lib/audio/snapshots";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -46,12 +54,214 @@ function familyOf(p: ProcessorParams): string {
   return "General";
 }
 
+/* ── preset morph + snapshots ─────────────────────────────────────────── */
+
+function MorphSection({
+  params,
+  activeName,
+  customParams,
+  bank,
+  setBank,
+  morphA,
+  morphB,
+  morphT,
+  setMorphA,
+  setMorphB,
+  setMorphT,
+  onPreview,
+  onCommit,
+}: {
+  params: ProcessorParams;
+  activeName: string;
+  customParams: { name: string; params: ProcessorParams }[];
+  bank: ReturnType<typeof loadSnapshots>;
+  setBank: React.Dispatch<React.SetStateAction<ReturnType<typeof loadSnapshots>>>;
+  morphA: string | null;
+  morphB: string | null;
+  morphT: number;
+  setMorphA: (n: string) => void;
+  setMorphB: (n: string) => void;
+  setMorphT: (n: number) => void;
+  onPreview?: (p: ProcessorParams) => void;
+  onCommit: (p: ProcessorParams, name: string) => void;
+}) {
+  const lib = [
+    ...BUILTIN_PRESETS.map((p) => ({ name: p.name, params: p.params })),
+    ...customParams,
+  ];
+  const find = (n: string | null) => lib.find((l) => l.name === n) ?? null;
+  const a = find(morphA) ?? find(activeName) ?? lib[0];
+  const b = find(morphB) ?? lib.find((l) => l.name !== a?.name) ?? lib[0];
+  const t = morphT / 100;
+  const mixed = a && b ? coerceParams(interpolateParams(a.params, b.params, t)) : null;
+  const diffs = a && b ? diffParams(a.params, b.params) : [];
+
+  const drag = (v: number) => {
+    setMorphT(v);
+    if (a && b && onPreview) {
+      onPreview(coerceParams(interpolateParams(a.params, b.params, v / 100)));
+    }
+  };
+  const commit = () => {
+    if (a && b && mixed) {
+      onCommit(
+        mixed,
+        `Morph ${Math.round((1 - t) * 100)}% ${a.name} · ${Math.round(t * 100)}% ${b.name}`,
+      );
+    }
+  };
+
+  const holdCompare = (p: ProcessorParams) => ({
+    onPointerDown: () => onPreview?.(coerceParams(p)),
+    onPointerUp: () => onPreview?.(coerceParams(params)),
+    onPointerLeave: () => onPreview?.(coerceParams(params)),
+  });
+
+  const selectCls =
+    "h-8 min-w-0 flex-1 cursor-pointer truncate rounded-md border border-border/60 bg-muted/40 px-2 text-[11px] text-foreground";
+
+  return (
+    <div className="panel rounded-xl p-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="text-[10px] font-semibold tracking-[0.16em] text-panel-mut uppercase">
+          Preset morph · snapshots
+        </p>
+        <p className="text-[10px] text-panel-mut">Interpolates DSP — never crossfades</p>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <select
+          aria-label="Morph source A"
+          className={selectCls}
+          value={a?.name ?? ""}
+          onChange={(e) => setMorphA(e.target.value)}
+        >
+          {lib.map((l) => (
+            <option key={l.name} value={l.name}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={morphT}
+          onChange={(e) => drag(Number(e.target.value))}
+          onPointerUp={commit}
+          onKeyUp={commit}
+          aria-label="Morph position between presets"
+          className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#e5a93b]"
+        />
+        <select
+          aria-label="Morph source B"
+          className={selectCls}
+          value={b?.name ?? ""}
+          onChange={(e) => setMorphB(e.target.value)}
+        >
+          {lib.map((l) => (
+            <option key={l.name} value={l.name}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {a && b && (
+        <p className="text-readout mt-1.5 text-center text-[11px] text-white">
+          {Math.round((1 - t) * 100)}% {a.name} · {Math.round(t * 100)}% {b.name}
+        </p>
+      )}
+
+      {diffs.length > 0 && (
+        <div className="mt-2 grid gap-x-4 gap-y-0.5 sm:grid-cols-2">
+          {diffs.map((d) => (
+            <p key={d.path} className="flex items-baseline justify-between gap-2 text-[10px]">
+              <span className="text-panel-mut">{d.path}</span>
+              <span className="text-readout truncate text-white">
+                {d.from} <span className="text-panel-mut">→</span> {d.to}
+              </span>
+            </p>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        {SNAPSHOT_SLOTS.map((slot) => {
+          const s = bank[slot];
+          return (
+            <div
+              key={slot}
+              className="rounded-lg border border-border/60 bg-muted/40 p-2"
+            >
+              <p className="flex items-center justify-between text-[9px] font-bold tracking-[0.14em] text-panel-mut uppercase">
+                <span>Snapshot {slot}</span>
+                {s && (
+                  <button
+                    type="button"
+                    title={`Clear snapshot ${slot}`}
+                    aria-label={`Clear snapshot ${slot}`}
+                    onClick={() => setBank((bn) => clearSnapshot(bn, slot as SnapshotSlot))}
+                    className="cursor-pointer text-panel-mut hover:text-meter-hot"
+                  >
+                    ×
+                  </button>
+                )}
+              </p>
+              <p className="text-readout mt-0.5 truncate text-[11px] text-white" title={s?.name}>
+                {s ? s.name : "— empty —"}
+              </p>
+              <div className="mt-1.5 flex gap-1">
+                <button
+                  type="button"
+                  title="Save current chain"
+                  onClick={() =>
+                    setBank((bn) =>
+                      saveSnapshot(bn, slot as SnapshotSlot, {
+                        name: activeName,
+                        params: coerceParams(params),
+                        at: Date.now(),
+                      }),
+                    )
+                  }
+                  className="h-7 flex-1 cursor-pointer rounded-md border border-border/60 text-[9px] font-bold tracking-[0.08em] text-muted-foreground uppercase transition-colors hover:text-foreground"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  title="Recall snapshot"
+                  disabled={!s}
+                  onClick={() => s && onCommit(coerceParams(s.params), `Snapshot ${slot} · ${s.name}`)}
+                  className="h-7 flex-1 cursor-pointer rounded-md border border-border/60 text-[9px] font-bold tracking-[0.08em] text-muted-foreground uppercase transition-colors hover:text-foreground disabled:opacity-40"
+                >
+                  Recall
+                </button>
+                <button
+                  type="button"
+                  title="Hold to compare"
+                  disabled={!s}
+                  {...(s ? holdCompare(s.params) : {})}
+                  className="h-7 flex-1 cursor-pointer rounded-md border border-signal/40 bg-signal/10 text-[9px] font-bold tracking-[0.08em] text-signal uppercase transition-colors hover:bg-signal/20 disabled:opacity-40"
+                >
+                  Hold
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function PresetPanel({
   params,
   activeName,
   dirty = false,
   onApply,
   onRevert,
+  onPreview,
 }: {
   params: ProcessorParams;
   activeName: string;
@@ -59,6 +269,8 @@ export function PresetPanel({
   dirty?: boolean;
   onApply: (p: ProcessorParams, name: string) => void;
   onRevert: () => void;
+  /** Silent live update (no log/toast) — morph drags and compare-hold. */
+  onPreview?: (p: ProcessorParams) => void;
 }) {
   const saved = usePresets();
   const savePreset = useSavePreset();
@@ -266,6 +478,10 @@ export function PresetPanel({
     toast.success(`Exported ${payload.presets.length} presets`);
   };
 
+  const [bank, setBank] = useState(loadSnapshots);
+  const [morphA, setMorphA] = useState<string | null>(null);
+  const [morphB, setMorphB] = useState<string | null>(null);
+  const [morphT, setMorphT] = useState(50);
   const [character, setCharacter] = useState<CharacterId | null>(null);
   const applyCharacterCard = (id: CharacterId) => {
     const def = CHARACTERS.find((c) => c.id === id);
@@ -321,6 +537,25 @@ export function PresetPanel({
             })}
           </div>
         </div>
+        {/* preset morph + snapshots — interpolate chains, never crossfade */}
+        <MorphSection
+          params={params}
+          activeName={activeName}
+          customParams={custom.map((p) => ({
+            name: p.name,
+            params: coerceParams(p.params),
+          }))}
+          bank={bank}
+          setBank={setBank}
+          morphA={morphA}
+          morphB={morphB}
+          morphT={morphT}
+          setMorphA={setMorphA}
+          setMorphB={setMorphB}
+          setMorphT={setMorphT}
+          onPreview={onPreview}
+          onCommit={apply}
+        />
         {/* active + actions */}
         <div className="card-layer flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card px-4 py-3">
           <div className="min-w-0">
