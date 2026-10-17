@@ -1,6 +1,7 @@
 import { StereoLevelMeter } from "@/components/console/Meters";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { FmPanel } from "@/components/console/FmPanel";
+import { MpxLinkPanel } from "@/components/console/MpxLinkPanel";
 import {
   useMount,
   usePushLog,
@@ -1221,6 +1222,11 @@ export function EncoderPanel({
           fm={params.fm}
           onChange={(next) => setParams((prev) => ({ ...prev, fm: next }))}
         />
+      </div>
+
+      {/* ── composite over IP: same MPX, two links ── */}
+      <div className="lg:col-span-12">
+        <MpxLinkPanel fm={params.fm} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2 lg:col-span-12">

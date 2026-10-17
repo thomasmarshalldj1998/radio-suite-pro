@@ -15,7 +15,7 @@
  * With no transport attached the sender still frames and meters the stream, so
  * the console shows exactly what would go out.
  */
-import { subscribeComposite, syncFm } from "./fm";
+import { acquireStream, releaseStream, subscribeComposite } from "./fm";
 import type { FmParams } from "./params";
 import {
   DEFAULT_SIMULATOR,
@@ -106,8 +106,20 @@ let transport: ((wire: Uint8Array, packet: MpxPacket) => void) | null = null;
 let carry: Uint8Array | null = null;
 let carryLength = 0;
 
+let lastEmit = 0;
+
 function emit(): void {
+  lastEmit = performance.now();
   for (const cb of listeners) cb();
+}
+
+/**
+ * Counter updates land once per packet — a couple of hundred times a second —
+ * so the display refresh is capped while the counters themselves stay exact.
+ */
+function emitThrottled(): void {
+  if (performance.now() - lastEmit < 200) return;
+  emit();
 }
 
 export function getLink(): LinkSnapshot {
@@ -138,7 +150,7 @@ export function setMpxTransport(
 export function armLink(fm: FmParams | null, codec: MpxCodec = "flac"): void {
   if (detach) return;
   snapshot = { ...snapshot, armed: true, codec };
-  if (fm) syncFm(fm, true);
+  if (fm) acquireStream(fm);
   sender = new MpxPacketiser(0, COMPOSITE_RATE, 1);
   receiver = new MpxDualLink(undefined, {
     sampleRate: COMPOSITE_RATE,
@@ -157,7 +169,7 @@ export function disarmLink(fm?: FmParams | null): void {
   sender = null;
   carry = null;
   carryLength = 0;
-  if (fm) syncFm(fm, false);
+  if (fm) releaseStream(fm);
   snapshot = {
     ...snapshot,
     armed: false,
@@ -229,7 +241,7 @@ function pushComposite(mono: Float32Array): void {
     kbps: stats.kbps,
     fps: stats.fps,
   };
-  emit();
+  emitThrottled();
 }
 
 /** One receiver step — called from the console's status tick. */
@@ -337,7 +349,12 @@ export function runLinkSelfTest(
           ? "Stayed on the primary link: the damage never cleared the splice thresholds, and every gap was concealed rather than muted."
           : "Both links were clean — nothing to conceal or splice.",
   };
-  snapshot = { ...snapshot, selfTest: report, links: rx.health(), active: rx.activeLink };
+  // A self-test must not overwrite what the live receiver is reporting: when
+  // receive mode is on, its health is the truth about the real links, and the
+  // simulated numbers stay in the report.
+  snapshot = snapshot.receive
+    ? { ...snapshot, selfTest: report }
+    : { ...snapshot, selfTest: report, links: rx.health(), active: rx.activeLink };
   emit();
   return report;
 }

@@ -44,6 +44,12 @@ let detachTap: (() => void) | null = null;
 let tapPending: Promise<void> | null = null;
 let applied: FmParams | null = null;
 let streamRequested = false;
+/**
+ * How many consumers want the composite forwarded. The MPX-over-IP encoder and
+ * the packet link can both run at once, so a stop from one must not cut the
+ * other's feed.
+ */
+let streamOwners = 0;
 const streamSinks = new Set<(l: Float32Array) => void>();
 
 const listeners = new Set<() => void>();
@@ -113,6 +119,24 @@ export function syncFm(fm: FmParams, stream?: boolean): void {
   worker.postMessage({ cmd: "params", fm, stream: streamRequested });
 }
 
+/**
+ * Take a share of the composite stream. Every acquire needs its matching
+ * release; the worker keeps forwarding while any consumer holds one.
+ */
+export function acquireStream(fm: FmParams): void {
+  streamOwners += 1;
+  syncFm(fm, true);
+}
+
+/** Give a share back; forwarding stops when the last consumer releases. */
+export function releaseStream(fm?: FmParams | null): void {
+  streamOwners = Math.max(0, streamOwners - 1);
+  if (streamOwners > 0) return;
+  const params = fm ?? applied;
+  if (params) syncFm(params, false);
+  else streamRequested = false;
+}
+
 function onWorkerMessage(msg: MpxWorkerOut): void {
   if (msg.type === "tick") {
     snap = {
@@ -140,8 +164,10 @@ export function stopFm(): void {
   detachTap?.();
   detachTap = null;
   tapPending = null;
-  streamRequested = false;
-  streamSinks.clear();
+  // The branch can come back (engine power, exciter switch), so keep the
+  // consumers' claims: whoever acquired the composite still wants it when the
+  // worker restarts, and each owner releases its own subscription.
+  streamRequested = streamOwners > 0;
   const outRate = snap.outRate;
   snap = { ...IDLE, outRate };
   emit();
@@ -193,7 +219,7 @@ export class MpxStreamEncoder implements ProgramEncoder {
     if (!engine.powered || !applied?.on) {
       throw new Error("Engage the FM module and power the engine first");
     }
-    syncFm(applied, true);
+    acquireStream(applied);
     await tapPending;
     const outRate = snap.outRate;
     return new Promise<void>((resolve, reject) => {
@@ -283,7 +309,7 @@ export class MpxStreamEncoder implements ProgramEncoder {
   async stop(): Promise<Blob> {
     const w = this.flacWorker;
     if (!w) return new Blob([], { type: this.mime });
-    syncFm(applied ?? DEFAULT_FM, false);
+    releaseStream(applied ?? DEFAULT_FM);
     await new Promise<void>((resolve) => {
       this.doneResolve = resolve;
       w.postMessage({ cmd: "flush" });
