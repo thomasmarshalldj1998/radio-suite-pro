@@ -160,7 +160,9 @@ function createWindow() {
   if (DEV_URL) {
     void mainWindow.loadURL(DEV_URL);
   } else {
-    void mainWindow.loadURL("app://signalpath/index.html");
+    // Root path (not /index.html) so BrowserRouter sees "/" → /dashboard
+    // instead of "/index.html" → the "*" NotFound route.
+    void mainWindow.loadURL("app://signalpath/");
   }
 }
 
