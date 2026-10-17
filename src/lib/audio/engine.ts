@@ -294,6 +294,10 @@ export class AudioEngine {
 
   // buffers
   private timeBuf!: Float32Array<ArrayBuffer>;
+  /** Output-tap scratch (outAnalyser fftSize) — never shared with the
+   * shorter K-weighting buffers or getFloatTimeDomainData throws. */
+  private outBufL!: Float32Array<ArrayBuffer>;
+  private outBufR!: Float32Array<ArrayBuffer>;
   private ksBufL!: Float32Array<ArrayBuffer>;
   private ksBufR!: Float32Array<ArrayBuffer>;
   private ksBufInL!: Float32Array<ArrayBuffer>;
@@ -886,6 +890,8 @@ export class AudioEngine {
     inKsSplit.connect(this.inKsAnalyserR, 1);
 
     this.timeBuf = new Float32Array(this.outAnalyserL.fftSize);
+    this.outBufL = new Float32Array(this.outAnalyserL.fftSize);
+    this.outBufR = new Float32Array(this.outAnalyserR.fftSize);
     this.ksBufL = new Float32Array(this.ksAnalyserL.fftSize);
     this.ksBufR = new Float32Array(this.ksAnalyserR.fftSize);
     this.ksBufInL = new Float32Array(this.inKsAnalyserL.fftSize);
@@ -1602,16 +1608,16 @@ export class AudioEngine {
     }
 
     // output peaks + true peak + correlation
-    this.outAnalyserL.getFloatTimeDomainData(this.ksBufL);
-    this.outAnalyserR.getFloatTimeDomainData(this.ksBufR);
+    this.outAnalyserL.getFloatTimeDomainData(this.outBufL);
+    this.outAnalyserR.getFloatTimeDomainData(this.outBufR);
     let outL = 0;
     let outR = 0;
     let dot = 0;
     let eL = 0;
     let eR = 0;
-    for (let i = 0; i < this.ksBufL.length; i++) {
-      const l = this.ksBufL[i];
-      const r = this.ksBufR[i];
+    for (let i = 0; i < this.outBufL.length; i++) {
+      const l = this.outBufL[i];
+      const r = this.outBufR[i];
       const al = Math.abs(l);
       const ar = Math.abs(r);
       if (al > outL) outL = al;
@@ -1623,8 +1629,8 @@ export class AudioEngine {
     const outPeakL = toDb(outL);
     const outPeakR = toDb(outR);
     const tp = Math.max(
-      this.truePeak(this.ksBufL),
-      this.truePeak(this.ksBufR),
+      this.truePeak(this.outBufL),
+      this.truePeak(this.outBufR),
     );
     if (Math.max(outPeakL, outPeakR) > -0.2) this.clipOutUntil = now + 600;
     const denom = Math.sqrt(eL * eR);
