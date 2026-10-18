@@ -416,9 +416,40 @@ export function PsyPreamp({
         </CtrlRow>
       </PsyBlock>
       <PsyBlock
+        module="declipper"
+        title="Restoration monitor"
+        subtitle="Live detector feed · repair params stored above"
+      >
+        <CtrlRow label="Input peak">
+          <Num>
+            {snap
+              ? formatDb(Math.max(snap.inPeakL, snap.inPeakR))
+              : "—"}
+          </Num>
+        </CtrlRow>
+        <CtrlRow label="Crest">
+          <Num>
+            {Number.isFinite(crest) ? `${crest.toFixed(2)} dB` : "—"}
+          </Num>
+        </CtrlRow>
+        <CtrlRow label="Coherence">
+          <Num>{snap ? snap.correlation.toFixed(2) : "—"}</Num>
+        </CtrlRow>
+        <CtrlRow label="Clip events">
+          <Num>{snap ? snap.clipEvents.toFixed(0) : "—"}</Num>
+        </CtrlRow>
+        <CtrlRow label="Last clip">
+          <Num>
+            {snap && snap.clipAt > 0
+              ? new Date(snap.clipAt).toLocaleTimeString()
+              : "none"}
+          </Num>
+        </CtrlRow>
+      </PsyBlock>
+      <PsyBlock
         module="clock"
         title="Input quality"
-        subtitle="Live meters · crest · coherence · clock · clip detect"
+        subtitle="Live meters · crest · coherence · clock"
       >
         <CtrlRow label="Crest">
           <Num>{Number.isFinite(crest) ? `${crest.toFixed(2)} dB` : "—"}</Num>
@@ -434,16 +465,6 @@ export function PsyPreamp({
         </CtrlRow>
         <CtrlRow label="Codec damage">
           <Num>— / 100</Num>
-        </CtrlRow>
-        <CtrlRow label="Clip events">
-          <Num>{snap ? snap.clipEvents.toFixed(0) : "—"}</Num>
-        </CtrlRow>
-        <CtrlRow label="Last clip">
-          <Num>
-            {snap && snap.clipAt > 0
-              ? new Date(snap.clipAt).toLocaleTimeString()
-              : "none"}
-          </Num>
         </CtrlRow>
       </PsyBlock>
     </>
