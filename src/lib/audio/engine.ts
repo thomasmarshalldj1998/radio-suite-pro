@@ -862,8 +862,10 @@ export class AudioEngine {
     wSplit.connect(sideNeg, 1);
     sideNeg.connect(side);
     const wMerge = ctx.createChannelMerger(2);
-    mid.connect(wMerge, 0);
-    mid.connect(wMerge, 1);
+    // NOTE: connect(dest, output, input) — a GainNode only has output 0, so
+    // routing into the merger's right channel must target input 1 (3rd arg).
+    mid.connect(wMerge, 0, 0);
+    mid.connect(wMerge, 0, 1);
     // Low-end mono matrix: dry side always available; wet side carries
     // side − lowpassed(side), i.e. bass folds to mono below the crossover.
     this.sideDry = g(1);
@@ -878,14 +880,14 @@ export class AudioEngine {
     side.connect(this.sideWet);
     this.sideLp.connect(this.sideLpNeg);
     this.sideLpNeg.connect(this.sideWet);
-    this.sideDry.connect(wMerge, 0);
+    this.sideDry.connect(wMerge, 0, 0);
     const sideInv = g(-1);
     this.sideDry.connect(sideInv);
-    sideInv.connect(wMerge, 1);
-    this.sideWet.connect(wMerge, 0);
+    sideInv.connect(wMerge, 0, 1);
+    this.sideWet.connect(wMerge, 0, 0);
     this.sideWetInv = g(-1);
     this.sideWet.connect(this.sideWetInv);
-    this.sideWetInv.connect(wMerge, 1);
+    this.sideWetInv.connect(wMerge, 0, 1);
     wMerge.connect(this.tiltLo);
 
     this.monitorGain = g(dbToGain(-6));
