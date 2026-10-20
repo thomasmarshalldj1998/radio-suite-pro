@@ -38,6 +38,14 @@ import { Switch } from "@/components/ui/switch";
 import { Antenna } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+/** One-click destinations: the full picker stays, these are the common ones. */
+const QUICK_LOUDNESS = [
+  { id: "spotify", label: "Web · −14", lufs: -14 },
+  { id: "custom", label: "CHR · −11", lufs: -11 },
+  { id: "ebu", label: "EBU · −23", lufs: -23 },
+  { id: "atsc", label: "ATSC · −24", lufs: -24 },
+] as const;
+
 function useMeterSnapshot(intervalMs = 200): MeterSnapshot | null {
   const [snap, setSnap] = useState<MeterSnapshot | null>(null);
   useEffect(() => {
@@ -313,6 +321,7 @@ export function TelemetryTab({
         truePeakDb: TRUE_PEAK_TARGET,
       };
   const lufsS = snap?.lufsS ?? -70;
+  const lufsI = snap?.lufsI ?? -70;
   const loudnessDelta = lufsS - target.lufs;
   const loudnessOk = powered ? Math.abs(loudnessDelta) <= 1 : null;
   const truePeak = snap?.truePeak ?? -70;
@@ -401,6 +410,37 @@ export function TelemetryTab({
                 </option>
               ))}
             </select>
+            {/* one-click destinations next to the full standard picker */}
+            <div className="flex flex-wrap items-center gap-1">
+              {QUICK_LOUDNESS.map((q) => (
+                <button
+                  key={q.id}
+                  type="button"
+                  aria-pressed={params.loudness.standard === q.id}
+                  className={cn(
+                    "h-7 rounded border px-2 text-[10px] font-semibold tracking-wide transition-colors",
+                    params.loudness.standard === q.id
+                      ? "border-signal/50 bg-signal/15 text-signal"
+                      : "border-border/60 bg-muted/40 text-muted-foreground hover:border-signal/40 hover:text-foreground",
+                  )}
+                  onClick={() =>
+                    setParams((p) => ({
+                      ...p,
+                      loudness: {
+                        ...p.loudness,
+                        standard: q.id,
+                        ...(q.id === "custom"
+                          ? { customLufs: q.lufs, customTpDb: -1 }
+                          : {}),
+                      },
+                    }))
+                  }
+                  title={`${q.lufs.toFixed(1)} LUFS · −1.0 dBTP`}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
             {params.loudness.standard === "custom" && (
               <>
                 <input
@@ -451,19 +491,19 @@ export function TelemetryTab({
         )}
         <div className="grid gap-3 sm:grid-cols-3">
           <MetricCard
-            label="Input LUFS"
-            value={powered ? fmt2(snap?.lufsIn ?? -70) : "―"}
-            unit="LUFS"
+            label="Integrated LUFS"
+            value={powered ? fmt2(lufsI) : "―"}
+            unit="LUFS-I"
             ok={powered}
           />
           <MetricCard
-            label="Output LUFS"
+            label="Short-term LUFS"
             value={powered ? fmt2(lufsS) : "―"}
-            unit="LUFS"
+            unit="LUFS-S"
             ok={loudnessOk}
           />
           <MetricCard
-            label="Peak limit"
+            label="True peak"
             value={powered ? fmt2(truePeak) : "―"}
             unit="dBTP"
             ok={peakLimitOk}

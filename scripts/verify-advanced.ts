@@ -160,6 +160,20 @@ console.log("\n3 · compliance, tone and spatial");
   });
   check(opus <= 20000 && opus > 15000, "Opus pre-shaping stays inside the audible band", `${opus.toFixed(0)} Hz`);
 
+  // A live mount below 96 kbps caps the delivery path at 16 kHz even with
+  // shaping off; the monitor/recording path is untouched by this helper.
+  const low = codecLowpassHz(DEFAULT_ADVANCED.limiter.codec, 64);
+  check(low <= 16000, "a 64 kbps mount caps the delivery path at 16 kHz", `${low.toFixed(0)} Hz`);
+  check(
+    codecLowpassHz({ ...DEFAULT_ADVANCED.limiter.codec, on: true, lowpassHz: 20000, hfPreserve: 100 }, 64) <= 16000,
+    "the cap wins over a higher manual low-pass",
+  );
+  check(
+    codecLowpassHz({ ...DEFAULT_ADVANCED.limiter.codec, on: true, target: "opus", lowpassHz: 20000, hfPreserve: 100 }, 128) > 16000,
+    "a 128 kbps mount keeps the codec profile bandwidth",
+  );
+  check(codecLowpassHz(DEFAULT_ADVANCED.limiter.codec, null) === 22000, "no live mount leaves the path transparent");
+
   const pre = preEmphCorrection(DEFAULT_ADVANCED.limiter.preEmph);
   check(pre.gainDb === 0, "pre-emphasis correction is 0 dB when off");
   const pre50 = preEmphCorrection({

@@ -276,6 +276,104 @@ function OutPresence() {
   );
 }
 
+/**
+ * Ring-buffer / driver health for the TX path.
+ *
+ * Everything here is measured, not modelled: fill comes from the TX send
+ * buffer, drops from its protective ceiling, and the callback time from the
+ * engine's own render-quantum cost. The sparkline keeps the last 12 s, which
+ * is enough to see a stall start before it becomes a dropout.
+ */
+function TxBufferHealth({ bitrateKbps }: { bitrateKbps: number }) {
+  const HISTORY = 48;
+  const [history, setHistory] = useState<number[]>(() =>
+    new Array(HISTORY).fill(0),
+  );
+  const [fill, setFill] = useState(0);
+  const [targetMs, setTargetMs] = useState(500);
+  const [frameMs, setFrameMs] = useState(0);
+  const [drops, setDrops] = useState(0);
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const runtime = getRuntime();
+      const settings = runtime.source?.getTxSettings();
+      const target = settings?.bufferMs ?? 500;
+      const ceiling = Math.max(3000, target * 3);
+      const measured = runtime.tx.bufferedMs;
+      const pct = runtime.onAir
+        ? Math.max(0, Math.min(100, (measured / ceiling) * 100))
+        : 0;
+      setTargetMs(target);
+      setFill(pct);
+      setFrameMs(getEngine().snapshot().perf.frameMs);
+      setDrops(runtime.tx.protectedBytes);
+      setLive(runtime.onAir);
+      setHistory((h) => [...h.slice(1), pct]);
+    }, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const points = history
+    .map((v, i) => {
+      const x = (i / (history.length - 1)) * 96;
+      const y = 18 - (v / 100) * 16;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const dropWarn = drops > 0;
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded border border-rack-line/70 bg-rack-2/70 px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[9px] font-semibold tracking-[0.16em] text-panel-mut uppercase">
+          Buffer health
+        </span>
+        <svg
+          width="96"
+          height="20"
+          viewBox="0 0 96 20"
+          role="img"
+          aria-label={`TX buffer fill ${fill.toFixed(0)} percent`}
+          className="shrink-0"
+        >
+          <rect x="0" y="0" width="96" height="20" fill="transparent" />
+          <line x1="0" y1="10" x2="96" y2="10" stroke="currentColor" strokeOpacity="0.12" />
+          <polyline
+            points={points}
+            fill="none"
+            stroke={dropWarn ? "#ffcc22" : "#00e0ff"}
+            strokeWidth="1"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+      <span className="text-readout text-[10px] text-panel-mut">
+        Fill <span className="text-white">{fill.toFixed(0)}%</span> · {targetMs} ms target
+      </span>
+      <span className="text-readout text-[10px] text-panel-mut">
+        Callback <span className="text-white">{frameMs.toFixed(2)} ms</span>
+      </span>
+      <span
+        className={cn(
+          "text-readout text-[10px]",
+          dropWarn ? "text-amber-led" : "text-panel-mut",
+        )}
+        title="Bytes discarded by the TX protective ceiling this session"
+      >
+        Drops <span className="font-semibold">{formatBytes(drops)}</span>
+      </span>
+      {!live && (
+        <span className="text-[10px] text-panel-mut">idle · {bitrateKbps || 0} kbps profile</span>
+      )}
+      {live && bitrateKbps > 0 && bitrateKbps < 96 && (
+        <span className="text-[10px] text-signal">HF capped ≤16 kHz for {bitrateKbps} kbps</span>
+      )}
+    </div>
+  );
+}
+
 export function EncoderPanel({
   params,
   setParams,
@@ -485,6 +583,9 @@ export function EncoderPanel({
       if (!engine.powered) await engine.powerOn();
       stage = "stream";
       setLiveOutput(sel);
+      // Below 96 kbps the delivery chain caps at 16 kHz (see codecLowpassHz);
+      // the monitor and the take recording keep full bandwidth.
+      engine.setStreamBitrate(form.bitrateKbps);
 
       // WASM-backed formats (MP3 / FLAC / Ogg Vorbis / HE-AAC v2) encode in a
       // worker straight off the program bus — no MediaRecorder involved
@@ -596,6 +697,7 @@ export function EncoderPanel({
       toast.success("You are on air", { description: url });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      engine.setStreamBitrate(null);
       patchRuntime({
         connects: attempt,
         lastError: { message, at: Date.now() },
@@ -618,6 +720,7 @@ export function EncoderPanel({
   };
 
   const disconnect = async () => {
+    engine.setStreamBitrate(null);
     const runtime = getRuntime();
     if (!runtime.encoder) {
       patchRuntime({ onAir: false });
@@ -982,6 +1085,7 @@ export function EncoderPanel({
               : "The encoder keeps running across tabs until you stop it."}
           </p>
         </div>
+        <TxBufferHealth bitrateKbps={form.bitrateKbps} />
         {rt.lastError && (
           <p
             className="mt-1.5 flex items-center gap-1.5 text-[10px] text-meter-hot"

@@ -980,12 +980,28 @@ export function notchQ(widthOct: number): number {
   return 1 / (2 * Math.sinh((Math.LN2 / 2) * w));
 }
 
-/** Codec pre-shaping low-pass: keeps the profile's own bandwidth. */
-export function codecLowpassHz(codec: AdvancedParams["limiter"]["codec"]): number {
+/**
+ * Codec pre-shaping low-pass: keeps the profile's own bandwidth.
+ *
+ * `streamKbps` is the bitrate of the live source mount. Below 96 kbps the
+ * delivery path is capped at 16 kHz automatically: energy above that only
+ * buys the encoder phase artefacts ("swishing", mosquito noise) because it
+ * has no bits to code it. The cap combines with HF Preserve, so 0 % preserve
+ * rolls off earlier still, and an explicit lower lowpassHz always wins.
+ */
+export function codecLowpassHz(
+  codec: AdvancedParams["limiter"]["codec"],
+  streamKbps?: number | null,
+): number {
+  const hf = Math.min(100, Math.max(0, codec.hfPreserve)) / 100;
+  const lowBitrate = streamKbps != null && streamKbps > 0 && streamKbps < 96;
+  if (lowBitrate) {
+    const cap = codec.on ? Math.min(16000, codec.lowpassHz || 16000) : 16000;
+    return Math.min(16000, cap) * (0.85 + hf * 0.15);
+  }
   if (!codec.on) return 22000;
   const cap =
     codec.target === "mp3" ? 16000 : codec.target === "aac" ? 17000 : codec.target === "opus" ? 20000 : 19000;
-  const hf = Math.min(100, Math.max(0, codec.hfPreserve)) / 100;
   return Math.min(22000, codec.lowpassHz || cap) * (0.85 + hf * 0.15);
 }
 

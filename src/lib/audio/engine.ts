@@ -524,6 +524,8 @@ export class AudioEngine {
   private written = new Map<string, number>();
   /** Guards against a measurement tick re-entering apply(). */
   private applying = false;
+  /** Bitrate of the mount currently going on air, for the automatic HF cap. */
+  private streamBitrateKbps: number | null = null;
   /** Programme level ahead of the gate, from the latest meter tick. */
   private srcLevelDb = -120;
   /** 1 Hz correlation history for the phase meter (ring buffer). */
@@ -1823,7 +1825,12 @@ export class AudioEngine {
     set("preemph.g", this.preEmphShelf.gain, pre.apply === "after" ? preFix.gainDb : 0);
 
     // codec perceptual pre-shaping low-pass
-    set("codec.lp", this.codecLp.frequency, codecLowpassHz(adv.limiter.codec), 0.05);
+    set(
+      "codec.lp",
+      this.codecLp.frequency,
+      codecLowpassHz(adv.limiter.codec, this.streamBitrateKbps),
+      0.05,
+    );
 
     // L/R channel matching trims
     const match = adv.compliance.channelMatch;
@@ -1909,6 +1916,18 @@ export class AudioEngine {
   }
 
   /** Monitor level, honouring the operator mute that survives re-applies. */
+  /**
+   * Tell the delivery path which mount bitrate is live. Below 96 kbps the
+   * codec low-pass drops to 16 kHz without touching the monitoring chain.
+   */
+  setStreamBitrate(kbps: number | null): void {
+    const next =
+      kbps != null && Number.isFinite(kbps) && kbps > 0 ? kbps : null;
+    if (next === this.streamBitrateKbps) return;
+    this.streamBitrateKbps = next;
+    if (this.params && this.powered) this.applyChain(this.params);
+  }
+
   private applyMonitorGain() {
     this.setNum(
       "monitor",
