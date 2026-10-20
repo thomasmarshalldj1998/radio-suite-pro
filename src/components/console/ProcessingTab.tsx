@@ -20,6 +20,14 @@ import {
   PsyStereo,
   PsyStream,
 } from "@/components/console/PsyPanels";
+import {
+  ComplianceSuite,
+  LevelingSuite,
+  Limiter31Suite,
+  PrecisionEqSuite,
+  RestorationSuite,
+  SpatialSuite,
+} from "@/components/console/AdvancedPanels";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -1912,6 +1920,26 @@ export function ProcessingTab({
         )}
         {section === "stream" && (
           <PsyStream params={params} setParams={setParams} />
+        )}
+        {/* v3.1 Advanced Processing Suite — appended after the v3.0 cards;
+            every module ships bypassed/neutral, nothing above moved. */}
+        {section === "preamp" && (
+          <RestorationSuite params={params} setParams={setParams} />
+        )}
+        {section === "agc" && (
+          <LevelingSuite params={params} setParams={setParams} />
+        )}
+        {section === "eq" && (
+          <PrecisionEqSuite params={params} setParams={setParams} />
+        )}
+        {section === "stereo" && (
+          <SpatialSuite params={params} setParams={setParams} />
+        )}
+        {section === "limiter" && (
+          <Limiter31Suite params={params} setParams={setParams} />
+        )}
+        {section === "output" && (
+          <ComplianceSuite params={params} setParams={setParams} />
         )}
       </div>
     </div>

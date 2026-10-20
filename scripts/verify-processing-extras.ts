@@ -289,6 +289,16 @@ interface Internals {
   monR: FakeNode;
   monMono: FakeNode;
   limComp: FakeNode;
+  restShelf: FakeNode;
+  restLp: FakeNode;
+  restNotch1: FakeNode;
+  presenceHi: FakeNode;
+  brillianceHi: FakeNode;
+  preEmphShelf: FakeNode;
+  codecLp: FakeNode;
+  chTrimL: FakeNode;
+  chTrimR: FakeNode;
+  safetyGain: FakeNode;
 }
 
 const engine = new AudioEngine();
@@ -318,6 +328,26 @@ check(
   internals.monL.gain.value === 1 && internals.monR.gain.value === 1 && internals.monMono.gain.value === 0,
   "monitor checks are off by default",
 );
+
+// v3.1: every new stage must be transparent until the operator enables it.
+check(
+  internals.restShelf.gain.value === 0 && internals.restLp.frequency.value === 22000,
+  "restoration shelves and low-pass start neutral",
+);
+check(internals.restNotch1.type === "allpass", "restoration notches start as allpass");
+check(
+  internals.presenceHi.gain.value === 0 && internals.brillianceHi.gain.value === 0,
+  "presence and brilliance start at 0 dB",
+);
+check(
+  internals.preEmphShelf.gain.value === 0 && internals.codecLp.frequency.value === 22000,
+  "post-limiter pre-emphasis and codec shaping are transparent",
+);
+check(
+  internals.chTrimL.gain.value === 1 && internals.chTrimR.gain.value === 1,
+  "channel matching is unity by default",
+);
+check(internals.safetyGain.gain.value === 1, "the safety mute is open by default");
 
 engine.apply(
   withPsy({

@@ -55,6 +55,20 @@ import {
   limiterWorkletSource,
 } from "./limiter";
 import {
+  DEFAULT_ADVANCED,
+  agcProfileEnvelope,
+  channelTrim,
+  codecLowpassHz,
+  crestDriveDb,
+  gateGainTarget,
+  harmonicMix,
+  notchQ,
+  preEmphCorrection,
+  presenceGains,
+  riderTargetLufs,
+  type AdvancedParams,
+} from "./advanced";
+import {
   WindowGate,
   clampDeessFreq,
   coherenceSafety,
@@ -422,6 +436,24 @@ export class AudioEngine {
   private limSum!: GainNode;
   private limNative!: GainNode;
   private limWorklet!: GainNode;
+  // v3.1 pre-chain restoration + presence/brilliance + output shapers
+  private restNotch1!: BiquadFilterNode;
+  private restNotch2!: BiquadFilterNode;
+  private restLp!: BiquadFilterNode;
+  private restShelf!: BiquadFilterNode;
+  private restHarmShaper!: WaveShaperNode;
+  private restHarmWet!: GainNode;
+  private restHarmDry!: GainNode;
+  private presenceHi!: BiquadFilterNode;
+  private brillianceHi!: BiquadFilterNode;
+  private preEmphShelf!: BiquadFilterNode;
+  private codecLp!: BiquadFilterNode;
+  private chTrimL!: GainNode;
+  private chTrimR!: GainNode;
+  private safetyGain!: GainNode;
+  private safetyMute = false;
+  private restHarmKey = "";
+  private crestDrive = 0;
   /** Lookahead worklet — null when the platform has no AudioWorklet. */
   private workletLimiter: AudioWorkletNode | null = null;
   private workletReady = false;
@@ -756,6 +788,29 @@ export class AudioEngine {
       stage.Q.value = 0.7071;
       this.hpfStages.push(stage);
     }
+    // v3.1 restoration: two tracked notches, the spectral-NR low-pass and
+    // high shelf, then the parallel harmonic generator. Every stage is
+    // magnitude-neutral until its module is enabled.
+    this.restNotch1 = ctx.createBiquadFilter();
+    this.restNotch1.type = "allpass";
+    this.restNotch1.frequency.value = 100;
+    this.restNotch1.Q.value = 5;
+    this.restNotch2 = ctx.createBiquadFilter();
+    this.restNotch2.type = "allpass";
+    this.restNotch2.frequency.value = 1000;
+    this.restNotch2.Q.value = 5;
+    this.restLp = ctx.createBiquadFilter();
+    this.restLp.type = "lowpass";
+    this.restLp.frequency.value = 22000;
+    this.restLp.Q.value = 0.707;
+    this.restShelf = ctx.createBiquadFilter();
+    this.restShelf.type = "highshelf";
+    this.restShelf.frequency.value = 8500;
+    this.restShelf.gain.value = 0;
+    this.restHarmShaper = ctx.createWaveShaper();
+    this.restHarmShaper.oversample = "4x";
+    this.restHarmDry = g(1);
+    this.restHarmWet = g(0);
     this.sourceBus.connect(this.gateGain);
     // Failover crossfade point. The primary path (post-gate) and the standby
     // source meet at inputGain: the backup therefore bypasses the silence gate
@@ -772,6 +827,19 @@ export class AudioEngine {
     this.gateBuf = new Float32Array(this.gateAnalyser.fftSize);
     this.sourceBus.connect(this.gateAnalyser);
 
+    // restoration inserts between the input trim and the HPF, so the noise
+    // shelf and harmonic products are cleaned by the high-pass that follows.
+    this.inputGain.connect(this.restNotch1);
+    this.restNotch1.connect(this.restNotch2);
+    this.restNotch2.connect(this.restLp);
+    this.restLp.connect(this.restShelf);
+    const restOut = g(1);
+    this.restShelf.connect(this.restHarmDry);
+    this.restHarmDry.connect(restOut);
+    this.restShelf.connect(this.restHarmShaper);
+    this.restHarmShaper.connect(this.restHarmWet);
+    this.restHarmWet.connect(restOut);
+
     const inSplit = ctx.createChannelSplitter(2);
     this.inAnalyserL = ctx.createAnalyser();
     this.inAnalyserR = ctx.createAnalyser();
@@ -786,7 +854,7 @@ export class AudioEngine {
     this.preSpec.smoothingTimeConstant = 0.8;
     this.inputGain.connect(this.preSpec);
 
-    let hpfNode: AudioNode = this.inputGain;
+    let hpfNode: AudioNode = restOut;
     for (const stage of this.hpfStages) {
       hpfNode.connect(stage);
       hpfNode = stage;
@@ -814,11 +882,25 @@ export class AudioEngine {
     phaseNode.connect(phaseOut);
     this.phaseDry.connect(phaseOut);
 
+    // ── presence & brilliance (v3.1): series shelves, 0 dB when bypassed ──
+    this.presenceHi = ctx.createBiquadFilter();
+    this.presenceHi.type = "peaking";
+    this.presenceHi.frequency.value = 3500;
+    this.presenceHi.Q.value = 1;
+    this.presenceHi.gain.value = 0;
+    this.brillianceHi = ctx.createBiquadFilter();
+    this.brillianceHi.type = "highshelf";
+    this.brillianceHi.frequency.value = 11000;
+    this.brillianceHi.Q.value = 0.7;
+    this.brillianceHi.gain.value = 0;
+    phaseOut.connect(this.presenceHi);
+    this.presenceHi.connect(this.brillianceHi);
+
     // ── 6-band EQ (wet/dry crossfade) ──
     this.eqWetPre = g(1);
     this.eqDry = g(0);
-    phaseOut.connect(this.eqWetPre);
-    phaseOut.connect(this.eqDry);
+    this.brillianceHi.connect(this.eqWetPre);
+    this.brillianceHi.connect(this.eqDry);
     let eqNode: AudioNode = this.eqWetPre;
     for (const band of [
       { freq: 60, type: "lowshelf" as BiquadFilterType, q: 0.7 },
@@ -1148,9 +1230,25 @@ export class AudioEngine {
     this.limDry.connect(limOut);
 
     // ── output / ceiling guard / duck / monitor / encoder send ──
+    // post-limiter pre-emphasis correction (v3.1): a high shelf that
+    // compensates the pre-emphasis the receiver will remove.
+    this.preEmphShelf = ctx.createBiquadFilter();
+    this.preEmphShelf.type = "highshelf";
+    this.preEmphShelf.frequency.value = 7500;
+    this.preEmphShelf.Q.value = 0.7;
+    this.preEmphShelf.gain.value = 0;
+    limOut.connect(this.preEmphShelf);
+
     this.outputGain = g(1);
     this.duckGain = g(1);
-    limOut.connect(this.outputGain);
+    this.preEmphShelf.connect(this.outputGain);
+    // codec pre-shaping: a low-pass ahead of the delivery taps, transparent
+    // (22 kHz) until a profile is selected.
+    this.codecLp = ctx.createBiquadFilter();
+    this.codecLp.type = "lowpass";
+    this.codecLp.frequency.value = 22000;
+    this.codecLp.Q.value = 0.707;
+    this.outputGain.connect(this.codecLp);
 
     // composite ceiling guard: per-sample soft clip after the output trim so
     // the composite bus can never exceed the limiter ceiling
@@ -1158,8 +1256,8 @@ export class AudioEngine {
     this.guardDry = g(0);
     this.guardShaper = ctx.createWaveShaper();
     this.guardShaper.oversample = this.lowLatency ? "2x" : "4x";
-    this.outputGain.connect(this.guardWet);
-    this.outputGain.connect(this.guardDry);
+    this.codecLp.connect(this.guardWet);
+    this.codecLp.connect(this.guardDry);
     this.guardWet.connect(this.guardShaper);
     const postGuard = g(1);
     this.guardShaper.connect(postGuard);
@@ -1167,10 +1265,21 @@ export class AudioEngine {
 
     // ── M/S stereo width (Stereo Tool “stereo boost” / Compellor enhance).
     //    Dry path stays in circuit at width = 1 so mono sources are untouched.─
+    // channel matching: independent L/R trims after the ceiling guard.
+    this.chTrimL = g(1);
+    this.chTrimR = g(1);
+    const chSplit = ctx.createChannelSplitter(2);
+    const chMerge = ctx.createChannelMerger(2);
+    postGuard.connect(chSplit);
+    chSplit.connect(this.chTrimL, 0);
+    chSplit.connect(this.chTrimR, 1);
+    this.chTrimL.connect(chMerge, 0, 0);
+    this.chTrimR.connect(chMerge, 0, 1);
+
     this.widthDry = g(1);
     this.widthWet = g(0);
-    postGuard.connect(this.widthDry);
-    postGuard.connect(this.widthWet);
+    chMerge.connect(this.widthDry);
+    chMerge.connect(this.widthWet);
     // v3.0 perceptual tilt sits ahead of the duck/meter taps, so the
     // analysers, the LUFS engine and the encoder send all hear it. Both
     // shelves default to 0 dB — exact unity passthrough until enabled.
@@ -1184,7 +1293,11 @@ export class AudioEngine {
     this.tiltHi.gain.value = 0;
     this.widthDry.connect(this.tiltLo);
     this.tiltLo.connect(this.tiltHi);
-    this.tiltHi.connect(this.duckGain);
+    // safety mute (v3.1 watchdog): a dedicated gain, so a watchdog mute can
+    // never fight the power-on fade or the operator's monitor mute.
+    this.safetyGain = g(1);
+    this.tiltHi.connect(this.safetyGain);
+    this.safetyGain.connect(this.duckGain);
     this.widthGain = g(1);
     this.widthWet.connect(this.widthGain);
     const wSplit = ctx.createChannelSplitter(2);
@@ -1407,6 +1520,62 @@ export class AudioEngine {
 
     set("input", this.inputGain.gain, dbToGain(params.inputGainDb));
 
+    // ── v3.1 restoration ──
+    const adv: AdvancedParams = params.advanced ?? DEFAULT_ADVANCED;
+    const nr = adv.restoration.nr;
+    const nrDepth = nr.mode === "light" ? 4 : nr.mode === "medium" ? 8 : 14;
+    set(
+      "rest.shelf",
+      this.restShelf.gain,
+      nr.on ? -(nr.attenuationDb / 24) * nrDepth : 0,
+      0.05,
+    );
+    set(
+      "rest.lp",
+      this.restLp.frequency,
+      nr.on
+        ? nr.mode === "light"
+          ? 18000
+          : nr.mode === "medium"
+            ? 15000
+            : 11000
+        : 22000,
+      0.05,
+    );
+    const notch = adv.eq.notch;
+    const setNotch = (
+      node: BiquadFilterNode,
+      cfg: { freqHz: number; widthOct: number; autoTrack: boolean },
+      active: boolean,
+    ) => {
+      node.type = active ? "notch" : "allpass";
+      set("rest.notch.f", node.frequency, Math.min(18000, Math.max(40, cfg.freqHz)));
+      set("rest.notch.q", node.Q, notchQ(cfg.widthOct));
+    };
+    setNotch(this.restNotch1, notch.notch1, notch.on);
+    setNotch(this.restNotch2, notch.notch2, notch.on);
+    const rest = adv.restoration.harmonics;
+    set("rest.harm", this.restHarmWet.gain, rest.on ? (rest.mix / 100) * 0.4 : 0, 0.02);
+    set("rest.harm.dry", this.restHarmDry.gain, rest.on ? 1 : 1, 0.02);
+    const harmKey = `${rest.even}|${rest.odd}|${rest.drive}|${rest.band}|${rest.on}`;
+    if (harmKey !== this.restHarmKey) {
+      this.restHarmKey = harmKey;
+      this.rebuildRestCurve(rest);
+    }
+
+    // ── v3.1 presence & brilliance (neutral at 0 dB) ──
+    const pres = adv.eq.presence;
+    const presGain = presenceGains(pres);
+    set("pres.f", this.presenceHi.frequency, pres.presenceMode === "sharp" ? 3800 : 3200);
+    set("pres.q", this.presenceHi.Q, Math.max(0.6, Math.min(2.8, pres.presenceWidth * 1.6)));
+    set("pres.g", this.presenceHi.gain, pres.on ? presGain.presenceDb : 0);
+    set(
+      "brill.f",
+      this.brillianceHi.frequency,
+      pres.airType === "open" ? 14000 : pres.airType === "sparkle" ? 12000 : 10500,
+    );
+    set("brill.g", this.brillianceHi.gain, pres.on ? presGain.brillianceDb : 0);
+
     // HPF: 12/24/36/48 dB/oct as 1–4 Butterworth sections in cascade.
     // Sections beyond the selected slope go allpass (unity magnitude) so the
     // chain topology is fixed and only the slope's shape changes.
@@ -1498,6 +1667,11 @@ export class AudioEngine {
     // programme is present (engagement is transition-detected in the meter
     // loop below, so these ramps glide instead of jumping)
     const spd = this.speechFast ? 0.5 : 1;
+    // v3.1 multi-profile AGC: the selected profile re-times both windows.
+    const profile = adv.leveling.agcProfile;
+    const env = profile.on
+      ? agcProfileEnvelope(profile, this.speechFast || profile.profile === "speech")
+      : null;
     // Dual-window AGC: the fast peak window rides ahead of the slow
     // leveller and has its own threshold, so it acts only on the transients
     // the long release would let through.
@@ -1512,8 +1686,16 @@ export class AudioEngine {
     set("agc.t", this.agcComp.threshold, params.agc.thresholdDb);
     set("agc.r", this.agcComp.ratio, params.agc.ratio);
     set("agc.k", this.agcComp.knee, params.agc.kneeDb);
-    set("agc.a", this.agcComp.attack, (Math.max(params.agc.attackMs, 0) * spd) / 1000);
-    set("agc.rel", this.agcComp.release, (Math.max(params.agc.releaseMs, 10) * spd) / 1000);
+    set(
+      "agc.a",
+      this.agcComp.attack,
+      (env ? env.attackMs : Math.max(params.agc.attackMs, 0) * spd) / 1000,
+    );
+    set(
+      "agc.rel",
+      this.agcComp.release,
+      (env ? env.releaseMs : Math.max(params.agc.releaseMs, 10) * spd) / 1000,
+    );
     set("agc.makeup", this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
     this.crossfade("agc", this.agcWetPre, this.agcDry, params.agc.on);
     this.windowGate.configure({ windowDb: params.agc.windowDb });
@@ -1582,6 +1764,21 @@ export class AudioEngine {
     set("clip.wet", this.clipWet.gain, clipOn ? clipMix : 0, 0.02);
     set("clip.dry", this.clipDry.gain, clipOn ? 1 - clipMix : 1, 0.02);
 
+    // post-limiter pre-emphasis correction
+    const pre = adv.limiter.preEmph;
+    const preFix = preEmphCorrection(pre);
+    set("preemph.f", this.preEmphShelf.frequency, preFix.freqHz);
+    set("preemph.g", this.preEmphShelf.gain, pre.apply === "after" ? preFix.gainDb : 0);
+
+    // codec perceptual pre-shaping low-pass
+    set("codec.lp", this.codecLp.frequency, codecLowpassHz(adv.limiter.codec), 0.05);
+
+    // L/R channel matching trims
+    const match = adv.compliance.channelMatch;
+    const trims = match.on ? channelTrim(match.levelTrimDb) : { l: 1, r: 1 };
+    set("ch.l", this.chTrimL.gain, trims.l, 0.05);
+    set("ch.r", this.chTrimR.gain, trims.r, 0.05);
+
     // composite ceiling guard follows the limiter ceiling
     if (params.limiter.ceilingDb !== this.guardCeilingDb) {
       this.rebuildGuardCurve(params.limiter.ceilingDb);
@@ -1637,11 +1834,13 @@ export class AudioEngine {
     set("output", this.outputGain.gain, dbToGain(params.outputGainDb));
     this.applyMonitorGain();
 
+    // safety mute state survives parameter re-application
+    set("safety", this.safetyGain?.gain, this.safetyMute ? 0 : 1, 0.02);
     // ── v3.0 psychoacoustic layer ──
     // latency profile: low drops the ceiling guard to 2× oversampling;
     // balanced and max both run the full 4× path (max additionally hosts
     // staged oversampled modules as they land).
-    this.setLowLatency(params.psy.latency === "low");
+    this.setLowLatency(params.psy.latency === "low" || adv.latency === "low");
     // perceptual tilt: slope = treble-minus-bass pivot 1 kHz, split evenly
     // across the two shelves. Off / 0 dB = exact unity.
     const slope = params.psy.tilt.on ? params.psy.tilt.slopeDb : 0;
@@ -1717,6 +1916,40 @@ export class AudioEngine {
     if (!wet || !dry) return; // teardown race: nodes not (or no longer) built
     this.setNum(`${key}.wet`, wet.gain, on ? 1 : 0, 0.015);
     this.setNum(`${key}.dry`, dry.gain, on ? 0 : 1, 0.015);
+  }
+
+  /**
+   * v3.1 harmonic generator curve: a parallel shaper with independent even and
+   * odd weights. The even term is dc-free (`x² − ⅓`), and the high-pass that
+   * follows the restoration block removes the residual offset.
+   */
+  private rebuildRestCurve(harmonics: AdvancedParams["restoration"]["harmonics"]) {
+    if (!this.restHarmShaper) return;
+    const mix = harmonicMix(harmonics.even, harmonics.odd);
+    const drive = 1 + (Math.min(100, Math.max(0, harmonics.drive)) / 100) * 4;
+    const tilt = harmonics.band === "low" ? 0.5 : harmonics.band === "high" ? 1.5 : 1;
+    const n = 2049;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = (-1 + (2 * i) / (n - 1)) * drive;
+      const evenTerm = (x * x - 1 / 3) * 1.5;
+      const oddTerm = x * x * x;
+      const y = x + mix.even * evenTerm * tilt + mix.odd * oddTerm * tilt;
+      curve[i] = Math.max(-1, Math.min(1, y));
+    }
+    this.restHarmShaper.curve = curve;
+  }
+
+  /** Watchdog mute on the delivery bus (monitor and encoder both go quiet). */
+  setSafetyMute(on: boolean) {
+    this.safetyMute = on;
+    if (this.safetyGain) {
+      this.setNum("safety", this.safetyGain.gain, on ? 0 : 1, 0.02);
+    }
+  }
+
+  get safetyMuted(): boolean {
+    return this.safetyMute;
   }
 
   /**
@@ -2369,22 +2602,39 @@ export class AudioEngine {
     const srcLevelDb = peakDb(this.gateBuf);
     this.srcLevelDb = srcLevelDb;
 
+    const advGate = this.params?.advanced?.leveling.gate;
     const gate = this.params?.gate;
     let gateWantOpen = true;
-    if (gate?.on) {
-      if (srcLevelDb >= gate.thresholdDb) {
-        this.gateCloseAt = 0;
-      } else if (this.gateCloseAt === 0) {
-        this.gateCloseAt = now + gate.holdMs;
-      } else {
-        gateWantOpen = now < this.gateCloseAt;
-      }
+    if (advGate?.on) {
+      // v3.1 lookahead gate: graded close per the release curve, with a hold
+      // and hysteresis band so a level sitting on the threshold cannot
+      // chatter.
+      const decision = gateGainTarget(srcLevelDb, this.gateOpen, advGate);
+      gateWantOpen = decision.open;
+      const closing = decision.gain < this.gateGain.gain.value;
+      this.setNum(
+        "gate",
+        this.gateGain.gain,
+        decision.gain,
+        closing ? Math.max(0.005, advGate.lookaheadMs / 1000) : 0.05,
+      );
+      this.gateOpen = decision.open;
     } else {
-      this.gateCloseAt = 0;
-    }
-    if (gateWantOpen !== this.gateOpen) {
-      this.gateOpen = gateWantOpen;
-      this.setNum("gate", this.gateGain.gain, gateWantOpen ? 1 : 0, gateWantOpen ? 0.03 : 0.05);
+      if (gate?.on && !advGate?.on) {
+        if (srcLevelDb >= gate.thresholdDb) {
+          this.gateCloseAt = 0;
+        } else if (this.gateCloseAt === 0) {
+          this.gateCloseAt = now + gate.holdMs;
+        } else {
+          gateWantOpen = now < this.gateCloseAt;
+        }
+      } else {
+        this.gateCloseAt = 0;
+      }
+      if (gateWantOpen !== this.gateOpen) {
+        this.gateOpen = gateWantOpen;
+        this.setNum("gate", this.gateGain.gain, gateWantOpen ? 1 : 0, gateWantOpen ? 0.03 : 0.05);
+      }
     }
 
     this.updateAgcWindow(now, srcLevelDb);
@@ -2563,15 +2813,47 @@ export class AudioEngine {
       if (this.loudnessLog.length > 3600) this.loudnessLog.shift();
     }
 
+    // ── v3.1 crest manager: drive the peak stage from the measured crest ──
+    const adv = this.params?.advanced ?? DEFAULT_ADVANCED;
+    if (this.params?.limiter.on && adv.leveling.crest.on) {
+      const crest = tp - windowLufs(300);
+      const next = crestDriveDb(crest, adv.leveling.crest, this.crestDrive);
+      if (Math.abs(next - this.crestDrive) > 0.01) {
+        this.crestDrive = next;
+        const dens = densityProfile(this.params.density);
+        this.setNum(
+          "lim.drive",
+          this.limDrive.gain,
+          dbToGain(dens.driveDb + this.crestDrive),
+          0.35,
+        );
+      }
+    } else if (this.crestDrive !== 0) {
+      this.crestDrive = 0;
+      if (this.params?.limiter.on) {
+        const dens = densityProfile(this.params.density);
+        this.setNum("lim.drive", this.limDrive.gain, dbToGain(dens.driveDb), 0.5);
+      }
+    }
+
     // ── loudness rider (Compellor leveler / AERO long-term controller) ──
     if (this.params?.rider.on) {
       // silence gate (Compellor DVG style): never ride noise up in pauses
       if (windowLufs(300) > this.params.rider.gateDb) {
         // Loudness lock: ride toward the compliance target instead of the
-        // rider's own number, so changing standard re-aims the chain.
-        const rideTarget = this.params.psy.loudLock.on
+        // rider's own number, so changing standard re-aims the chain. The
+        // v3.1 drift corrector and dual anchor refine that target.
+        const locked = this.params.psy.loudLock.on
           ? target.lufs
           : this.params.rider.targetLufs;
+        const rideTarget = riderTargetLufs(
+          {
+            riderTarget: locked,
+            drift: adv.leveling.drift,
+            dual: adv.leveling.dualAnchor,
+          },
+          this.lufsIValue,
+        );
         const err = rideTarget - windowLufs(1000);
         const cap = Math.abs(this.params.rider.maxRideDb);
         const ride = Math.max(-cap, Math.min(cap, err));

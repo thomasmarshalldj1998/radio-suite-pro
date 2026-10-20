@@ -5,6 +5,7 @@ import {
 import { FailoverCard } from "@/components/console/FailoverCard";
 import { MonitorChecks } from "@/components/console/MonitorChecks";
 import { ModuleCard } from "@/components/console/ModuleCard";
+import { IntelligenceSuite } from "@/components/console/AdvancedPanels";
 import { SourceModule } from "@/components/console/SourceModule";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
 import { VectorScope } from "@/components/console/VectorScope";
@@ -263,6 +264,8 @@ export function InputTab({
           </span>
         </div>
       </ModuleCard>
+      {/* v3.1 system intelligence — appended below the v3.0 input deck */}
+      <IntelligenceSuite params={params} setParams={setParams} />
     </div>
   );
 }

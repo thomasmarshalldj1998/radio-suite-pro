@@ -11,6 +11,7 @@
  * composite (MPX) signal for an FM exciter: pre-emphasis → 15 kHz brickwall
  * → stereo matrix → pilot / RDS / SCA subcarriers → composite clipper.
  */
+import { DEFAULT_ADVANCED, MS_BANDS, type AdvancedParams } from "./advanced";
 
 /**
  * Biquad shapes a band can take. The first three are the original
@@ -423,6 +424,11 @@ export interface ProcessorParams {
     customTpDb: number;
   };
   /**
+   * v3.1 advanced suite. Every module ships bypassed/neutral; see
+   * `src/lib/audio/advanced.ts` for the control maths and defaults.
+   */
+  advanced: AdvancedParams;
+  /**
    * Monitoring checks. These are applied on the monitor path only — the
    * encoder send always carries the untouched processed programme, so a mono
    * check or a polarity flip can never leak on air.
@@ -588,6 +594,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   monitorDb: -6,
   duckDb: 12,
   psy: structuredClone(DEFAULT_PSY),
+  advanced: structuredClone(DEFAULT_ADVANCED),
 };
 
 export interface BuiltinPreset {
@@ -3679,6 +3686,131 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
           scaPct: 0,
           ceilingPct: 100,
           alarmPct: 100,
+        },
+      },
+    }),
+  },
+  /* ── v3.1 factory demonstrations ───────────────────────────────────────
+     Each preset enables only the advanced modules it demonstrates; every
+     other v3.1 module stays at its neutral default. */
+  {
+    id: "nr-restored",
+    name: "NR-Restored",
+    description:
+      "Restoration-first chain: medium spectral noise reduction, 75 % impulse reconstruction, medium phase linearisation and 60 % depth recovery ahead of the house dynamics.",
+    tags: ["v3.1", "Restoration", "Archive"],
+    family: "Signalpath v3.1",
+    params: merge({
+      advanced: {
+        restoration: {
+          nr: { on: true, mode: "medium", attenuationDb: 12 },
+          impulse: { on: true, sensitivity: 75, reconstruct: 75 },
+          phaseLin: { on: true, correction: "medium" },
+          drr: { on: true, expansion: 60 },
+        },
+      },
+    }),
+  },
+  {
+    id: "tight-punchy",
+    name: "Tight-Punchy",
+    description:
+      "Crest manager at 10 dB with +40 attack / +20 sustain transient shaping and the variable-window limiter on its 1 ms fast window.",
+    tags: ["v3.1", "Dense", "Punch"],
+    family: "Signalpath v3.1",
+    params: merge({
+      advanced: {
+        leveling: {
+          crest: { on: true, targetDb: 10 },
+          transient: { on: true, attack: 40, sustain: 20, rangeMs: 3 },
+        },
+        limiter: {
+          window: { on: true, fastMs: 1, densityMs: 10, density: 55 },
+        },
+      },
+    }),
+  },
+  {
+    id: "wide-natural",
+    name: "Wide-Natural",
+    description:
+      "45 % diffusion, a +3 dB side lift at 8 kHz, correlation protection at 0.8 and an 8 LU loudness-range target.",
+    tags: ["v3.1", "Stereo", "Open"],
+    family: "Signalpath v3.1",
+    params: merge({
+      advanced: {
+        spatial: {
+          diffusion: { on: true, width: 45, decorrelation: 45 },
+          correlation: { on: true, minCorrelation: 0.8 },
+          msEq: {
+            on: true,
+            bands: MS_BANDS.map((freq) => ({
+              freq,
+              midDb: 0,
+              sideDb: freq >= 8000 ? 3 : freq <= 63 ? -3 : 0,
+              q: 1,
+            })),
+          },
+        },
+        compliance: { lra: { on: true, targetLu: 8 } },
+      },
+    }),
+  },
+  {
+    id: "fm-transmission-grade",
+    name: "FM-Transmission-Grade",
+    description:
+      "Composite protection for an analogue FM path: MPX processing with Stokkemask, 50 µs pre-emphasis correction, −18 LUFS practice and a −1 dBTP ceiling.",
+    tags: ["v3.1", "FM", "Transmission"],
+    family: "Signalpath v3.1",
+    params: merge({
+      loudness: { standard: "custom", customLufs: -18, customTpDb: -1 },
+      rider: { on: true, targetLufs: -18, maxRideDb: 8, gateDb: -48, speed: "fast" },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 90 },
+      advanced: {
+        limiter: {
+          mpx: { on: true, stokkemask: true, pilotLevelPct: 9, maskKhz: 30 },
+          preEmph: { on: true, curve: "50", compensateHf: 60 },
+        },
+      },
+    }),
+  },
+  {
+    id: "web-loud-compliant",
+    name: "Web-Loud-Compliant",
+    description:
+      "Streaming delivery: −14 LUFS / −0.5 dBTP, a 6 LU range target, Opus codec pre-shaping and the 8× true-peak hold.",
+    tags: ["v3.1", "Streaming", "−14 LUFS"],
+    family: "Signalpath v3.1",
+    params: merge({
+      loudness: { standard: "spotify", customLufs: -14, customTpDb: -0.5 },
+      limiter: { on: true, ceilingDb: -0.5, attackMs: 1, releaseMs: 80 },
+      advanced: {
+        compliance: {
+          lra: { on: true, targetLu: 6 },
+          truePeak: { on: true, factor: 8, ceilingDb: -0.5 },
+        },
+        limiter: { codec: { on: true, target: "opus", lowpassHz: 20000 } },
+      },
+    }),
+  },
+  {
+    id: "music-hifi-open",
+    name: "Music-HiFi-Open",
+    description:
+      "Audiophile setting: 80 % dynamic-range recovery, a 12 dB crest target, a 10 LU range target and density-window limiting with 8× true-peak metering.",
+    tags: ["v3.1", "HiFi", "Open"],
+    family: "Signalpath v3.1",
+    params: merge({
+      advanced: {
+        restoration: { drr: { on: true, expansion: 80, crestTargetDb: 12 } },
+        leveling: { crest: { on: true, targetDb: 12, response: "slow" } },
+        compliance: {
+          lra: { on: true, targetLu: 10, mode: "expand" },
+          truePeak: { on: true, factor: 8, ceilingDb: -1 },
+        },
+        limiter: {
+          window: { on: true, fastMs: 2, densityMs: 20, density: 25 },
         },
       },
     }),
