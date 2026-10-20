@@ -1,4 +1,4 @@
-import { EncoderPanel } from "@/components/console/EncoderPanel";
+import { StreamTxPanel } from "@/components/console/StreamTxPanel";
 import { BandGrBar, StereoLevelMeter, GainReductionMeter } from "@/components/console/Meters";
 import { Fader } from "@/components/console/Fader";
 import {
@@ -1898,7 +1898,7 @@ export function ProcessingTab({
         )}
         {section === "stream" && (
           <div className="min-w-0 flex-1">
-            <EncoderPanel params={params} setParams={setParams} />
+            <StreamTxPanel params={params} setParams={setParams} />
           </div>
         )}
         {/* v3.0 psychoacoustics — appended after existing cards; nothing above moved */}

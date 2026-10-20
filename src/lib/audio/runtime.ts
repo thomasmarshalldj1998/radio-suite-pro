@@ -31,6 +31,10 @@ export interface StreamRuntime {
   source: StreamClient | null;
   /** Last reported upload state (live / retrying / offline + byte counts). */
   tx: StreamClientState;
+  /** Optional secondary simulcast socket (same encoder, independent mount). */
+  source2: StreamClient | null;
+  /** Last reported state of the secondary socket. */
+  tx2: StreamClientState;
 }
 
 const runtime: StreamRuntime = {
@@ -43,6 +47,8 @@ const runtime: StreamRuntime = {
   lastError: null,
   source: null,
   tx: { ...IDLE_TX },
+  source2: null,
+  tx2: { ...IDLE_TX },
 };
 
 const listeners = new Set<() => void>();
