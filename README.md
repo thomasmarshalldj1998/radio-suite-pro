@@ -259,6 +259,26 @@ uplink/latency/LUFS. The client base URL is `VITE_ENCODER_API` (default
 the console keeps using its WASM/MediaRecorder path. The bridge encodes and
 meters; the console's existing TX transport remains the broadcaster.
 
+### Full processing chain (v4.0)
+
+The full-chain tree adds 40 ordered processors alongside the v3.1 set: input DC/
+phase, clip repair, hum and hiss removal, adaptive gating, source-match and
+six-band EQ, de-mud/presence, de-essing, AGC, upward/downward/multiband
+compression, envelope and density shaping, M/S width, stereo enhancement,
+bass phase lock, mono-compatibility analysis, harmonic saturation, tape,
+pre-emphasis, short-term loudness, silence gating, LRA preservation, true-peak
+and lookahead protection, soft clipping, overshoot correction, perceptual
+roll-off, bitrate allocation and stereo bandwidth limiting.
+
+Every module follows the house contract: pure Python, `process_stereo()`,
+`state()`, `reset()`, and a bit-exact bypass when disabled. The shared
+primitives are in `proc_dsp.py`; ordering and seven themed presets are in
+`signalpath_full_chain_presets.cfg` (`Reference-Flat` bypasses all 40 stages).
+
+```bash
+python3 tests/test_full_chain.py        # 272 checks: modules, chain, protection, presets
+```
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with
