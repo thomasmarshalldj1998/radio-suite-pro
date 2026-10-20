@@ -26,10 +26,18 @@ import { Switch } from "@/components/ui/switch";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
 import {
   DEQ_LABELS,
+  HPF_DEFAULT_SLOPE,
+  HPF_SLOPES,
+  HPF_STANDARD_HZ,
   MB_LABELS,
+  eqBandOn,
   formatDb,
   formatHz,
+  limiterClipper,
   type DeqBands,
+  type EqBand,
+  type EqBandType,
+  type HpfSlope,
   type MultibandBands,
   type MultibandSplits,
   type ProcessorParams,
@@ -55,6 +63,32 @@ function useMeterSnapshot(intervalMs = 150): MeterSnapshot | null {
 
 /** Signed 2-dp value with typographic minus. */
 const sgn = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2).replace("-", "−")}`;
+
+/** Band shape chips for the per-band EQ editor. */
+const EQ_BAND_TYPES: { value: EqBandType; label: string }[] = [
+  { value: "peaking", label: "Peak" },
+  { value: "lowshelf", label: "Lo-sh" },
+  { value: "highshelf", label: "Hi-sh" },
+  { value: "lowpass", label: "Lo-pass" },
+  { value: "highpass", label: "Hi-pass" },
+  { value: "notch", label: "Notch" },
+];
+
+/** Two-letter badge for the band strip. */
+const EQ_TYPE_BADGE: Record<EqBandType, string> = {
+  peaking: "PK",
+  lowshelf: "LS",
+  highshelf: "HS",
+  lowpass: "LP",
+  highpass: "HP",
+  notch: "NO",
+};
+
+/** Q travel is logarithmic: 0.4 (broad) → 8.0 (sharp). */
+const Q_MIN = 0.4;
+const Q_MAX = 8;
+const qToPos = (q: number) => Math.log(Math.min(Q_MAX, Math.max(Q_MIN, q)));
+const posToQ = (pos: number) => Number(Math.exp(pos).toFixed(3));
 /** ms → seconds, 2 dp. */
 const secs = (ms: number) => `${(ms / 1000).toFixed(2)} s`;
 /** Exciter insert level in dB (engine blend = mix% · 0.5). */
@@ -322,12 +356,32 @@ export function ProcessingTab({
     [engine],
   );
 
+  /** Band selected for the detail editor under the fader strip. */
+  const [eqBand, setEqBand] = useState(0);
+
   const eqFlat = () =>
     setParams((prev) => ({
       ...prev,
       eq: { ...prev.eq, bands: prev.eq.bands.map((b) => ({ ...b, gainDb: 0 })) },
     }));
 
+  const patchEqBand = (index: number, patch: Partial<EqBand>) =>
+    setParams((prev) => ({
+      ...prev,
+      eq: {
+        ...prev.eq,
+        bands: prev.eq.bands.map((b, j) =>
+          j === index ? { ...b, ...patch } : b,
+        ),
+      },
+    }));
+
+  const clip = limiterClipper(params.limiter);
+  const patchClipper = (patch: Partial<typeof clip>) =>
+    setParams((p) => ({
+      ...p,
+      limiter: { ...p.limiter, clipper: { ...limiterClipper(p.limiter), ...patch } },
+    }));
   const ceilingPct = (Math.pow(10, params.limiter.ceilingDb / 20) * 100).toFixed(2);
   const truePeak = snap?.truePeak ?? -70;
   const riderDb = snap?.riderDb ?? 0;
@@ -490,7 +544,7 @@ export function ProcessingTab({
               <SliderRow
                 min={20}
                 max={300}
-                step={5}
+                step={1}
                 value={params.hpf.freqHz}
                 onChange={(v) =>
                   setParams((p) => ({ ...p, hpf: { ...p.hpf, freqHz: v } }))
@@ -498,6 +552,50 @@ export function ProcessingTab({
                 label="HPF frequency"
               />
               <Val>{formatHz(params.hpf.freqHz)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Slope">
+              <Seg
+                ariaLabel="High-pass steepness"
+                value={String(params.hpf.slope ?? HPF_DEFAULT_SLOPE)}
+                options={HPF_SLOPES.map((s) => ({
+                  value: String(s),
+                  label: `${s} dB`,
+                }))}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    hpf: { ...p.hpf, slope: Number(v) as HpfSlope },
+                  }))
+                }
+              />
+              <Val>{params.hpf.on ? "butterworth" : "bypassed"}</Val>
+            </CtrlRow>
+            <CtrlRow label="Std points">
+              {HPF_STANDARD_HZ.map((hz) => {
+                const active = params.hpf.freqHz === hz;
+                return (
+                  <button
+                    key={hz}
+                    type="button"
+                    onClick={() =>
+                      setParams((p) => ({
+                        ...p,
+                        hpf: { ...p.hpf, freqHz: hz, on: true },
+                      }))
+                    }
+                    aria-pressed={active}
+                    title={`Set the high-pass to the ${hz} Hz broadcast point`}
+                    className={cn(
+                      "cursor-pointer rounded border px-2 py-1 text-[9px] font-semibold tracking-[0.08em] uppercase transition-colors",
+                      active
+                        ? "border-signal/60 bg-signal/15 text-signal"
+                        : "border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  >
+                    {hz}
+                  </button>
+                );
+              })}
             </CtrlRow>
             <CtrlRow label="Phase rot">
               <Seg
@@ -591,7 +689,7 @@ export function ProcessingTab({
         <ChainBlock
           index={1}
           title="Equalizer"
-          subtitle="6-band · shelving ends"
+          subtitle="6-band parametric · per-band shape & bypass"
           enabled={params.eq.on}
           onToggle={() =>
             setParams((p) => ({ ...p, eq: { ...p.eq, on: !p.eq.on } }))
@@ -608,36 +706,118 @@ export function ProcessingTab({
           }
         >
           <div className="flex justify-between gap-1.5 overflow-x-auto pb-1">
-            {params.eq.bands.map((band, i) => (
-              <div key={band.freq} className="flex w-10 shrink-0 flex-col items-center">
-                <Fader
-                  label={formatHz(band.freq)}
-                  value={band.gainDb}
-                  min={-15}
-                  max={15}
-                  step={0.5}
-                  height={112}
-                  accent={Math.abs(band.gainDb) > 0.05}
-                  format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
-                  onChange={(v) =>
-                    setParams((p) => ({
-                      ...p,
-                      eq: {
-                        ...p.eq,
-                        bands: p.eq.bands.map((b, j) =>
-                          j === i ? { ...b, gainDb: v } : b,
-                        ),
-                      },
-                    }))
-                  }
-                />
-                <span className="text-[8px] font-semibold tracking-wider text-panel-mut uppercase">
-                  {band.type === "peaking" ? "PK" : band.type === "lowshelf" ? "LS" : "HS"}{' '}
-                  Q{band.q.toFixed(2)}
-                </span>
-              </div>
-            ))}
+            {params.eq.bands.map((band, i) => {
+              const bandOn = eqBandOn(band);
+              const selected = eqBand === i;
+              return (
+                <div
+                  key={i}
+                  className={cn(
+                    "flex w-10 shrink-0 flex-col items-center rounded pt-1 transition-opacity",
+                    !bandOn && "opacity-45",
+                  )}
+                >
+                  <Fader
+                    label={formatHz(band.freq)}
+                    value={band.gainDb}
+                    min={-15}
+                    max={15}
+                    step={0.5}
+                    height={112}
+                    accent={bandOn && Math.abs(band.gainDb) > 0.05}
+                    format={(v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}`}
+                    onChange={(v) => patchEqBand(i, { gainDb: v })}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setEqBand(i)}
+                    aria-pressed={selected}
+                    title={`Band ${i + 1} — ${band.type} · Q ${band.q.toFixed(2)}${bandOn ? "" : " · bypassed"}`}
+                    className={cn(
+                      "w-full cursor-pointer rounded px-0.5 py-0.5 text-[8px] leading-3 font-semibold tracking-wider uppercase transition-colors",
+                      selected
+                        ? "bg-signal/15 text-signal"
+                        : "text-panel-mut hover:bg-white/5 hover:text-foreground",
+                    )}
+                  >
+                    {EQ_TYPE_BADGE[band.type]}
+                    <br />Q{band.q.toFixed(2)}
+                  </button>
+                </div>
+              );
+            })}
           </div>
+
+          {/* per-band editor — the strip above sets level, this sets shape */}
+          <div className="mt-2 divide-y divide-border/60 rounded border border-border/60">
+            <CtrlRow label={`Band ${eqBand + 1} shape`}>
+              <Seg
+                ariaLabel={`Band ${eqBand + 1} in circuit`}
+                value={eqBandOn(params.eq.bands[eqBand]) ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) => patchEqBand(eqBand, { on: v === "on" })}
+              />
+              <Seg
+                ariaLabel={`Band ${eqBand + 1} filter type`}
+                value={params.eq.bands[eqBand].type}
+                options={EQ_BAND_TYPES.map((t) => ({
+                  value: t.value,
+                  label: t.label,
+                }))}
+                onChange={(v) =>
+                  patchEqBand(eqBand, { type: v as EqBandType })
+                }
+              />
+            </CtrlRow>
+            <CtrlRow label="Frequency">
+              <SliderRow
+                min={20}
+                max={20000}
+                step={1}
+                value={params.eq.bands[eqBand].freq}
+                onChange={(v) => patchEqBand(eqBand, { freq: v })}
+                label={`Band ${eqBand + 1} frequency`}
+              />
+              <Val>{formatHz(params.eq.bands[eqBand].freq)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Q">
+              <SliderRow
+                min={qToPos(Q_MIN)}
+                max={qToPos(Q_MAX)}
+                step={0.01}
+                value={qToPos(params.eq.bands[eqBand].q)}
+                onChange={(v) => patchEqBand(eqBand, { q: posToQ(v) })}
+                label={`Band ${eqBand + 1} Q`}
+              />
+              <Val>Q {params.eq.bands[eqBand].q.toFixed(2)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Gain">
+              <SliderRow
+                min={-15}
+                max={15}
+                step={0.5}
+                value={params.eq.bands[eqBand].gainDb}
+                onChange={(v) => patchEqBand(eqBand, { gainDb: v })}
+                label={`Band ${eqBand + 1} gain`}
+              />
+              <Val>
+                {params.eq.bands[eqBand].type === "lowpass" ||
+                params.eq.bands[eqBand].type === "highpass" ||
+                params.eq.bands[eqBand].type === "notch"
+                  ? "n/a"
+                  : formatDb(params.eq.bands[eqBand].gainDb)}
+              </Val>
+            </CtrlRow>
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+            Every band can be a peak, shelf, low/high-pass or notch. Gain is
+            inert for the pass/notch shapes — they cut by frequency, not level.
+            Q runs 0.4 (broad) to 8.0 (sharp); 1.4–3.0 is the broadcast vocal
+            sweet spot.
+          </p>
         </ChainBlock>
 
         {/* 02 — dynamic EQ */}
@@ -1135,22 +1315,36 @@ export function ProcessingTab({
                 }
               />
             </CtrlRow>
-            <CtrlRow label="Comp clip">
+            <CtrlRow label="Clipper">
               <Seg
-                ariaLabel="Composite clip stage"
-                value={params.limiter.on ? "on" : "bypass"}
+                ariaLabel="Soft clipper ahead of the limiter"
+                value={clip.on ? "on" : "bypass"}
                 options={[
                   { value: "on", label: "On" },
                   { value: "bypass", label: "Bypass" },
                 ]}
-                onChange={(v) =>
-                  setParams((p) => ({
-                    ...p,
-                    limiter: { ...p.limiter, on: v === "on" },
-                  }))
-                }
+                onChange={(v) => patchClipper({ on: v === "on" })}
               />
-              <Val>{params.limiter.on ? "armed" : "bypassed"}</Val>
+              <SliderRow
+                min={-6}
+                max={0}
+                step={0.1}
+                value={clip.thresholdDb}
+                onChange={(v) => patchClipper({ thresholdDb: v })}
+                label="Clipper threshold"
+              />
+              <Val>{formatDb(clip.thresholdDb)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Clip mix">
+              <SliderRow
+                min={0}
+                max={100}
+                step={5}
+                value={clip.mix}
+                onChange={(v) => patchClipper({ mix: v })}
+                label="Clipper mix"
+              />
+              <Val>{clip.mix.toFixed(0)} %</Val>
             </CtrlRow>
             <CtrlRow label="Ceil">
               <SliderRow
@@ -1210,8 +1404,9 @@ export function ProcessingTab({
             live={snap?.powered ?? false}
           />
           <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
-            The fast peak stage does the lifting; a 4×-oversampled per-sample
-            soft-clip guard downstream of the output trim makes{" "}
+            The soft clipper shaves transients before the peak limiter so the
+            limiter itself moves less; a 4×-oversampled per-sample soft-clip
+            guard downstream of the output trim makes{" "}
             <span className="text-readout text-foreground/80">
               {formatDb(params.limiter.ceilingDb)}
             </span>{" "}

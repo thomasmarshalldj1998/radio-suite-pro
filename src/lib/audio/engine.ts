@@ -23,7 +23,15 @@
 
 import { GlitchMonitor } from "./glitch";
 import type { ProcessorParams } from "./params";
-import { DEFAULT_PARAMS, DEFAULT_SPLITS, dbToGain } from "./params";
+import {
+  DEFAULT_CLIPPER,
+  DEFAULT_PARAMS,
+  DEFAULT_SPLITS,
+  dbToGain,
+  eqBandOn,
+  hpfSectionQs,
+  limiterClipper,
+} from "./params";
 import {
   WindowGate,
   clampDeessFreq,
@@ -212,7 +220,12 @@ export class AudioEngine {
   // graph
   private sourceBus!: GainNode;
   private inputGain!: GainNode;
-  private hpf!: BiquadFilterNode;
+  /**
+   * HPF cascade — one biquad per 12 dB/oct of the selected steepness (up to
+   * four). Sections past the selected slope stay in the graph as allpass,
+   * which is magnitude-neutral, so changing steepness never rewires audio.
+   */
+  private hpfStages: BiquadFilterNode[] = [];
   private phaseWet!: GainNode;
   private phaseDry!: GainNode;
   private phaseStages: BiquadFilterNode[] = [];
@@ -248,6 +261,12 @@ export class AudioEngine {
   private guardWet!: GainNode;
   private guardDry!: GainNode;
   private guardShaper!: WaveShaperNode;
+  // pre-limiter soft clipper: one 4× oversampled shaper blended in parallel
+  // with the dry program, so clipping shaves peaks without dulling the mix
+  private clipShaper!: WaveShaperNode;
+  private clipDry!: GainNode;
+  private clipWet!: GainNode;
+  private clipThresholdDb = Number.NaN;
   private guardCeilingDb = Number.NaN;
   // loudness rider (Compellor-style leveler / AERO long-term controller)
   private riderGain!: GainNode;
@@ -514,10 +533,13 @@ export class AudioEngine {
     // input stage: silence gate → trim → HPF → phase rotation
     this.gateGain = g(1);
     this.inputGain = g(1);
-    this.hpf = ctx.createBiquadFilter();
-    this.hpf.type = "highpass";
-    this.hpf.frequency.value = 80;
-    this.hpf.Q.value = 0.707;
+    for (let i = 0; i < 4; i++) {
+      const stage = ctx.createBiquadFilter();
+      stage.type = "highpass";
+      stage.frequency.value = 80;
+      stage.Q.value = 0.7071;
+      this.hpfStages.push(stage);
+    }
     this.sourceBus.connect(this.gateGain);
     // Failover crossfade point. The primary path (post-gate) and the standby
     // source meet at inputGain: the backup therefore bypasses the silence gate
@@ -548,7 +570,11 @@ export class AudioEngine {
     this.preSpec.smoothingTimeConstant = 0.8;
     this.inputGain.connect(this.preSpec);
 
-    this.inputGain.connect(this.hpf);
+    let hpfNode: AudioNode = this.inputGain;
+    for (const stage of this.hpfStages) {
+      hpfNode.connect(stage);
+      hpfNode = stage;
+    }
 
     // ── phase rotator: 4-stage allpass cascade (voice asymmetry) ──
     // Allpass sections change phase and never magnitude, so a staggered
@@ -556,8 +582,8 @@ export class AudioEngine {
     // touching the spectrum. Bypassable as a whole.
     this.phaseWet = g(1);
     this.phaseDry = g(0);
-    this.hpf.connect(this.phaseWet);
-    this.hpf.connect(this.phaseDry);
+    hpfNode.connect(this.phaseWet);
+    hpfNode.connect(this.phaseDry);
     let phaseNode: AudioNode = this.phaseWet;
     for (const stageHz of phaseStageFrequencies(300)) {
       const ap = ctx.createBiquadFilter();
@@ -807,7 +833,17 @@ export class AudioEngine {
     deessOut.connect(this.limWetPre);
     deessOut.connect(this.limDry);
     this.limWetPre.connect(this.limDrive);
-    this.limDrive.connect(this.limComp);
+    // software clipper between the drive stage and the peak limiter
+    this.clipDry = g(1);
+    this.clipWet = g(0);
+    this.clipShaper = ctx.createWaveShaper();
+    this.clipShaper.oversample = "4x";
+    this.rebuildClipCurve(DEFAULT_CLIPPER.thresholdDb);
+    this.limDrive.connect(this.clipDry);
+    this.clipDry.connect(this.limComp);
+    this.limDrive.connect(this.clipShaper);
+    this.clipShaper.connect(this.clipWet);
+    this.clipWet.connect(this.limComp);
     this.limComp.connect(limOut);
     this.limDry.connect(limOut);
 
@@ -977,8 +1013,16 @@ export class AudioEngine {
 
     this.ramp(this.inputGain.gain, dbToGain(params.inputGainDb));
 
-    this.ramp(this.hpf.frequency, params.hpf.freqHz);
-    this.hpf.type = params.hpf.on ? "highpass" : "allpass";
+    // HPF: 12/24/36/48 dB/oct as 1–4 Butterworth sections in cascade.
+    // Sections beyond the selected slope go allpass (unity magnitude) so the
+    // chain topology is fixed and only the slope's shape changes.
+    const hpfQs = hpfSectionQs(params.hpf.slope);
+    this.hpfStages.forEach((stage, i) => {
+      const active = params.hpf.on && i < hpfQs.length;
+      stage.type = active ? "highpass" : "allpass";
+      this.ramp(stage.frequency, params.hpf.freqHz);
+      this.ramp(stage.Q, hpfQs[i] ?? 0.7071);
+    });
 
     // phase rotator: auto = fixed voice window, manual = user frequency;
     // the cascade is retuned as a whole and bypassed as a whole
@@ -999,6 +1043,9 @@ export class AudioEngine {
     params.eq.bands.forEach((band, i) => {
       const f = this.eqFilters[i];
       if (!f) return;
+      // Per-band bypass keeps the band's settings: it just leaves the
+      // cascade as an allpass section, which is magnitude-neutral.
+      f.type = eqBandOn(band) ? band.type : "allpass";
       this.ramp(f.gain, band.gainDb);
       this.ramp(f.frequency, band.freq);
       this.ramp(f.Q, Math.max(band.q, 0.01));
@@ -1095,6 +1142,17 @@ export class AudioEngine {
     this.ramp(this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
     this.crossfade(this.limWetPre, this.limDry, params.limiter.on);
 
+    // Soft clipper: rebuilds its curve only when the threshold moves, then
+    // blends wet/dry by the mix control. Bypassed (dry only) by default.
+    const clip = limiterClipper(params.limiter);
+    if (clip.thresholdDb !== this.clipThresholdDb) {
+      this.rebuildClipCurve(clip.thresholdDb);
+    }
+    const clipMix = Math.min(1, Math.max(0, clip.mix / 100));
+    const clipOn = params.limiter.on && clip.on;
+    this.ramp(this.clipWet.gain, clipOn ? clipMix : 0, 0.02);
+    this.ramp(this.clipDry.gain, clipOn ? 1 - clipMix : 1, 0.02);
+
     // composite ceiling guard follows the limiter ceiling
     if (params.limiter.ceilingDb !== this.guardCeilingDb) {
       this.rebuildGuardCurve(params.limiter.ceilingDb);
@@ -1149,6 +1207,29 @@ export class AudioEngine {
   }
 
   /** Per-sample soft-clip curve that enforces the composite ceiling. */
+  /**
+   * Soft-clip transfer for the pre-limiter stage: linear below 72 % of the
+   * threshold, then a tanh knee that asymptotes at the threshold itself, so
+   * the stage can shave a decibel of transient without a brickwall edge.
+   */
+  private rebuildClipCurve(thresholdDb: number) {
+    if (!this.clipShaper) return;
+    const t = Math.min(0.999, Math.max(0.05, dbToGain(thresholdDb)));
+    const knee = 0.72;
+    const n = 4097;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = -1 + (2 * i) / (n - 1);
+      const u = Math.abs(x) / t;
+      curve[i] =
+        u <= knee
+          ? x
+          : Math.sign(x) * t * (knee + Math.tanh((u - knee) / (1 - knee)));
+    }
+    this.clipShaper.curve = curve;
+    this.clipThresholdDb = thresholdDb;
+  }
+
   private rebuildGuardCurve(ceilingDb: number) {
     if (!this.guardShaper) return;
     const ceil = Math.min(1, dbToGain(ceilingDb));

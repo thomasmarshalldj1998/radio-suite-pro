@@ -29,12 +29,14 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
-import { Bookmark, Copy, Download, RotateCcw, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { Bookmark, Copy, Download, RotateCcw, Trash2, Upload, X } from "lucide-react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 const summaryOf = (p: ProcessorParams): string[] => [
-  p.hpf.on ? `HPF ${formatHz(p.hpf.freqHz)}` : "HPF off",
+  p.hpf.on
+    ? `HPF ${formatHz(p.hpf.freqHz)} · ${p.hpf.slope ?? 24} dB/oct`
+    : "HPF off",
   `AGC ${p.agc.ratio.toFixed(2)}:1`,
   `6-band · ${p.deq.on ? "Dyn-EQ on" : "Dyn-EQ off"}`,
   `Ceiling ${p.limiter.ceilingDb.toFixed(2)} dB`,
@@ -283,6 +285,8 @@ export function PresetPanel({
   const [saving, setSaving] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
 
   const apply = (p: ProcessorParams, presetName: string) => {
     onApply(coerceParams(p), presetName);
@@ -447,6 +451,8 @@ export function PresetPanel({
   /** EXPORT ALL — download the whole library (factory + custom) as JSON. */
   const exportAll = () => {
     const payload = {
+      format: "signalpath-presets",
+      version: 1,
       exportedAt: new Date().toISOString(),
       presets: [
         ...BUILTIN_PRESETS.map((p) => ({
@@ -476,6 +482,76 @@ export function PresetPanel({
     a.click();
     URL.revokeObjectURL(url);
     toast.success(`Exported ${payload.presets.length} presets`);
+  };
+
+  /**
+   * IMPORT — accept an export from another console (or a single preset
+   * object). Every entry is coerced onto the current parameter shape, so a
+   * file written before a schema addition still loads. Name clashes with the
+   * factory library or the local bank get an "(imported)" suffix instead of
+   * silently overwriting something.
+   */
+  const importFile = async (file: File) => {
+    setImporting(true);
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const rawList = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as { presets?: unknown }).presets)
+          ? ((parsed as { presets: unknown[] }).presets)
+          : [parsed];
+      if (rawList.length === 0) {
+        toast.error("That file contains no presets");
+        return;
+      }
+      const taken = new Set<string>([
+        ...(saved ?? []).map((s) => s.name.toLowerCase()),
+        ...BUILTIN_PRESETS.map((b) => b.name.toLowerCase()),
+      ]);
+      let added = 0;
+      for (const entry of rawList.slice(0, 200)) {
+        if (!entry || typeof entry !== "object") continue;
+        const src = entry as {
+          name?: unknown;
+          description?: unknown;
+          params?: unknown;
+        };
+        const wanted =
+          typeof src.name === "string" ? src.name.trim().slice(0, 80) : "";
+        if (!wanted || !src.params || typeof src.params !== "object") continue;
+        let unique = wanted;
+        if (taken.has(unique.toLowerCase())) unique = `${wanted} (imported)`;
+        for (let n = 2; taken.has(unique.toLowerCase()) && n < 100; n++) {
+          unique = `${wanted} (imported ${n})`;
+        }
+        if (taken.has(unique.toLowerCase())) continue;
+        taken.add(unique.toLowerCase());
+        await savePreset({
+          name: unique,
+          description:
+            typeof src.description === "string" ? src.description : undefined,
+          params: coerceParams(src.params),
+        });
+        added++;
+      }
+      if (added === 0) {
+        toast.error("No usable presets in that file");
+      } else {
+        await pushLog({
+          kind: "preset",
+          title: `Imported ${added} preset${added === 1 ? "" : "s"}`,
+          detail: file.name,
+        });
+        toast.success(`Imported ${added} preset${added === 1 ? "" : "s"}`);
+      }
+    } catch (err) {
+      toast.error("Could not import that file", {
+        description:
+          err instanceof Error && err.message ? err.message : undefined,
+      });
+    } finally {
+      setImporting(false);
+    }
   };
 
   const [bank, setBank] = useState(loadSnapshots);
@@ -609,6 +685,27 @@ export function PresetPanel({
               <Download className="size-3.5" />
               Export all
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-[11px] tracking-wide uppercase"
+              disabled={importing}
+              onClick={() => fileRef.current?.click()}
+            >
+              <Upload className="size-3.5" />
+              {importing ? "Importing…" : "Import"}
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json,.signalpath"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) void importFile(file);
+              }}
+            />
           </div>
         </div>
 

@@ -12,11 +12,67 @@
  * → stereo matrix → pilot / RDS / SCA subcarriers → composite clipper.
  */
 
+/**
+ * Biquad shapes a band can take. The first three are the original
+ * shelving/peaking set; low/high-pass and notch turn a band into a
+ * static filter (its gain control is then inert, as on a real console).
+ */
+export type EqBandType =
+  | "peaking"
+  | "lowshelf"
+  | "highshelf"
+  | "lowpass"
+  | "highpass"
+  | "notch";
+
 export interface EqBand {
   freq: number;
   gainDb: number;
   q: number;
-  type: "lowshelf" | "peaking" | "highshelf";
+  type: EqBandType;
+  /**
+   * Band in circuit. Optional so presets saved before per-band bypass was
+   * added still read as enabled (`undefined` = on).
+   */
+  on?: boolean;
+}
+
+/** A band is in circuit unless it was explicitly switched off. */
+export function eqBandOn(band: EqBand): boolean {
+  return band.on !== false;
+}
+
+/**
+ * High-pass steepness in dB/octave. 12 dB/oct is one biquad section;
+ * each step adds another section in cascade (Butterworth pole spacing),
+ * so 48 dB/oct is the classic four-section broadcast rumble filter.
+ * Optional on the saved object so older presets load at the 24 dB default.
+ */
+export type HpfSlope = 12 | 24 | 36 | 48;
+
+export const HPF_SLOPES: HpfSlope[] = [12, 24, 36, 48];
+export const HPF_DEFAULT_SLOPE: HpfSlope = 24;
+
+/** Standard broadcast high-pass points, in Hz. */
+export const HPF_STANDARD_HZ = [30, 40, 50, 60, 80, 100] as const;
+
+/**
+ * Butterworth pole Qs for a cascade of 2nd-order sections, per order:
+ * 2nd order = 1 section, 4th = 2, 6th = 3, 8th = 4. These give a
+ * maximally-flat passband instead of the resonant bump that cascading
+ * identical Q=0.707 sections would produce.
+ */
+const HPF_SECTION_Q: Record<number, number[]> = {
+  1: [0.7071],
+  2: [0.5412, 1.3066],
+  3: [0.5176, 0.7071, 1.9319],
+  4: [0.5098, 0.6013, 0.8999, 2.5629],
+};
+
+/** Section Qs for a slope: 12 dB/oct → 1 section, 48 → 4. */
+export function hpfSectionQs(slope: HpfSlope | undefined): number[] {
+  const sections = Math.max(1, Math.min(4, Math.round((slope ?? HPF_DEFAULT_SLOPE) / 12)));
+  return HPF_SECTION_Q[sections];
 }
 
 export interface BandCompParams {
@@ -70,6 +126,34 @@ export interface RiderParams {
   gateDb: number;
   /** "fast" ≈ Compellor fast leveler (1.5 s down / 3 s up), "slow" ≈ 5 s / 10 s. */
   speed: "fast" | "slow";
+}
+
+/**
+ * Soft clipper ahead of the limiter. Real broadcast chains clip a decibel or
+ * two before the final ceiling so fast transients are shaved instead of
+ * making the limiter pump. `thresholdDb` is where the curve leaves linear;
+ * `mix` blends clipped and unclipped program in parallel.
+ */
+export interface ClipperParams {
+  on: boolean;
+  thresholdDb: number;
+  mix: number;
+}
+
+export const DEFAULT_CLIPPER: ClipperParams = {
+  on: false,
+  thresholdDb: -1.5,
+  mix: 60,
+};
+
+/**
+ * Clipper settings for a limiter block. Optional on the saved object so
+ * presets written before the clip stage existed load with it bypassed.
+ */
+export function limiterClipper(
+  limiter: ProcessorParams["limiter"],
+): ClipperParams {
+  return limiter.clipper ?? DEFAULT_CLIPPER;
 }
 
 /** Pre-emphasis time constant: 50 µs (CEPT/Europe) or 75 µs (ITU Region 2). */
@@ -149,7 +233,7 @@ export type DeqBands = [DeqBand, DeqBand, DeqBand, DeqBand, DeqBand];
 
 export interface ProcessorParams {
   inputGainDb: number;
-  hpf: { on: boolean; freqHz: number };
+  hpf: { on: boolean; freqHz: number; slope?: HpfSlope };
   /**
    * Phase rotation: a 4-stage allpass cascade (staggered around the tuning
    * frequency) that makes asymmetrical speech waveforms symmetrical so the
@@ -202,6 +286,8 @@ export interface ProcessorParams {
     ceilingDb: number;
     attackMs: number;
     releaseMs: number;
+    /** Soft clip stage ahead of the peak limiter (optional for old presets). */
+    clipper?: ClipperParams;
   };
   /**
    * M/S stereo image: width 1 = neutral, >1 widens the side channel;
@@ -264,7 +350,7 @@ export const OMNIA_SPLITS: MultibandSplits = [180, 1000, 3300, 6500, 12000];
 
 export const DEFAULT_PARAMS: ProcessorParams = {
   inputGainDb: 0,
-  hpf: { on: true, freqHz: 80 },
+  hpf: { on: true, freqHz: 80, slope: 24 },
   phase: { on: true, mode: "auto", freqHz: 300 },
   gate: { on: true, thresholdDb: -52, holdMs: 1500 },
   eq: {
@@ -320,7 +406,13 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     releaseMs: 60,
   },
   density: 5,
-  limiter: { on: true, ceilingDb: -1, attackMs: 1.5, releaseMs: 100 },
+  limiter: {
+    on: true,
+    ceilingDb: -1,
+    attackMs: 1.5,
+    releaseMs: 100,
+    clipper: { ...DEFAULT_CLIPPER },
+  },
   stereo: { width: 1, lowMonoHz: 120 },
   exciter: { on: false, mix: 3, freqHz: 3200 },
   fm: {
@@ -3483,7 +3575,7 @@ function biquadMagnitudeDb(
  * response curve matches what the chain actually does.
  */
 function stageResponseDb(
-  type: "peaking" | "lowshelf" | "highshelf" | "highpass",
+  type: EqBandType,
   freqHz: number,
   gainDb: number,
   q: number,
@@ -3494,18 +3586,24 @@ function stageResponseDb(
   const cw = Math.cos(w0);
   const sw = Math.sin(w0);
   const w = (2 * Math.PI * f) / fs;
-  if (type === "highpass") {
+  if (type === "highpass" || type === "lowpass") {
     const alpha = sw / (2 * q);
     const a0 = 1 + alpha;
+    const sign = type === "highpass" ? 1 : -1;
     return biquadMagnitudeDb(
-      (1 + cw) / 2,
-      -(1 + cw),
-      (1 + cw) / 2,
+      (1 - sign * cw) / 2,
+      sign * (1 - sign * cw),
+      (1 - sign * cw) / 2,
       a0,
       -2 * cw,
       1 - alpha,
       w,
     );
+  }
+  if (type === "notch") {
+    const alpha = sw / (2 * q);
+    const a0 = 1 + alpha;
+    return biquadMagnitudeDb(1, -2 * cw, 1, a0, -2 * cw, 1 - alpha, w);
   }
   const A = Math.pow(10, gainDb / 40);
   if (type === "peaking") {
@@ -3561,10 +3659,15 @@ export function chainResponseDb(
 ): number {
   let db = 0;
   if (p.hpf.on) {
-    db += stageResponseDb("highpass", p.hpf.freqHz, 0, 0.707, f, fs);
+    // One biquad per 12 dB/oct of the selected steepness, exactly as the
+    // engine cascades them.
+    for (const q of hpfSectionQs(p.hpf.slope)) {
+      db += stageResponseDb("highpass", p.hpf.freqHz, 0, q, f, fs);
+    }
   }
   if (p.eq.on) {
     for (const band of p.eq.bands) {
+      if (!eqBandOn(band)) continue;
       db += stageResponseDb(band.type, band.freq, band.gainDb, band.q, f, fs);
     }
   }

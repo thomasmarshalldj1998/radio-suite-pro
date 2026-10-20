@@ -1,5 +1,10 @@
 import { getEngine } from "@/lib/audio/engine";
-import { chainResponseDb, type EqBand, type MultibandSplits } from "@/lib/audio/params";
+import {
+  chainResponseDb,
+  type EqBand,
+  type HpfSlope,
+  type MultibandSplits,
+} from "@/lib/audio/params";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef } from "react";
 
@@ -30,8 +35,8 @@ export interface SpectrumCanvasProps {
   className?: string;
   /** Draw the static EQ response curve (+0 dB axis) over the spectrum. */
   eq?: { on: boolean; bands: EqBand[] };
-  /** Input high-pass marker — folded into the response curve. */
-  hpf?: { on: boolean; freqHz: number };
+  /** Input high-pass marker — folded into the response curve (with slope). */
+  hpf?: { on: boolean; freqHz: number; slope?: HpfSlope };
   /** Multiband crossover splits — drawn as labelled verticals. */
   splits?: MultibandSplits;
 }
