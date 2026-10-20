@@ -1113,6 +1113,8 @@ export default function Dashboard() {
             {tab === "telemetry" && (
               <TelemetryTab
                 params={params}
+                setParams={setParams}
+                presetName={activePreset}
                 onConfigureStream={() => {
                   setTab("dsp");
                   setDspSection("stream");

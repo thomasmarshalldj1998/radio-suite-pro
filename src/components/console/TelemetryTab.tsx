@@ -24,6 +24,11 @@ import {
   type ProcessorParams,
 } from "@/lib/audio/params";
 import {
+  LOUDNESS_STANDARDS,
+  complianceTarget,
+  loudnessCsv,
+} from "@/lib/audio/loudness";
+import {
   AdvisorStrip,
   PerceptualBar,
 } from "@/components/console/PsyPanels";
@@ -239,11 +244,18 @@ const statusCls = (kind: OutputStatusKind) =>
 export function TelemetryTab({
   onConfigureStream,
   params,
+  setParams,
+  station,
+  presetName,
 }: {
   /** Jump to the Stream TX page (wired to the console tab state). */
   onConfigureStream?: () => void;
-  /** Chain params — feeds the perceptual dashboard + advisor only. */
+  /** Chain params — feeds the perceptual dashboard, advisor and target. */
   params?: ProcessorParams;
+  /** Compliance target changes; absent = read-only telemetry. */
+  setParams?: React.Dispatch<React.SetStateAction<ProcessorParams>>;
+  station?: string;
+  presetName?: string;
 }) {
   const snap = useMeterSnapshot();
   const { slots } = useOutputs();
@@ -292,11 +304,37 @@ export function TelemetryTab({
   };
 
   const powered = snap?.powered ?? false;
+  const target = params
+    ? complianceTarget(params)
+    : {
+        id: "spotify" as const,
+        label: "Spotify / streaming",
+        lufs: LUFS_TARGET,
+        truePeakDb: TRUE_PEAK_TARGET,
+      };
   const lufsS = snap?.lufsS ?? -70;
-  const loudnessDelta = lufsS - LUFS_TARGET;
+  const loudnessDelta = lufsS - target.lufs;
   const loudnessOk = powered ? Math.abs(loudnessDelta) <= 1 : null;
   const truePeak = snap?.truePeak ?? -70;
-  const peakLimitOk = powered ? truePeak <= TRUE_PEAK_TARGET + 0.05 : null;
+  const peakLimitOk = powered ? truePeak <= target.truePeakDb + 0.05 : null;
+  const verdict = snap?.compliance ?? "measuring";
+  const deviation = snap?.loudnessDeviation ?? null;
+  const exportLoudness = () => {
+    const rows = [...getEngine().loudnessLogRows];
+    if (rows.length < 2) return;
+    const csv = loudnessCsv(rows, {
+      station: station ?? "Signalpath",
+      preset: presetName ?? "Current chain",
+      standard: target,
+    });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `loudness-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
   const clipOk = powered ? !(snap?.clipOut ?? false) : null;
   const corr = snap?.correlation ?? 1;
   const corrOk = powered ? corr > 0.1 : null;
@@ -327,14 +365,90 @@ export function TelemetryTab({
       <ModuleCard
         className="xl:col-span-12"
         title="Compliance monitoring"
-        subtitle="EBU R128 · ITU-R BS.1770-4 metering on the composite bus"
+        subtitle={`${target.label} · ITU-R BS.1770-4 gated metering on the composite bus`}
         right={
           <span className="text-readout hidden text-[10px] text-muted-foreground sm:inline">
-            Target {LUFS_TARGET.toFixed(2)} LUFS · ceiling{" "}
-            {TRUE_PEAK_TARGET.toFixed(2)} dBTP
+            Target {target.lufs.toFixed(2)} LUFS · ceiling{" "}
+            {target.truePeakDb.toFixed(2)} dBTP
           </span>
         }
       >
+        {params && setParams && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <label
+              htmlFor="loudness-standard"
+              className="text-[9px] font-semibold tracking-[0.14em] text-panel-mut uppercase"
+            >
+              Standard
+            </label>
+            <select
+              id="loudness-standard"
+              className="h-7 cursor-pointer rounded border border-border/60 bg-muted/40 px-2 text-[11px] text-foreground"
+              value={params.loudness.standard}
+              onChange={(e) =>
+                setParams((p) => ({
+                  ...p,
+                  loudness: {
+                    ...p.loudness,
+                    standard: e.target.value as ProcessorParams["loudness"]["standard"],
+                  },
+                }))
+              }
+            >
+              {LOUDNESS_STANDARDS.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label} · {s.id === "custom" ? "own target" : `${s.targetLufs} LUFS`}
+                </option>
+              ))}
+            </select>
+            {params.loudness.standard === "custom" && (
+              <>
+                <input
+                  type="number"
+                  min={-30}
+                  max={-10}
+                  step={0.5}
+                  aria-label="Custom loudness target"
+                  className="text-readout h-7 w-16 rounded border border-border/60 bg-muted/40 px-1.5 text-[11px]"
+                  value={params.loudness.customLufs}
+                  onChange={(e) =>
+                    setParams((p) => ({
+                      ...p,
+                      loudness: { ...p.loudness, customLufs: Number(e.target.value) },
+                    }))
+                  }
+                />
+                <span className="text-[10px] text-muted-foreground">LUFS</span>
+              </>
+            )}
+            <span
+              className={cn(
+                "rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-[0.12em] uppercase",
+                verdict === "pass"
+                  ? "border-meter-ok/40 bg-meter-ok/10 text-meter-ok"
+                  : verdict === "warn"
+                    ? "border-meter-warn/40 bg-meter-warn/10 text-meter-warn"
+                    : verdict === "fail"
+                      ? "border-meter-hot/40 bg-meter-hot/10 text-meter-hot"
+                      : "border-border/60 text-panel-mut",
+              )}
+              title={
+                deviation === null
+                  ? "Waiting for 20 s of gated programme"
+                  : `${deviation >= 0 ? "+" : "−"}${Math.abs(deviation).toFixed(1)} LU from ${target.lufs} LUFS`
+              }
+            >
+              {verdict === "measuring" ? "measuring" : verdict}
+            </span>
+            <button
+              type="button"
+              onClick={exportLoudness}
+              className="ml-auto h-7 rounded border border-border/60 px-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Export CSV
+            </button>
+          </div>
+        )}
         <div className="grid gap-3 sm:grid-cols-3">
           <MetricCard
             label="Input LUFS"
@@ -357,7 +471,7 @@ export function TelemetryTab({
         </div>
 
         <div className="mt-3">
-          <LoudnessMeter target={LUFS_TARGET} />
+          <LoudnessMeter target={target.lufs} />
         </div>
 
         <div className="mt-3">

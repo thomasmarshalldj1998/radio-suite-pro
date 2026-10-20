@@ -84,15 +84,16 @@ export interface BandCompParams {
 }
 
 /**
- * High-frequency de-esser: a dynamic cut over a broad band inside 6–10 kHz,
- * placed ahead of the limiter so sibilance is tamed before it drives the
- * final stage instead of after it has already squashed the programme.
+ * High-frequency de-esser: a dynamic cut over a band inside 5–10 kHz (5 kHz
+ * for dark, chesty voices; 8–10 kHz for bright condensers), placed ahead of
+ * the limiter so sibilance is tamed before it drives the final stage instead
+ * of after it has already squashed the programme.
  */
 import { DEFAULT_PSY, type PsyParams } from "./psycho";
 
 export interface DeessParams {
   on: boolean;
-  /** Centre of the detection band (Hz) — 6 kHz … 10 kHz. */
+  /** Centre of the detection band (Hz) — 5 kHz … 10 kHz. */
   freqHz: number;
   /** HF level at which the cut starts (dBFS). */
   thresholdDb: number;
@@ -177,6 +178,42 @@ export const DEFAULT_CLIPPER: ClipperParams = {
   thresholdDb: -1.5,
   mix: 60,
 };
+
+/**
+ * Program limiter: the slow second stage of the dual-stage limiter. It rides
+ * the short-term level, leaving the fast peak stage to catch transients only.
+ * `ceilingDb` is independent of the peak ceiling (usually a few tenths lower,
+ * so the program stage does the audible work and the peak stage stays idle).
+ */
+export interface LimiterProgramParams {
+  on: boolean;
+  ceilingDb: number;
+  attackMs: number;
+  releaseMs: number;
+}
+
+export const DEFAULT_LIMITER_PROGRAM: LimiterProgramParams = {
+  on: false,
+  ceilingDb: -1.4,
+  attackMs: 12,
+  releaseMs: 320,
+};
+
+/** Program-limiter settings for a limiter block (old saves → bypassed). */
+export function limiterProgram(
+  limiter: ProcessorParams["limiter"],
+): LimiterProgramParams {
+  return limiter.program ?? DEFAULT_LIMITER_PROGRAM;
+}
+
+/** Published loudness standards the console can measure against. */
+export type LoudnessStandardId =
+  | "ebu"
+  | "r128s1"
+  | "atsc"
+  | "spotify"
+  | "apple"
+  | "custom";
 
 /**
  * Clipper settings for a limiter block. Optional on the saved object so
@@ -323,6 +360,30 @@ export interface ProcessorParams {
     releaseMs: number;
     /** Soft clip stage ahead of the peak limiter (optional for old presets). */
     clipper?: ClipperParams;
+    /**
+     * Second, slower limiter after the peak stage: it takes the residual
+     * short-term level and keeps it under its own ceiling, so the fast stage
+     * only ever sees transients. Optional for old saves → bypassed.
+     */
+    program?: LimiterProgramParams;
+    /**
+     * Adaptive release: lengthen/shorten both limiter releases from the live
+     * crest factor — faster on percussive programme, smoother on sustained
+     * music — instead of one fixed release for everything.
+     */
+    adaptive?: boolean;
+    /**
+     * Hold (ms): once the limiter has pulled more than ~1.5 dB, the release
+     * is frozen for this long so short loud peaks cannot breathe between
+     * events. 0 = off. Bounded 20–200 ms in the control loop.
+     */
+    holdMs?: number;
+    /**
+     * True-peak meter oversampling: 2×, 4× (default) or 8×. Higher factors
+     * resolve shallower inter-sample crests — the ones a lossy encoder will
+     * rebuild — at a higher metering cost.
+     */
+    truePeakX?: 2 | 4 | 8;
   };
   /**
    * M/S stereo image: width 1 = neutral, >1 widens the side channel;
@@ -330,6 +391,23 @@ export interface ProcessorParams {
    * sub-bass stays centred (FM / club / phone safe). 0 = off.
    */
   stereo: { width: number; lowMonoHz: number };
+  /**
+   * Loudness compliance target. `standard` picks a published target (EBU R128
+   * −23, R128 s1 −16, ATSC A/85 −24, Spotify −14, Apple Music −16) and
+   * `custom` uses the two values below. The rider, the target readout and the
+   * compliance flag all follow this one choice.
+   */
+  loudness: {
+    standard: LoudnessStandardId;
+    customLufs: number;
+    customTpDb: number;
+  };
+  /**
+   * Monitoring checks. These are applied on the monitor path only — the
+   * encoder send always carries the untouched processed programme, so a mono
+   * check or a polarity flip can never leak on air.
+   */
+  monitor: { mono: boolean; invertL: boolean; invertR: boolean };
   /** Parallel harmonic exciter (Aphex-style sweetening). */
   exciter: { on: boolean; mix: number; freqHz: number };
   /** FM transmission branch (pre-emphasis + MPX composite generator). */
@@ -448,8 +526,14 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     attackMs: 1.5,
     releaseMs: 100,
     clipper: { ...DEFAULT_CLIPPER },
+    program: { ...DEFAULT_LIMITER_PROGRAM },
+    adaptive: false,
+    holdMs: 0,
+    truePeakX: 4,
   },
   stereo: { width: 1, lowMonoHz: 120 },
+  loudness: { standard: "spotify", customLufs: LUFS_TARGET, customTpDb: TRUE_PEAK_TARGET },
+  monitor: { mono: false, invertL: false, invertR: false },
   exciter: { on: false, mix: 3, freqHz: 3200 },
   fm: {
     on: false,

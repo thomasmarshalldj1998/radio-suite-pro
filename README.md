@@ -116,9 +116,10 @@ up-mixed at the bus, so the right meter, the correlation readout and the M/S
 matrix do not silently lose half the programme.
 
 ```bash
-bun scripts/verify-audio-sources.ts  # source routing, arming, power cycling, 2-channel bus
-bun scripts/verify-audio-measure.ts  # peaks/true peak/LUFS/LRA + device listing and saved picks
-bun scripts/verify-audio-devices.ts  # device selection, hot-swap, sink fallback
+bun scripts/verify-audio-sources.ts   # source routing, arming, power cycling, 2-channel bus
+bun scripts/verify-audio-measure.ts   # peaks/true peak/LUFS/LRA + device listing and saved picks
+bun scripts/verify-audio-devices.ts   # device selection, hot-swap, sink fallback
+bun scripts/verify-processing-extras.ts  # loudness standards/CSV, limiter envelopes, width, M/S, monitor checks
 ```
 
 - **Dual-window AGC** — `agc.fast`. The leveller's slow window
@@ -146,10 +147,37 @@ bun scripts/verify-audio-devices.ts  # device selection, hot-swap, sink fallback
   limiter ceiling never moves, so "more" raises average density without
   spending true-peak headroom. It lives on the meter bridge, always visible.
 - **De-esser** — `deess`, a dynamic band cut ahead of the limiter. Tuning is
-  clamped to 6–10 kHz (default 7.5 kHz); a fast detector (1 ms attack, 60 ms
+  clamped to 5–10 kHz (default 7.5 kHz); a fast detector (1 ms attack, 60 ms
   release) subtracts up to `maxCutDb` of the band, so sibilance is tamed
   before the final stage sees it rather than after it has already squashed
   the programme.
+- **Dual-stage limiter** — `limiter.program`. The fast peak stage catches
+  transients; a slow program stage with its own ceiling and release rides the
+  short-term level. `limiter.adaptive` scales both releases from the live
+  crest factor (faster on percussion, smoother on sustained music) and
+  `limiter.holdMs` freezes the release for 20–200 ms after a real reduction so
+  short peaks cannot breathe. Both stages sit ahead of the soft clipper and
+  the ceiling guard.
+- **True-peak oversampling** — `limiter.truePeakX`, 2× / 4× / 8×. 8× resolves
+  the shallow inter-sample crests a lossy encoder reconstructs; the meter
+  interpolates the signed waveform at every sample, so a steady tone cannot
+  hide a crest between the samples it skips.
+- **Per-band width + M/S trim** — `psy.cohWidth` splits only the side channel
+  into five bands (bass-to-mono while the air band widens), with widening
+  scaled back as correlation falls so a hollow image is never made worse.
+  `psy.msTrim` trims mid/side balance and high-passes the side channel.
+- **Bass enhancement** — `psy.bassSynth`. Harmonics are generated from the
+  programme's own low band and mixed back in parallel: no delayed copy and no
+  allpass network, so the low end keeps its transient shape.
+- **Monitor checks** — `monitor.mono` / `monitor.invertL` / `monitor.invertR`
+  fold the monitor to mono and flip either channel's polarity. They are
+  monitor-path only (the encoder send is tapped upstream), and the Input tab
+  draws the last two minutes of correlation beside them.
+- **Loudness compliance** — `loudness.standard` picks EBU R128 (−23), R128 s1
+  (−16), ATSC A/85 (−24), Spotify (−14), Apple Music (−16) or a custom target.
+  One picker drives the rider (via loudness lock), the meter bridge target and
+  the compliance verdict; Telemetry exports the session log as a CSV report
+  with the station, preset, target, deviation and true peak per second.
 
 ## Desktop App (Windows, macOS, Linux)
 

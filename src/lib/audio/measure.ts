@@ -63,41 +63,59 @@ export function correlationOf(l: Samples, r: Samples): number {
 const TRUE_PEAK_TAPS = 8;
 
 /**
- * 8-tap Hann-windowed sinc for the quarter-phase estimates between samples.
- * Coefficients are normalised to unity DC gain so the interpolator never
- * shifts programme level. Cubic interpolation under-reads near Nyquist by
- * over a decibel; a windowed sinc keeps the ceiling honest at 12–15 kHz.
+ * Kernel cache: one set of 8-tap Hann-windowed sinc phases per oversampling
+ * factor. Coefficients are normalised to unity DC gain so the interpolator
+ * never shifts programme level. Cubic interpolation under-reads near Nyquist
+ * by over a decibel; a windowed sinc keeps the ceiling honest at 12–15 kHz.
+ * 2× reads the sample pair, 4× adds the half, 8× resolves the shallowest
+ * inter-sample crests that a low-bitrate encoder will reconstruct.
  */
-export const TRUE_PEAK_PHASES: number[][] = [0.25, 0.5, 0.75].map((phase) => {
-  const coeffs: number[] = [];
-  let sum = 0;
-  for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
-    const x = k - 3 - phase;
-    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
-    const hann =
-      0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / TRUE_PEAK_TAPS);
-    const v = sinc * hann;
-    coeffs.push(v);
-    sum += v;
-  }
-  return coeffs.map((v) => v / sum);
-});
+const TRUE_PEAK_KERNELS = new Map<number, number[][]>();
+
+function truePeakKernel(factor: number): number[][] {
+  const f = factor === 2 || factor === 8 ? factor : 4;
+  const cached = TRUE_PEAK_KERNELS.get(f);
+  if (cached) return cached;
+  const phases = Array.from({ length: f - 1 }, (_, i) => (i + 1) / f);
+  const built = phases.map((phase) => {
+    const coeffs: number[] = [];
+    let sum = 0;
+    for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
+      const x = k - 3 - phase;
+      const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const hann =
+        0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / TRUE_PEAK_TAPS);
+      const v = sinc * hann;
+      coeffs.push(v);
+      sum += v;
+    }
+    return coeffs.map((v) => v / sum);
+  });
+  TRUE_PEAK_KERNELS.set(f, built);
+  return built;
+}
+
+/** Quarter-phase kernel at 4× — exported for the transfer-curve docs/tests. */
+export const TRUE_PEAK_PHASES: number[][] = truePeakKernel(4);
 
 /**
- * Inter-sample peak in dBTP. Interpolates the *signed* waveform — four
- * neighbouring samples per estimate — because interpolating magnitudes
- * invents peaks wherever the signal crosses zero.
+ * Inter-sample peak in dBTP at 2×, 4× (default) or 8× oversampling.
+ * Interpolates the *signed* waveform — four neighbouring samples per estimate
+ * — because interpolating magnitudes invents peaks wherever the signal
+ * crosses zero.
  */
-export function truePeak(samples: Samples): number {
+export function truePeak(samples: Samples, factor = 4): number {
   const n = samples.length;
   if (n < 4) return peakDb(samples);
+  const kernel = truePeakKernel(factor);
   let max = 0;
-  // Every second sample is enough: interpolated crests are never isolated to
-  // a single sample, and this halves the tap count.
-  for (let i = 4; i < n - 4; i += 2) {
+  // Every sample is interpolated: stepping by two silently misses crests that
+  // fall on the skipped phase, which a steady tone does every period (a
+  // 6 kHz tone reads 0.7 dB low with every other sample skipped).
+  for (let i = 4; i < n - 4; i += 1) {
     const sample = Math.abs(samples[i]);
     if (sample > max) max = sample;
-    for (const coeffs of TRUE_PEAK_PHASES) {
+    for (const coeffs of kernel) {
       let acc = 0;
       for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
         acc += samples[i - 3 + k] * coeffs[k];

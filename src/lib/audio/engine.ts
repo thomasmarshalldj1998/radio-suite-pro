@@ -47,14 +47,25 @@ import {
   eqBandOn,
   hpfSectionQs,
   limiterClipper,
+  limiterProgram,
 } from "./params";
 import {
   WindowGate,
   clampDeessFreq,
+  coherenceSafety,
   deessAlpha,
   densityProfile,
+  dynamicReleaseMs,
   phaseStageFrequencies,
+  safeWidth,
 } from "./tools";
+import {
+  complianceState,
+  complianceTarget,
+  loudnessDeviation,
+  type ComplianceState,
+  type LoudnessLogRow,
+} from "./loudness";
 import {
   DEVICE_STORE,
   listDevices,
@@ -119,6 +130,13 @@ export interface MeterSnapshot {
   deessCut: number;
   /** current loudness-rider gain in dB (negative = pulling down) */
   riderDb: number;
+  /** Loudness target in force (LUFS) and the measured deviation from it. */
+  loudnessTarget: number;
+  loudnessDeviation: number | null;
+  /** Compliance verdict against that target (BS.1770 gated integrated). */
+  compliance: ComplianceState;
+  /** True-peak oversampling factor in use (2 / 4 / 8). */
+  truePeakX: number;
   /** latency & main-thread health */
   perf: {
     baseLatencyMs: number;
@@ -164,6 +182,10 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   agcWindow: { frozen: false, spreadDb: 0 },
   deessCut: 0,
   riderDb: 0,
+  loudnessTarget: -14,
+  loudnessDeviation: null,
+  compliance: "measuring",
+  truePeakX: 4,
   perf: {
     baseLatencyMs: 0,
     outputLatencyMs: 0,
@@ -318,10 +340,28 @@ export class AudioEngine {
   private exBp1!: BiquadFilterNode;
   private exBp2!: BiquadFilterNode;
   private exMix!: GainNode;
+  // low-band reinforcement: harmonics generated from the bass band itself
+  private bass1!: BiquadFilterNode;
+  private bass2!: BiquadFilterNode;
+  private bassDrive!: GainNode;
+  private bassShaper!: WaveShaperNode;
+  private bassMix!: GainNode;
   // M/S stereo width (transparent when bypassed)
   private widthDry!: GainNode;
   private widthWet!: GainNode;
   private widthGain!: GainNode;
+  /** Per-band (5-way) side width — psy.cohWidth. */
+  private cwWet!: GainNode;
+  private cwDry!: GainNode;
+  private cwOut!: GainNode;
+  private cwBands: GainNode[] = [];
+  private cwSplits: BiquadFilterNode[][] = [];
+  /** M/S matrix trim — psy.msTrim. */
+  private midTrim!: GainNode;
+  private sideTrim!: GainNode;
+  private sideHpf!: BiquadFilterNode;
+  private sideHpfWet!: GainNode;
+  private sideHpfDry!: GainNode;
   /** Low-end mono: side highs pass, side lows fold back to centred. */
   private sideDry!: GainNode;
   private sideWet!: GainNode;
@@ -367,6 +407,8 @@ export class AudioEngine {
   private limWetPre!: GainNode;
   private limComp!: DynamicsCompressorNode;
   private limDry!: GainNode;
+  /** Slow second limiter stage (program limiter). */
+  private progComp!: DynamicsCompressorNode;
   private outputGain!: GainNode;
   private duckGain!: GainNode;
   private matchGain!: GainNode;
@@ -374,6 +416,10 @@ export class AudioEngine {
   private tiltLo!: BiquadFilterNode;
   private tiltHi!: BiquadFilterNode;
   private monitorGain!: GainNode;
+  /** Monitor check matrix: mono fold + per-channel polarity (monitor only). */
+  private monL!: GainNode;
+  private monR!: GainNode;
+  private monMono!: GainNode;
   /** Operator mute on the monitor bus; survives parameter re-application. */
   private monitorMuted = false;
   private streamGain!: GainNode;
@@ -418,6 +464,15 @@ export class AudioEngine {
   private applying = false;
   /** Programme level ahead of the gate, from the latest meter tick. */
   private srcLevelDb = -120;
+  /** 1 Hz correlation history for the phase meter (ring buffer). */
+  private corrHistory = new Float32Array(120).fill(1);
+  private corrWrite = 0;
+  private lastCorrAt = 0;
+  /** 1 Hz loudness log for the CSV report (last hour, newest last). */
+  private loudnessLog: LoudnessLogRow[] = [];
+  private lastLogAt = 0;
+  /** Limiter hold: release is frozen until this timestamp (ms). */
+  private limiterHoldUntil = 0;
   private inPeakL = -120;
   private inPeakR = -120;
 
@@ -598,6 +653,8 @@ export class AudioEngine {
     this.deqDets = [];
     this.deqSubs = [];
     this.deqCutDb = [0, 0, 0, 0, 0];
+    this.cwBands = [];
+    this.cwSplits = [];
   }
 
   /* ── graph construction ───────────────────────────────────────────────── */
@@ -809,6 +866,36 @@ export class AudioEngine {
     this.exBp2.connect(this.exMix);
     this.exMix.connect(deqSum); // harmonics join the program here
 
+    // ── low-band reinforcement (psychoacoustic bass module) ──
+    // The bass band is taken from the programme itself, its harmonics are
+    // generated from that band, and the result joins the programme in
+    // parallel. There is no delayed copy and no allpass network in the path,
+    // so the low end keeps its transient shape instead of smearing.
+    this.bass1 = ctx.createBiquadFilter();
+    this.bass1.type = "lowpass";
+    this.bass1.frequency.value = 140;
+    this.bass1.Q.value = 0.707;
+    this.bass2 = ctx.createBiquadFilter();
+    this.bass2.type = "lowpass";
+    this.bass2.frequency.value = 140;
+    this.bass2.Q.value = 0.707;
+    this.bassDrive = g(2);
+    this.bassShaper = ctx.createWaveShaper();
+    const bassCurve = new Float32Array(4097);
+    for (let i = 0; i < bassCurve.length; i++) {
+      const x = -1 + (2 * i) / (bassCurve.length - 1);
+      bassCurve[i] = Math.tanh(2.2 * x) / Math.tanh(2.2);
+    }
+    this.bassShaper.curve = bassCurve;
+    this.bassShaper.oversample = "2x";
+    this.bassMix = g(0);
+    eqOut.connect(this.bass1);
+    this.bass1.connect(this.bass2);
+    this.bass2.connect(this.bassDrive);
+    this.bassDrive.connect(this.bassShaper);
+    this.bassShaper.connect(this.bassMix);
+    this.bassMix.connect(deqSum);
+
     // ── program AGC (pre-multiband leveller — its leveled output feeds
     //    the multiband stage as the input reference level) ──
     this.agcWetPre = g(1);
@@ -965,7 +1052,18 @@ export class AudioEngine {
     this.limDrive.connect(this.clipShaper);
     this.clipShaper.connect(this.clipWet);
     this.clipWet.connect(this.limComp);
-    this.limComp.connect(limOut);
+    // ── program limiter: the slow second stage ──
+    // It rides the short-term level under its own ceiling, so the fast peak
+    // stage only ever sees transients. Ratio 1 = unity until engaged, which
+    // keeps the node (and its latency) in circuit either way.
+    this.progComp = ctx.createDynamicsCompressor();
+    this.progComp.threshold.value = -1.4;
+    this.progComp.ratio.value = 1;
+    this.progComp.knee.value = 2;
+    this.progComp.attack.value = 0.012;
+    this.progComp.release.value = 0.32;
+    this.limComp.connect(this.progComp);
+    this.progComp.connect(limOut);
     this.limDry.connect(limOut);
 
     // ── output / ceiling guard / duck / monitor / encoder send ──
@@ -1021,8 +1119,67 @@ export class AudioEngine {
     const wMerge = ctx.createChannelMerger(2);
     // NOTE: connect(dest, output, input) — a GainNode only has output 0, so
     // routing into the merger's right channel must target input 1 (3rd arg).
-    mid.connect(wMerge, 0, 0);
-    mid.connect(wMerge, 0, 1);
+    this.midTrim = g(1);
+    this.sideTrim = g(1);
+    mid.connect(this.midTrim);
+    this.midTrim.connect(wMerge, 0, 0);
+    this.midTrim.connect(wMerge, 0, 1);
+
+    // Side HPF (M/S trim): a bypass pair keeps the topology fixed and the
+    // side band untouched until the trim is engaged.
+    this.sideHpf = ctx.createBiquadFilter();
+    this.sideHpf.type = "highpass";
+    this.sideHpf.frequency.value = 400;
+    this.sideHpf.Q.value = 0.707;
+    this.sideHpfDry = g(1);
+    this.sideHpfWet = g(0);
+    const sideBase = g(1);
+    this.sideTrim.connect(this.sideHpfDry);
+    this.sideHpfDry.connect(sideBase);
+    this.sideTrim.connect(this.sideHpf);
+    this.sideHpf.connect(this.sideHpfWet);
+    this.sideHpfWet.connect(sideBase);
+
+    // ── per-band (5-way) side width ──
+    // Splitting only the side channel keeps the mid path intact: the bass
+    // band can be narrowed to mono while the air band widens, which is the
+    // one stereo move that survives a mono fold-down.
+    const CW_SPLITS = [120, 400, 1600, 5000];
+    const cwSum = g(1);
+    this.cwDry = g(1);
+    this.cwWet = g(0);
+    this.cwOut = g(1);
+    sideBase.connect(this.cwDry);
+    this.cwDry.connect(this.cwOut);
+    cwSum.connect(this.cwWet);
+    this.cwWet.connect(this.cwOut);
+    for (let band = 0; band < 5; band++) {
+      const start = g(1);
+      let node: AudioNode = start;
+      const link = (freq: number, type: BiquadFilterType) => {
+        // LR4: two cascaded biquads at the same corner.
+        const a = ctx.createBiquadFilter();
+        a.type = type;
+        a.frequency.value = freq;
+        a.Q.value = 0.707;
+        const b = ctx.createBiquadFilter();
+        b.type = type;
+        b.frequency.value = freq;
+        b.Q.value = 0.707;
+        node.connect(a);
+        a.connect(b);
+        (this.cwSplits[band] ??= []).push(a, b);
+        node = b;
+      };
+      if (band > 0) link(CW_SPLITS[band - 1], "highpass");
+      if (band < 4) link(CW_SPLITS[band], "lowpass");
+      const width = g(1);
+      node.connect(width);
+      width.connect(cwSum);
+      this.cwBands.push(width);
+      sideBase.connect(start);
+    }
+
     // Low-end mono matrix: dry side always available; wet side carries
     // side − lowpassed(side), i.e. bass folds to mono below the crossover.
     this.sideDry = g(1);
@@ -1032,9 +1189,9 @@ export class AudioEngine {
     this.sideLp.frequency.value = 120;
     this.sideLp.Q.value = 0.707;
     this.sideLpNeg = g(-1);
-    side.connect(this.sideDry);
-    side.connect(this.sideLp);
-    side.connect(this.sideWet);
+    this.cwOut.connect(this.sideDry);
+    this.cwOut.connect(this.sideLp);
+    this.cwOut.connect(this.sideWet);
     this.sideLp.connect(this.sideLpNeg);
     this.sideLpNeg.connect(this.sideWet);
     this.sideDry.connect(wMerge, 0, 0);
@@ -1047,10 +1204,31 @@ export class AudioEngine {
     this.sideWetInv.connect(wMerge, 0, 1);
     wMerge.connect(this.tiltLo);
 
+    // ── monitor check matrix: mono fold-down + per-channel polarity ──
+    // Monitoring only: the encoder send taps duckGain upstream, so a check
+    // can never leak into the stream.
     this.monitorGain = g(dbToGain(-6));
     this.matchGain = g(1);
     this.duckGain.connect(this.matchGain);
-    this.matchGain.connect(this.monitorGain);
+    const monSplit = ctx.createChannelSplitter(2);
+    const monMerge = ctx.createChannelMerger(2);
+    this.monL = g(1);
+    this.monR = g(1);
+    this.monMono = g(0);
+    this.matchGain.connect(monSplit);
+    monSplit.connect(this.monL, 0);
+    monSplit.connect(this.monR, 1);
+    this.monL.connect(monMerge, 0, 0);
+    this.monR.connect(monMerge, 0, 1);
+    const monoL = g(0.5);
+    const monoR = g(0.5);
+    monSplit.connect(monoL, 0);
+    monSplit.connect(monoR, 1);
+    monoL.connect(this.monMono);
+    monoR.connect(this.monMono);
+    this.monMono.connect(monMerge, 0, 0);
+    this.monMono.connect(monMerge, 0, 1);
+    monMerge.connect(this.monitorGain);
     this.monitorGain.connect(ctx.destination);
 
     this.streamGain = g(1);
@@ -1281,8 +1459,15 @@ export class AudioEngine {
     set("lim.drive", this.limDrive?.gain, params.limiter.on ? dbToGain(dens.driveDb) : 1);
     set("lim.t", this.limComp.threshold, params.limiter.ceilingDb);
     set("lim.a", this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
-    set("lim.r", this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
     this.crossfade("lim", this.limWetPre, this.limDry, params.limiter.on);
+
+    // program limiter: slow second stage with its own ceiling and release
+    const prog = limiterProgram(params.limiter);
+    set("lim.prog.t", this.progComp?.threshold, prog.ceilingDb);
+    set("lim.prog.r", this.progComp?.ratio, params.limiter.on && prog.on ? 4 : 1);
+    set("lim.prog.k", this.progComp?.knee, prog.on ? 2 : 0);
+    set("lim.prog.a", this.progComp?.attack, Math.max(prog.attackMs, 0.5) / 1000);
+    this.applyLimiterEnvelopes();
 
     // Soft clipper: rebuilds its curve only when the threshold moves, then
     // blends wet/dry by the mix control. Bypassed (dry only) by default.
@@ -1306,11 +1491,42 @@ export class AudioEngine {
     set("ex.f2", this.exBp2?.frequency, params.exciter.freqHz * 1.7);
     set("ex.mix", this.exMix?.gain, params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0);
 
+    // low-band reinforcement (psychoacoustic bass module)
+    const bass = params.psy.bassSynth;
+    const bassHz = Math.min(220, Math.max(40, bass.fundHz * 2));
+    set("bass.f1", this.bass1?.frequency, bassHz);
+    set("bass.f2", this.bass2?.frequency, bassHz);
+    set("bass.drive", this.bassDrive?.gain, 1 + (Math.min(100, Math.max(0, bass.depth)) / 100) * 3);
+    set(
+      "bass.mix",
+      this.bassMix?.gain,
+      bass.on ? (Math.min(100, Math.max(0, bass.harmMix)) / 100) * 0.35 : 0,
+    );
+
     // stereo width: engage the M/S matrix only away from unity so the dry
     // path (exact for mono sources) stays in circuit at width = 1
     const widen = Math.abs(params.stereo.width - 1) > 0.01;
     set("width.gain", this.widthGain?.gain, params.stereo.width);
     this.crossfade("width", this.widthWet, this.widthDry, widen);
+
+    // per-band side width (psy.cohWidth): bass to mono, air wider. Widening is
+    // scaled back as correlation falls, so a hollow image cannot be made
+    // worse; narrowing (bass mono) is never limited.
+    const cw = params.psy.cohWidth;
+    const safety = coherenceSafety(this.snapshotValue.correlation, cw.corrGuard);
+    this.cwBands.forEach((band, i) => {
+      const width = cw.on ? safeWidth(cw.bands[i] ?? 1, safety) : 1;
+      set(`cw.${i}`, band.gain, width);
+    });
+    this.crossfade("cw", this.cwWet, this.cwDry, cw.on);
+
+    // M/S matrix trim (psy.msTrim): mid/side balance plus a side HPF, so the
+    // side channel can be cleaned of low-end build-up without touching mid.
+    const ms = params.psy.msTrim;
+    set("ms.mid", this.midTrim?.gain, ms.on ? dbToGain(ms.midDb) : 1);
+    set("ms.side", this.sideTrim?.gain, ms.on ? dbToGain(ms.sideDb) : 1);
+    set("ms.hpf", this.sideHpf?.frequency, Math.min(1000, Math.max(20, ms.sideHpfHz)));
+    this.crossfade("ms.hpf", this.sideHpfWet, this.sideHpfDry, ms.on);
     // low-end mono: 0 = off, otherwise fold side-bass below the crossover
     const lm = Math.min(500, Math.max(0, params.stereo.lowMonoHz ?? 120));
     set("side.lp", this.sideLp?.frequency, Math.max(40, lm || 120), 0.01);
@@ -1339,6 +1555,53 @@ export class AudioEngine {
       "monitor",
       this.monitorGain?.gain,
       this.monitorMuted ? 0 : dbToGain(this.params?.monitorDb ?? -6),
+    );
+    // Monitor checks: mono fold and per-channel polarity, monitor path only.
+    const mon = this.params?.monitor;
+    this.setNum("mon.mono", this.monMono?.gain, mon?.mono ? 1 : 0, 0.01);
+    this.setNum("mon.l", this.monL?.gain, mon?.mono ? 0 : mon?.invertL ? -1 : 1, 0.01);
+    this.setNum("mon.r", this.monR?.gain, mon?.mono ? 0 : mon?.invertR ? -1 : 1, 0.01);
+  }
+
+  /**
+   * Limiter releases: the configured value, adapted to programme density and
+   * frozen for the hold window after a real reduction.
+   *
+   * A Web Audio DynamicsCompressor has no adjustable lookahead, so none is
+   * claimed here. What is real: a slow program stage with its own ceiling,
+   * density-adapted releases, and a hold that stops short peaks breathing.
+   */
+  private applyLimiterEnvelopes() {
+    const params = this.params;
+    if (!params || !this.ctx) return;
+    const lim = params.limiter;
+    const prog = limiterProgram(lim);
+    const now = performance.now();
+    const peakGr = Math.max(0, -(this.limComp?.reduction ?? 0));
+    const progGr = Math.max(0, -(this.progComp?.reduction ?? 0));
+    if ((lim.holdMs ?? 0) > 0 && Math.max(peakGr, progGr) > 1.5) {
+      const hold = Math.min(200, Math.max(20, lim.holdMs ?? 0));
+      this.limiterHoldUntil = Math.max(this.limiterHoldUntil, now + hold);
+    }
+    const holding = now < this.limiterHoldUntil;
+    const crest = this.snapshotValue.samplePeakDb - this.snapshotValue.lufsS;
+    const peakRelease = holding
+      ? 1500
+      : dynamicReleaseMs(lim.releaseMs, crest, peakGr, !!lim.adaptive);
+    this.setNum(
+      "lim.rel",
+      this.limComp?.release,
+      Math.min(2000, Math.max(10, peakRelease)) / 1000,
+      0.05,
+    );
+    const progRelease = holding
+      ? 2200
+      : dynamicReleaseMs(prog.releaseMs, crest, progGr, !!lim.adaptive);
+    this.setNum(
+      "lim.prog.rel",
+      this.progComp?.release,
+      Math.min(3000, Math.max(20, progRelease)) / 1000,
+      0.05,
     );
   }
 
@@ -2025,6 +2288,8 @@ export class AudioEngine {
     this.updateAgcWindow(now, srcLevelDb);
     this.updateDeesser();
     this.updateDynamicEq();
+    // Limiter hold + density-adapted release close on the live reduction.
+    this.applyLimiterEnvelopes();
   }
 
   /** ── AGC window gate: hold the leveller while the programme is steady ── */
@@ -2095,6 +2360,10 @@ export class AudioEngine {
     const ctx = this.ctx;
     if (!ctx) return;
     const t0 = performance.now();
+    const target = this.params
+      ? complianceTarget(this.params)
+      : { id: "spotify" as const, label: "Spotify", lufs: -14, truePeakDb: -1 };
+    const tpFactor = this.params?.limiter.truePeakX ?? 4;
 
     // audio-clock health: ctx.currentTime vs wall time — sustained negative
     // drift means the audio thread missed deadlines (glitches / bufferbloat)
@@ -2116,11 +2385,27 @@ export class AudioEngine {
     const outPeakL = peakDb(this.outBufL);
     const outPeakR = peakDb(this.outBufR);
     const correlation = correlationOf(this.outBufL, this.outBufR);
+    // 1 Hz correlation history for the phase meter.
+    if (now - this.lastCorrAt >= 1000) {
+      this.lastCorrAt = now;
+      this.corrHistory[this.corrWrite] = correlation;
+      this.corrWrite = (this.corrWrite + 1) % this.corrHistory.length;
+    }
+
+    // Per-band width follows the live correlation: widening backs off as the
+    // image decorrelates, so a hollow source cannot be made wider than it is.
+    const cw = this.params?.psy.cohWidth;
+    if (cw?.on) {
+      const safety = coherenceSafety(correlation, cw.corrGuard);
+      cw.bands.forEach((width, i) => {
+        this.setNum(`cw.${i}`, this.cwBands[i]?.gain, safeWidth(width, safety), 0.05);
+      });
+    }
 
     const tail = Math.max(0, this.outBufL.length - TRUE_PEAK_WINDOW);
     const tp = Math.max(
-      measureTruePeak(this.outBufL.subarray(tail)),
-      measureTruePeak(this.outBufR.subarray(tail)),
+      measureTruePeak(this.outBufL.subarray(tail), tpFactor),
+      measureTruePeak(this.outBufR.subarray(tail), tpFactor),
     );
 
     const clipping = Math.max(outPeakL, outPeakR) > -0.2;
@@ -2162,11 +2447,30 @@ export class AudioEngine {
     if (outPeakL > this.samplePeakDb) this.samplePeakDb = outPeakL;
     if (outPeakR > this.samplePeakDb) this.samplePeakDb = outPeakR;
 
+    // One row per second for the compliance report (last hour kept).
+    if (now - this.lastLogAt >= 1000) {
+      this.lastLogAt = now;
+      this.loudnessLog.push({
+        at: Date.now(),
+        momentary: loudnessOf(sum),
+        shortTerm: windowLufs(3000),
+        integrated: this.lufsIValue,
+        lra: this.lraValue,
+        truePeak: tp,
+      });
+      if (this.loudnessLog.length > 3600) this.loudnessLog.shift();
+    }
+
     // ── loudness rider (Compellor leveler / AERO long-term controller) ──
     if (this.params?.rider.on) {
       // silence gate (Compellor DVG style): never ride noise up in pauses
       if (windowLufs(300) > this.params.rider.gateDb) {
-        const err = this.params.rider.targetLufs - windowLufs(1000);
+        // Loudness lock: ride toward the compliance target instead of the
+        // rider's own number, so changing standard re-aims the chain.
+        const rideTarget = this.params.psy.loudLock.on
+          ? target.lufs
+          : this.params.rider.targetLufs;
+        const err = rideTarget - windowLufs(1000);
         const cap = Math.abs(this.params.rider.maxRideDb);
         const ride = Math.max(-cap, Math.min(cap, err));
         const fast = this.params.rider.speed === "fast";
@@ -2219,11 +2523,15 @@ export class AudioEngine {
         // apart on the meters.
         agc: agcOn ? grOf(this.agcComp) + grOf(this.agcFastComp) : 0,
         agcFast: agcOn ? grOf(this.agcFastComp) : 0,
-        limiter: grOf(this.limComp),
+        limiter: grOf(this.limComp) + grOf(this.progComp),
       },
       agcWindow: { frozen: this.agcFrozen, spreadDb: this.agcSpreadDb },
       deessCut: this.deessCutDb,
       riderDb: this.riderDb,
+      loudnessTarget: target.lufs,
+      loudnessDeviation: loudnessDeviation(this.lufsIValue, target.lufs),
+      compliance: complianceState(this.lufsIValue, tp, target),
+      truePeakX: tpFactor,
       perf: {
         baseLatencyMs: (ctx.baseLatency ?? 0) * 1000,
         outputLatencyMs: (ctx.outputLatency ?? 0) * 1000,
@@ -2396,6 +2704,24 @@ export class AudioEngine {
       l: this.scopeBufL.slice(0, N),
       r: this.scopeBufR.slice(0, N),
     };
+  }
+
+  /**
+   * Correlation history, oldest → newest, one point per second (two
+   * minutes). The phase meter draws it as a strip: a line that dives towards
+   * −1 is the warning that a wide or out-of-phase source is about to fold
+   * down badly in mono.
+   */
+  /** One-row-per-second loudness log for the compliance CSV (last hour). */
+  get loudnessLogRows(): readonly LoudnessLogRow[] {
+    return this.loudnessLog;
+  }
+
+  getCorrelationHistory(): Float32Array {
+    const n = this.corrHistory.length;
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = this.corrHistory[(this.corrWrite + i) % n];
+    return out;
   }
 
   subscribe(cb: (s: MeterSnapshot) => void): () => void {

@@ -35,6 +35,7 @@ import {
   formatDb,
   formatHz,
   limiterClipper,
+  limiterProgram,
   type AgcFastParams,
   type DeqBands,
   type EqBand,
@@ -389,6 +390,15 @@ export function ProcessingTab({
     setParams((p) => ({
       ...p,
       limiter: { ...p.limiter, clipper: { ...limiterClipper(p.limiter), ...patch } },
+    }));
+  const prog = limiterProgram(params.limiter);
+  const patchProgram = (patch: Partial<typeof prog>) =>
+    setParams((p) => ({
+      ...p,
+      limiter: {
+        ...p.limiter,
+        program: { ...limiterProgram(p.limiter), ...patch },
+      },
     }));
   const ceilingPct = (Math.pow(10, params.limiter.ceilingDb / 20) * 100).toFixed(2);
   const truePeak = snap?.truePeak ?? -70;
@@ -1286,7 +1296,7 @@ export function ProcessingTab({
         <ChainBlock
           index={5}
           title="De-esser"
-          subtitle="Dynamic sibilance control · 6–10 kHz"
+          subtitle="Dynamic sibilance control · 5–10 kHz"
           enabled={params.deess.on}
           onToggle={() =>
             setParams((p) => ({
@@ -1304,7 +1314,7 @@ export function ProcessingTab({
           <div className="divide-y divide-border/60 rounded border border-border/60">
             <CtrlRow label="Tune">
               <SliderRow
-                min={6000}
+                min={5000}
                 max={10000}
                 step={250}
                 value={params.deess.freqHz}
@@ -1464,6 +1474,91 @@ export function ProcessingTab({
                 label="Ceiling"
               />
               <Val>{ceilingPct} %</Val>
+            </CtrlRow>
+            <CtrlRow label="Program">
+              <Seg
+                ariaLabel="Program limiter stage"
+                value={prog.on ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) => patchProgram({ on: v === "on" })}
+              />
+              <SliderRow
+                min={-4}
+                max={0}
+                step={0.1}
+                value={prog.ceilingDb}
+                onChange={(v) => patchProgram({ ceilingDb: v })}
+                label="Program limiter ceiling"
+              />
+              <Val>{formatDb(prog.ceilingDb)}</Val>
+              <SliderRow
+                min={60}
+                max={800}
+                step={20}
+                value={prog.releaseMs}
+                onChange={(v) => patchProgram({ releaseMs: v })}
+                label="Program limiter release"
+              />
+              <Val>{prog.releaseMs.toFixed(0)} ms</Val>
+            </CtrlRow>
+            <CtrlRow label="Adaptive">
+              <Seg
+                ariaLabel="Adaptive limiter release"
+                value={params.limiter.adaptive ? "on" : "off"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "off", label: "Fixed" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    limiter: { ...p.limiter, adaptive: v === "on" },
+                  }))
+                }
+              />
+              <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+                Hold
+              </span>
+              <SliderRow
+                min={0}
+                max={200}
+                step={10}
+                value={params.limiter.holdMs ?? 0}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    limiter: { ...p.limiter, holdMs: v },
+                  }))
+                }
+                label="Limiter hold"
+              />
+              <Val>{(params.limiter.holdMs ?? 0).toFixed(0)} ms</Val>
+            </CtrlRow>
+            <CtrlRow label="True-pk os">
+              <Seg
+                ariaLabel="True-peak oversampling"
+                value={String(params.limiter.truePeakX ?? 4)}
+                options={[
+                  { value: "2", label: "2×" },
+                  { value: "4", label: "4×" },
+                  { value: "8", label: "8×" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    limiter: {
+                      ...p.limiter,
+                      truePeakX: Number(v) as 2 | 4 | 8,
+                    },
+                  }))
+                }
+              />
+              <span className="text-[10px] text-muted-foreground">
+                8× resolves the crests a lossy encoder rebuilds
+              </span>
             </CtrlRow>
             <CtrlRow label="True pk">
               <Val className={cn(peakOver && "text-meter-hot")}>

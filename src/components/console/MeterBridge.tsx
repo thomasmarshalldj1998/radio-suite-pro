@@ -5,6 +5,7 @@ import {
   subscribeAlarms,
 } from "@/lib/audio/alarms";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
+import { complianceTarget } from "@/lib/audio/loudness";
 import { getFailover } from "@/lib/audio/failover";
 import { isConfigured, useOutputs } from "@/lib/audio/outputs";
 import type { ProcessorParams } from "@/lib/audio/params";
@@ -181,7 +182,8 @@ export function MeterBridge({
 
   const engine = getEngine();
   const lufsI = s.lufsI;
-  const delta = lufsI !== null ? lufsI - params.rider.targetLufs : null;
+  const target = complianceTarget(params);
+  const delta = lufsI !== null ? lufsI - target.lufs : null;
   const tpOver = powered && s.truePeak > params.limiter.ceilingDb + 0.05;
   const exciterMix = params.exciter.on ? params.exciter.mix : 0;
 

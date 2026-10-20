@@ -3,6 +3,7 @@ import {
   useLocalAudioController,
 } from "@/components/console/AudioDevicesPanel";
 import { FailoverCard } from "@/components/console/FailoverCard";
+import { MonitorChecks } from "@/components/console/MonitorChecks";
 import { ModuleCard } from "@/components/console/ModuleCard";
 import { SourceModule } from "@/components/console/SourceModule";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
@@ -164,6 +165,11 @@ export function InputTab({
           <StereoLevelMeter kind="in" height={224} />
         </div>
       </ModuleCard>
+
+      {/* ── phase / mono audit ── */}
+      <div className="xl:col-span-12">
+        <MonitorChecks params={params} setParams={setParams} />
+      </div>
 
       {/* ── dead-air protection ── */}
       <FailoverCard className="xl:col-span-12" />

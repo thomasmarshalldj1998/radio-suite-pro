@@ -13,6 +13,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { CtrlRow, Seg } from "@/components/console/controls";
 import { getEngine, type MeterSnapshot } from "@/lib/audio/engine";
+import { complianceTarget } from "@/lib/audio/loudness";
 import {
   formatDb,
   formatHz,
@@ -1091,8 +1092,8 @@ export function PsyStereo({
       </PsyBlock>
       <PsyBlock
         module="bassSynth"
-        title="Bass synthesis & alignment"
-        subtitle="Immersive fundamental · L/R time-phase"
+        title="Bass enhancement"
+        subtitle="Low-band harmonics · no delayed copy, no phase smear"
       >
         <CtrlRow label="Bass synth">
           <OnOff
@@ -1644,6 +1645,7 @@ export function PsyOutput({
   setParams: SetP;
 }) {
   const psy = params.psy;
+  const target = complianceTarget(params);
   return (
     <>
       <PsyBlock
@@ -1728,11 +1730,11 @@ export function PsyOutput({
       <PsyBlock
         module="loudLock"
         title="Loudness lock & guard"
-        subtitle="Preset target recall · true-peak ceiling"
+        subtitle="Rides to the compliance target · true-peak ceiling"
       >
         <CtrlRow label="Lock">
           <OnOff
-            aria="Preset loudness lock"
+            aria="Loudness lock"
             on={psy.loudLock.on}
             onChange={(v) =>
               setParams((p) => ({
@@ -1741,28 +1743,16 @@ export function PsyOutput({
               }))
             }
           />
-          <Seg
-            ariaLabel="Lock target"
-            value={String(psy.loudLock.targetLufs)}
-            options={["-14", "-16", "-18", "-23"].map((t) => ({
-              value: t,
-              label: `${t} LUFS`,
-            }))}
-            onChange={(v) =>
-              setParams((p) => ({
-                ...p,
-                psy: {
-                  ...p.psy,
-                  loudLock: {
-                    ...p.psy.loudLock,
-                    targetLufs: Number(v) as -14 | -16 | -18 | -23,
-                  },
-                },
-              }))
-            }
-          />
+          <Num>
+            target {target.lufs} LUFS · {target.truePeakDb} dBTP
+          </Num>
           <Num>gate {formatDb(psy.loudLock.gateDb)}</Num>
         </CtrlRow>
+        <p className="px-1 pb-1 text-[10px] leading-4 text-muted-foreground">
+          The target comes from the compliance standard (Telemetry →
+          Compliance monitoring), so one picker drives the rider, the meter
+          bridge and the report.
+        </p>
         <CtrlRow label="TP guard">
           <Seg
             ariaLabel="True-peak ceiling"

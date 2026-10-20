@@ -123,7 +123,7 @@ console.log("\n3 · Less–More macro");
 
 console.log("\n4 · de-esser");
 {
-  check(clampDeessFreq(1000) === DEESS_MIN_HZ, "tuning clamps to 6 kHz", `${clampDeessFreq(1000)} Hz`);
+  check(clampDeessFreq(1000) === DEESS_MIN_HZ, "tuning clamps to 5 kHz", `${clampDeessFreq(1000)} Hz`);
   check(clampDeessFreq(20000) === DEESS_MAX_HZ, "tuning clamps to 10 kHz", `${clampDeessFreq(20000)} Hz`);
   check(clampDeessFreq(8000) === 8000, "an in-band tuning passes through", "8000 Hz");
   check(deessAlpha(0) === 0, "no cut, no subtraction");

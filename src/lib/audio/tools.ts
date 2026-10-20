@@ -166,7 +166,7 @@ export function densityProfile(setting: number): DensityProfile {
 
 /* ── 4 · de-esser ─────────────────────────────────────────────────────── */
 
-export const DEESS_MIN_HZ = 6000;
+export const DEESS_MIN_HZ = 5000;
 export const DEESS_MAX_HZ = 10000;
 
 /** Keep the operator's tuning inside the 6–10 kHz sibilance band. */
@@ -186,7 +186,60 @@ export function deessAlpha(cutDb: number): number {
   return Math.min(0.999, 1 - Math.pow(10, -cut / 20));
 }
 
-/* ── 5 · transfer curves (drawn by the console, exact from settings) ──── */
+/* ── 5 · adaptive limiter envelopes ───────────────────────────────────── */
+
+/**
+ * Release for the limiter stages, adapted to the programme.
+ *
+ * A fixed release is always wrong for half the material: percussion needs a
+ * short one or the next hit arrives while the gain is still down, and
+ * sustained music needs a long one or the gain rides the waveform and pumps.
+ * The crest factor (peak − short-term loudness) is the practical tell —
+ * percussive programme is peaky, sustained programme is not — so the release
+ * is scaled between 0.55× and 1.6× of the operator's setting. A deep
+ * reduction pushes it back up so recovery stays smooth under heavy limiting.
+ *
+ * With `adaptive` off the configured value is returned untouched.
+ */
+export function dynamicReleaseMs(
+  configuredMs: number,
+  crestDb: number,
+  reductionDb: number,
+  adaptive: boolean,
+): number {
+  const base = Math.min(2000, Math.max(10, Number.isFinite(configuredMs) ? configuredMs : 100));
+  if (!adaptive) return base;
+  const crest = Math.min(24, Math.max(3, Number.isFinite(crestDb) ? crestDb : 12));
+  // 0 = sustained programme, 1 = transient-dense programme.
+  const density = Math.min(1, Math.max(0, (16 - crest) / 10));
+  const push = Math.min(1, Math.max(0, reductionDb / 6));
+  const factor = 0.55 + 0.9 * (1 - density) + 0.15 * push;
+  return Math.min(2000, Math.max(20, base * factor));
+}
+
+/**
+ * Per-band widening safety for the coherence-width matrix.
+ *
+ * Widening a band that is already weakly correlated (a reverb tail, a doubled
+ * vocal, an out-of-phase synth) is what makes a station sound hollow and can
+ * collapse in mono. Widths at or below 1 (narrowing, including bass-to-mono)
+ * are always safe; only widening is scaled down as correlation falls.
+ */
+export function coherenceSafety(correlation: number, guard: number): number {
+  if (!Number.isFinite(correlation)) return 1;
+  const floor = Math.min(0.9, Math.max(0, guard));
+  if (correlation >= floor) return 1;
+  const span = Math.max(0.05, floor - 0.2);
+  return Math.min(1, Math.max(0, (correlation - 0.2) / span));
+}
+
+/** Effective per-band width after the safety scaling (never narrows less). */
+export function safeWidth(width: number, safety: number): number {
+  if (!(width > 1)) return width;
+  return 1 + (width - 1) * Math.min(1, Math.max(0, safety));
+}
+
+/* ── 6 · transfer curves (drawn by the console, exact from settings) ──── */
 
 /** Exact soft-knee compressor transfer from threshold/ratio/knee. */
 export function compCurve(
