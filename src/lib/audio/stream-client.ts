@@ -25,6 +25,7 @@
  * chance on a later reconnect.
  */
 import { DualMountFailover } from "./mount-failover";
+import { TxBuffer, type TxSettings } from "./stream-tx";
 
 export type StreamStatus = "idle" | "connecting" | "live" | "retrying" | "offline";
 
@@ -37,6 +38,14 @@ export interface StreamClientState {
   sentBytes: number;
   /** Bytes produced while no connection was live (dropped by design). */
   droppedBytes: number;
+  /** Audio currently held in the TX send buffer, ms. */
+  bufferedMs: number;
+  /** True while the pre-buffer is still filling — no bytes sent yet. */
+  prebuffering: boolean;
+  /** Bytes discarded by the TX protective limit (queue over ceiling). */
+  protectedBytes: number;
+  /** Protective limits engaged — the socket is up but audio was dropped. */
+  warning: boolean;
   /** Failed connection attempts since the last live connection. */
   attempt: number;
   /** Countdown to the next reconnect, in ms; null when not retrying. */
@@ -61,6 +70,10 @@ export const IDLE_TX: StreamClientState = {
   transport: "none",
   sentBytes: 0,
   droppedBytes: 0,
+  bufferedMs: 0,
+  prebuffering: false,
+  protectedBytes: 0,
+  warning: false,
   attempt: 0,
   nextRetryMs: null,
   error: null,
@@ -249,11 +262,17 @@ export class StreamClient {
   /** Latest ICY title; replayed to a fresh source session after a drop. */
   private metadata = "";
   private retryAt = 0;
+  /** Send buffer: pre-buffer, pacing and the protective ceiling. */
+  private tx = new TxBuffer();
   private state: StreamClientState = {
     status: "idle",
     transport: "none",
     sentBytes: 0,
     droppedBytes: 0,
+    bufferedMs: 0,
+    prebuffering: false,
+    protectedBytes: 0,
+    warning: false,
     attempt: 0,
     nextRetryMs: null,
     error: null,
@@ -269,6 +288,19 @@ export class StreamClient {
     return this.state;
   }
 
+  /** TX buffer defaults: 500 ms in hand, 500 ms pre-buffer, limits on. */
+  configureTx(patch: Partial<TxSettings>): void {
+    this.tx.configure(patch);
+  }
+
+  getTxSettings(): TxSettings {
+    return { ...this.tx.settings };
+  }
+
+  getTxSnapshot() {
+    return this.tx.snapshot();
+  }
+
   private update(patch: Partial<StreamClientState>) {
     this.state = { ...this.state, ...patch };
     this.onState?.(this.state);
@@ -278,6 +310,10 @@ export class StreamClient {
     await this.stop(true);
     this.cfg = cfg;
     this.stopped = false;
+    // A new session starts with an empty queue; the configured pre-buffer
+    // (500 ms by default) holds the first frames so the server is not fed a
+    // burst. Settings survive start() — only the queue is cleared.
+    this.tx.reset();
     const router = new DualMountFailover(cfg.mount, cfg.backupMount);
     this.router = router;
     this.update({
@@ -286,6 +322,10 @@ export class StreamClient {
       error: null,
       attempt: 0,
       since: 0,
+      bufferedMs: 0,
+      prebuffering: this.tx.settings.prebufferMs > 0,
+      protectedBytes: 0,
+      warning: false,
       mount: router.active,
       primaryMount: router.primary,
       backupMount: router.backup,
@@ -342,6 +382,10 @@ export class StreamClient {
         error: null,
         since: Date.now(),
         nextRetryMs: null,
+        warning: false,
+        bufferedMs: 0,
+        prebuffering: this.tx.settings.prebufferMs > 0,
+        protectedBytes: 0,
         mount,
         mountSwitched: this.router?.switched ?? false,
         mountSwitches: this.router?.state.switches ?? 0,
@@ -375,6 +419,8 @@ export class StreamClient {
     this.unsubBridge?.();
     this.unsubBridge = null;
     this.writer = null;
+    // Audio produced while the socket was down is stale — never send it late.
+    this.tx.reset();
     if (this.stopped) return;
     this.router?.recordFailure();
     this.state.attempt += 1;
@@ -401,14 +447,32 @@ export class StreamClient {
     this.retryTimer = window.setTimeout(() => void this.open(), delay);
   }
 
-  /** Hand one encoded chunk to the source. Dropped when not live. */
+  /**
+   * Hand one encoded chunk to the source. Audio is dropped, never queued,
+   * when the socket is down; when it is live the TX buffer decides what is
+   * written now (pre-buffer, paced release, protective ceiling).
+   */
   push(bytes: Uint8Array) {
     if (this.state.status !== "live" || !this.writer) {
       this.update({ droppedBytes: this.state.droppedBytes + bytes.byteLength });
       return;
     }
-    this.writer.write(bytes);
-    this.update({ sentBytes: this.state.sentBytes + bytes.byteLength });
+    const writer = this.writer;
+    const bitrate = this.cfg?.bitrateKbps ?? 0;
+    const chunks = this.tx.enqueue(bytes, bitrate);
+    let written = 0;
+    for (const chunk of chunks) {
+      writer.write(chunk);
+      written += chunk.byteLength;
+    }
+    const q = this.tx.snapshot();
+    this.update({
+      sentBytes: this.state.sentBytes + written,
+      bufferedMs: q.bufferedMs,
+      prebuffering: q.priming,
+      protectedBytes: q.droppedBytes,
+      warning: q.warning,
+    });
   }
 
   setMetadata(text: string) {
@@ -442,6 +506,9 @@ export class StreamClient {
         since: 0,
         nextRetryMs: null,
         error: null,
+        bufferedMs: 0,
+        prebuffering: false,
+        warning: false,
       });
     }
   }

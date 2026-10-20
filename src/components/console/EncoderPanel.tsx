@@ -35,6 +35,7 @@ import {
   streamTitle,
   type StreamClientState,
 } from "@/lib/audio/stream-client";
+import { txBadge } from "@/lib/audio/stream-status";
 import type { ProcessorParams } from "@/lib/audio/params";
 import type { ProgramEncoder } from "@/lib/audio/encoder";
 import {
@@ -386,6 +387,7 @@ export function EncoderPanel({
    * socket actually puts the programme on a server. The deck says both.
    */
   const tx = rt.tx;
+  const uplinkBadge = txBadge(tx.status, tx.warning);
   const uplinkLabel = !rt.onAir
     ? null
     : tx.status === "live"
@@ -841,29 +843,41 @@ export function EncoderPanel({
                 <span
                   className={cn(
                     "mt-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-[0.1em] uppercase",
-                    tx.status === "live"
+                    uplinkBadge.tone === "ok"
                       ? "border-meter-ok/40 bg-meter-ok/10 text-meter-ok"
-                      : tx.status === "retrying" || tx.status === "connecting"
+                      : uplinkBadge.tone === "busy" || uplinkBadge.tone === "warn"
                         ? "border-amber-led/45 bg-amber-led/10 text-amber-led"
-                        : "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+                        : uplinkBadge.tone === "err"
+                          ? "border-meter-hot/40 bg-meter-hot/10 text-meter-hot"
+                          : "border-rack-line bg-rack-2 text-panel-mut",
                   )}
                   title={
-                    tx.error ??
-                    "Source socket state — audio only reaches listeners while this reads Live"
+                    [
+                      uplinkLabel,
+                      tx.error,
+                      `Buffer ${Math.round(tx.bufferedMs)} ms · pre-buffer ${tx.prebuffering ? "filling" : "ready"}`,
+                      tx.protectedBytes > 0
+                        ? `${formatBytes(tx.protectedBytes)} dropped by the TX ceiling`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
                   }
                 >
                   <span
                     aria-hidden
                     className={cn(
                       "size-1.5 rounded-full",
-                      tx.status === "live"
+                      uplinkBadge.tone === "ok"
                         ? "bg-meter-ok"
-                        : tx.status === "retrying" || tx.status === "connecting"
+                        : uplinkBadge.tone === "busy" || uplinkBadge.tone === "warn"
                           ? "animate-pulse bg-amber-led"
-                          : "bg-meter-hot",
+                          : uplinkBadge.tone === "err"
+                            ? "bg-meter-hot"
+                            : "bg-panel-mut",
                     )}
                   />
-                  Uplink · {uplinkLabel}
+                  Uplink · {uplinkBadge.code}
                 </span>
               )}
             </div>
