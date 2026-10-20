@@ -27,6 +27,7 @@ import {
   DEFAULT_CLIPPER,
   DEFAULT_PARAMS,
   DEFAULT_SPLITS,
+  agcFast,
   dbToGain,
   eqBandOn,
   hpfSectionQs,
@@ -72,7 +73,15 @@ export interface MeterSnapshot {
   samplePeakDb: number;
   correlation: number;
   /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
-  gr: { bands: number[]; deq: number[]; agc: number; limiter: number };
+  gr: {
+    bands: number[];
+    deq: number[];
+    /** Combined AGC reduction (fast + slow windows). */
+    agc: number;
+    /** Fast peak window alone, so the operator can see which stage works. */
+    agcFast: number;
+    limiter: number;
+  };
   /** AGC window gate — true while the gain is held inside the window. */
   agcWindow: { frozen: boolean; spreadDb: number };
   /** Current de-esser cut (dB). */
@@ -120,7 +129,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   measureMs: 0,
   samplePeakDb: -120,
   correlation: 1,
-  gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, limiter: 0 },
+  gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, agcFast: 0, limiter: 0 },
   agcWindow: { frozen: false, spreadDb: 0 },
   deessCut: 0,
   riderDb: 0,
@@ -298,6 +307,8 @@ export class AudioEngine {
   private clockRefWall = 0;
   private clockRefCtx = 0;
   private agcWetPre!: GainNode;
+  /** Fast peak window, ahead of the slow leveller (dual-window AGC). */
+  private agcFastComp!: DynamicsCompressorNode;
   private agcComp!: DynamicsCompressorNode;
   private agcMakeup!: GainNode;
   private agcDry!: GainNode;
@@ -702,6 +713,15 @@ export class AudioEngine {
     //    the multiband stage as the input reference level) ──
     this.agcWetPre = g(1);
     this.agcDry = g(0);
+    // Fast window: a short-release peak follower. Bypassed = ratio 1, which
+    // Web Audio treats as unity regardless of threshold, so the stage can
+    // stay in the graph (and keep its latency constant) while off.
+    this.agcFastComp = ctx.createDynamicsCompressor();
+    this.agcFastComp.threshold.value = -10;
+    this.agcFastComp.ratio.value = 1;
+    this.agcFastComp.knee.value = 0;
+    this.agcFastComp.attack.value = 0.003;
+    this.agcFastComp.release.value = 0.25;
     this.agcComp = ctx.createDynamicsCompressor();
     this.agcComp.threshold.value = -18;
     this.agcComp.ratio.value = 3;
@@ -718,7 +738,8 @@ export class AudioEngine {
     deqSum.connect(this.agcWetPre);
     deqSum.connect(this.agcDry);
     deqSum.connect(this.agcHold);
-    this.agcWetPre.connect(this.agcComp);
+    this.agcWetPre.connect(this.agcFastComp);
+    this.agcFastComp.connect(this.agcComp);
     this.agcComp.connect(this.agcMakeup);
     this.agcMakeup.connect(this.agcWetOut);
     this.agcWetOut.connect(agcOut);
@@ -1095,13 +1116,30 @@ export class AudioEngine {
       }
     });
 
-    this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
-    this.ramp(this.agcComp.ratio, params.agc.ratio);
-    this.ramp(this.agcComp.knee, params.agc.kneeDb);
     // auto-speech profile: halve the levelling envelopes while mic
     // programme is present (engagement is transition-detected in the meter
     // loop below, so these ramps glide instead of jumping)
     const spd = this.speechFast ? 0.5 : 1;
+    // Dual-window AGC: the fast peak window rides ahead of the slow
+    // leveller and has its own threshold, so it acts only on the transients
+    // the long release would let through.
+    const fast = agcFast(params.agc);
+    const fastOn = params.agc.on && fast.on;
+    this.ramp(this.agcFastComp.threshold, fastOn ? fast.thresholdDb : 0);
+    this.ramp(this.agcFastComp.ratio, fastOn ? Math.min(20, Math.max(1, fast.ratio)) : 1);
+    this.ramp(this.agcFastComp.knee, fastOn ? Math.max(0, fast.kneeDb) : 0);
+    this.ramp(
+      this.agcFastComp.attack,
+      (Math.max(fast.attackMs, 0.1) * spd) / 1000,
+    );
+    this.ramp(
+      this.agcFastComp.release,
+      (Math.max(fast.releaseMs, 20) * spd) / 1000,
+    );
+
+    this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
+    this.ramp(this.agcComp.ratio, params.agc.ratio);
+    this.ramp(this.agcComp.knee, params.agc.kneeDb);
     this.ramp(this.agcComp.attack, (Math.max(params.agc.attackMs, 0) * spd) / 1000);
     this.ramp(this.agcComp.release, (Math.max(params.agc.releaseMs, 10) * spd) / 1000);
     this.ramp(this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
@@ -1679,6 +1717,7 @@ export class AudioEngine {
     const now = performance.now();
     const grOf = (comp: DynamicsCompressorNode | undefined): number =>
       Math.max(0, -(comp?.reduction ?? 0));
+    const agcOn = this.params?.agc.on ?? false;
 
     // dynamic-EQ cut follows the detector envelopes (control rate ≈ rAF)
     if (this.params?.deq.on) {
@@ -1927,7 +1966,11 @@ export class AudioEngine {
       gr: {
         bands: this.mbComps.map(grOf),
         deq: this.deqCutDb.slice(),
-        agc: grOf(this.agcComp),
+        // Bypassed AGC reports no reduction, and the fast window's own
+        // reduction is exposed separately so the two windows can be told
+        // apart on the meters.
+        agc: agcOn ? grOf(this.agcComp) + grOf(this.agcFastComp) : 0,
+        agcFast: agcOn ? grOf(this.agcFastComp) : 0,
         limiter: grOf(this.limComp),
       },
       agcWindow: { frozen: this.agcFrozen, spreadDb: this.agcSpreadDb },

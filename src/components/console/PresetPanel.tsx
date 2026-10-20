@@ -37,7 +37,7 @@ const summaryOf = (p: ProcessorParams): string[] => [
   p.hpf.on
     ? `HPF ${formatHz(p.hpf.freqHz)} · ${p.hpf.slope ?? 24} dB/oct`
     : "HPF off",
-  `AGC ${p.agc.ratio.toFixed(2)}:1`,
+  `AGC ${p.agc.ratio.toFixed(2)}:1${p.agc.fast?.on ? " + fast peak" : ""}`,
   `6-band · ${p.deq.on ? "Dyn-EQ on" : "Dyn-EQ off"}`,
   `Ceiling ${p.limiter.ceilingDb.toFixed(2)} dB`,
 ];

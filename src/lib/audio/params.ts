@@ -114,6 +114,38 @@ export interface DeqBand {
 }
 
 /**
+ * Fast peak window of the dual-window AGC. It sits ahead of the slow
+ * leveller and catches transients the long release would otherwise let
+ * through, with its own threshold so the two stages never fight.
+ */
+export interface AgcFastParams {
+  on: boolean;
+  thresholdDb: number;
+  ratio: number;
+  kneeDb: number;
+  attackMs: number;
+  releaseMs: number;
+}
+
+export const DEFAULT_AGC_FAST: AgcFastParams = {
+  on: false,
+  thresholdDb: -10,
+  ratio: 4,
+  kneeDb: 0,
+  attackMs: 3,
+  releaseMs: 250,
+};
+
+/**
+ * Fast window settings for an AGC block. Optional on the saved object so
+ * presets written before the dual-window stage existed load with it
+ * bypassed, leaving their sound byte-identical.
+ */
+export function agcFast(agc: ProcessorParams["agc"]): AgcFastParams {
+  return agc.fast ?? DEFAULT_AGC_FAST;
+}
+
+/**
  * Loudness rider — the Compellor-style leveler / AERO.lite long-term
  * controller. Slow K-weighted gain ride toward a target loudness, bounded
  * by maxRideDb, with a silence gate so pauses never ride noise up.
@@ -252,6 +284,7 @@ export interface ProcessorParams {
   };
   agc: {
     on: boolean;
+    /** Slow window: long-term program levelling (the main AGC stage). */
     thresholdDb: number;
     ratio: number;
     kneeDb: number;
@@ -272,6 +305,8 @@ export interface ProcessorParams {
      * reported back in the meter snapshot.
      */
     speechSense: boolean;
+    /** Fast peak window, ahead of the slow leveller (optional for old saves). */
+    fast?: AgcFastParams;
   };
   /** High-frequency dynamic de-esser ahead of the limiter. */
   deess: DeessParams;
@@ -396,6 +431,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     makeupDb: 4,
     windowDb: 0,
     speechSense: false,
+    fast: { ...DEFAULT_AGC_FAST },
   },
   deess: {
     on: true,

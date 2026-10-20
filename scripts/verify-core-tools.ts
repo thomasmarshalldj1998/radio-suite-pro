@@ -20,6 +20,7 @@ import {
   chainResponseDb,
   coerceParams,
   dbToGain,
+  agcFast,
   eqBandOn,
   hpfSectionQs,
   limiterClipper,
@@ -197,6 +198,18 @@ console.log("\n5 · parameters");
   const legacyLimiter = { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 100 };
   check(limiterClipper(legacyLimiter).on === false, "the clipper ships bypassed on legacy saves");
   check(limiterClipper({ ...legacyLimiter, clipper: { on: true, thresholdDb: -2, mix: 40 } }).mix === 40, "a saved clipper setting survives coercion");
+
+  // dual-window AGC: the fast window is opt-in, and old saves get it bypassed
+  check(agcFast(DEFAULT_PARAMS.agc).on === false, "the fast window ships bypassed so presets sound unchanged");
+  const oldAgc = { ...DEFAULT_PARAMS.agc } as Record<string, unknown>;
+  delete oldAgc.fast;
+  const coercedAgc = coerceParams({ ...DEFAULT_PARAMS, agc: oldAgc }).agc;
+  check(
+    agcFast(coercedAgc).on === false && agcFast(coercedAgc).thresholdDb === -10,
+    "a pre-dual-window save gains the fast-window defaults",
+  );
+  const savedFast = agcFast({ ...DEFAULT_PARAMS.agc, fast: { ...agcFast(DEFAULT_PARAMS.agc), on: true, thresholdDb: -6 } });
+  check(savedFast.on && savedFast.thresholdDb === -6, "an engaged fast window survives coercion");
 }
 
 /* ── 6 · graph wiring ─────────────────────────────────────────────────── */
@@ -295,6 +308,10 @@ interface EngineInternals {
   clipShaper: FakeNode;
   clipWet: FakeNode;
   clipDry: FakeNode;
+  agcFastComp: FakeNode;
+  agcComp: FakeNode;
+  agcMakeup: FakeNode;
+  agcWetPre: FakeNode;
   phaseStages: FakeNode[];
   phaseWet: FakeNode;
   phaseDry: FakeNode;
@@ -374,6 +391,36 @@ engine.apply({
 check(internals.eqFilters[3].type === "notch", "a band's shape is applied to its filter", internals.eqFilters[3].type);
 check(internals.eqFilters[4].type === "allpass", "a bypassed band goes magnitude-neutral", internals.eqFilters[4].type);
 
+// dual-window AGC: fast peak window ahead of the slow leveller
+engine.apply(DEFAULT_PARAMS);
+check(
+  near(internals.agcFastComp.ratio.value, 1) && internals.agcFastComp.threshold.value === 0,
+  "the fast window is unity when bypassed",
+  `ratio ${internals.agcFastComp.ratio.value} / thr ${internals.agcFastComp.threshold.value}`,
+);
+engine.apply({
+  ...DEFAULT_PARAMS,
+  agc: { ...DEFAULT_PARAMS.agc, fast: { on: true, thresholdDb: -6, ratio: 6, kneeDb: 0, attackMs: 2, releaseMs: 180 } },
+});
+check(
+  near(internals.agcFastComp.threshold.value, -6) &&
+    near(internals.agcFastComp.ratio.value, 6) &&
+    near(internals.agcFastComp.release.value, 0.18),
+  "the fast window carries its own threshold, ratio and release",
+  `${internals.agcFastComp.threshold.value} dB · ${internals.agcFastComp.ratio.value}:1 · ${internals.agcFastComp.release.value}s`,
+);
+check(
+  near(internals.agcComp.threshold.value, DEFAULT_PARAMS.agc.thresholdDb) &&
+    near(internals.agcComp.release.value, DEFAULT_PARAMS.agc.releaseMs / 1000),
+  "and the leveller keeps its own settings",
+  `${internals.agcComp.threshold.value} dB · ${(internals.agcComp.release.value * 1000).toFixed(0)} ms`,
+);
+engine.apply({ ...DEFAULT_PARAMS, agc: { ...DEFAULT_PARAMS.agc, on: false } });
+check(
+  near(internals.agcFastComp.ratio.value, 1),
+  "bypassing the AGC also stands the fast window down",
+);
+
 // clipper: bypassed by default, blended when engaged, curve bounded
 engine.apply(DEFAULT_PARAMS);
 check(
@@ -432,6 +479,16 @@ check(
     edge(internals.clipDry, internals.limComp),
   "the soft clipper sits between the drive and the limiter",
 );
+// the dual-window AGC is a chain: fast peak → slow leveller → makeup
+{
+  check(
+    edge(internals.agcWetPre, internals.agcFastComp) &&
+      edge(internals.agcFastComp, internals.agcComp) &&
+      edge(internals.agcComp, internals.agcMakeup),
+    "the fast window sits ahead of the leveller in the chain",
+  );
+}
+
 // the phase cascade is a chain, not parallel stages
 check(
   internals.phaseStages.every((n, i) => i === 0 || edge(internals.phaseStages[i - 1], n)),

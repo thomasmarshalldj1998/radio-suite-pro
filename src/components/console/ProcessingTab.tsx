@@ -30,10 +30,12 @@ import {
   HPF_SLOPES,
   HPF_STANDARD_HZ,
   MB_LABELS,
+  agcFast,
   eqBandOn,
   formatDb,
   formatHz,
   limiterClipper,
+  type AgcFastParams,
   type DeqBands,
   type EqBand,
   type EqBandType,
@@ -376,6 +378,12 @@ export function ProcessingTab({
       },
     }));
 
+  const fast = agcFast(params.agc);
+  const patchFast = (patch: Partial<AgcFastParams>) =>
+    setParams((p) => ({
+      ...p,
+      agc: { ...p.agc, fast: { ...agcFast(p.agc), ...patch } },
+    }));
   const clip = limiterClipper(params.limiter);
   const patchClipper = (patch: Partial<typeof clip>) =>
     setParams((p) => ({
@@ -888,7 +896,7 @@ export function ProcessingTab({
         <ChainBlock
           index={3}
           title="AGC"
-          subtitle="Program leveller · loudness rider"
+          subtitle="Dual window · fast peak + slow leveller · rider"
           gr={{ label: "AGC", get: () => getEngine().snapshot().gr.agc }}
           enabled={params.agc.on}
           onToggle={() =>
@@ -909,10 +917,98 @@ export function ProcessingTab({
           }
         >
           <div className="divide-y divide-border/60 rounded border border-border/60">
-            <CtrlRow label="Attack">
+            <CtrlRow label="Fast peak">
+              <Seg
+                ariaLabel="Fast peak window"
+                value={fast.on ? "on" : "bypass"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "bypass", label: "Bypass" },
+                ]}
+                onChange={(v) => patchFast({ on: v === "on" })}
+              />
+              <GainReductionMeter
+                get={() => getEngine().snapshot().gr.agcFast}
+                maxDb={9}
+                height={22}
+                width={6}
+              />
+              <Val>{fast.on ? `peak ${formatDb(fast.thresholdDb)}` : "bypassed"}</Val>
+            </CtrlRow>
+            <CtrlRow label="Fast thr">
               <SliderRow
-                min={10}
-                max={500}
+                min={-40}
+                max={0}
+                step={0.5}
+                value={fast.thresholdDb}
+                onChange={(v) => patchFast({ thresholdDb: v })}
+                label="Fast peak threshold"
+              />
+              <Val>{formatDb(fast.thresholdDb)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Fast ratio">
+              <SliderRow
+                min={1}
+                max={20}
+                step={0.5}
+                value={fast.ratio}
+                onChange={(v) => patchFast({ ratio: v })}
+                label="Fast peak ratio"
+              />
+              <Val>{fast.ratio.toFixed(1)}:1</Val>
+            </CtrlRow>
+            <CtrlRow label="Fast atk">
+              <SliderRow
+                min={0.5}
+                max={50}
+                step={0.5}
+                value={fast.attackMs}
+                onChange={(v) => patchFast({ attackMs: v })}
+                label="Fast peak attack"
+              />
+              <Val>{fast.attackMs.toFixed(1)} ms</Val>
+            </CtrlRow>
+            <CtrlRow label="Fast rel">
+              <SliderRow
+                min={20}
+                max={1500}
+                step={10}
+                value={fast.releaseMs}
+                onChange={(v) => patchFast({ releaseMs: v })}
+                label="Fast peak release"
+              />
+              <Val>{secs(fast.releaseMs)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Lev thr">
+              <SliderRow
+                min={-40}
+                max={0}
+                step={0.5}
+                value={params.agc.thresholdDb}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, agc: { ...p.agc, thresholdDb: v } }))
+                }
+                label="Leveller threshold"
+              />
+              <Val>{formatDb(params.agc.thresholdDb)}</Val>
+            </CtrlRow>
+            <CtrlRow label="Lev ratio">
+              <SliderRow
+                min={1}
+                max={20}
+                step={0.5}
+                value={params.agc.ratio}
+                onChange={(v) =>
+                  setParams((p) => ({ ...p, agc: { ...p.agc, ratio: v } }))
+                }
+                label="Leveller ratio"
+              />
+              <Val>{params.agc.ratio.toFixed(1)}:1</Val>
+            </CtrlRow>
+            <CtrlRow label="Slow atk">
+              <SliderRow
+                min={30}
+                max={800}
                 step={10}
                 value={params.agc.attackMs}
                 onChange={(v) =>
@@ -922,11 +1018,11 @@ export function ProcessingTab({
               />
               <Val>{secs(params.agc.attackMs)}</Val>
             </CtrlRow>
-            <CtrlRow label="Release">
+            <CtrlRow label="Slow rel">
               <SliderRow
-                min={50}
-                max={3000}
-                step={50}
+                min={100}
+                max={15000}
+                step={100}
                 value={params.agc.releaseMs}
                 onChange={(v) =>
                   setParams((p) => ({ ...p, agc: { ...p.agc, releaseMs: v } }))
@@ -1093,6 +1189,13 @@ export function ProcessingTab({
             grDb={snap?.gr.agc ?? 0}
             live={snap?.powered ?? false}
           />
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+            Two windows: the fast peak stage (short release) catches
+            transients above its own threshold, then the slow leveller rides
+            the programme toward the target. Because both thresholds are
+            independent, turning the fast window up never changes the
+            long-term level the leveller settles on.
+          </p>
         </ChainBlock>
           </>
         )}

@@ -84,6 +84,13 @@ EQ → AGC → multiband → limiter chain. Their control maths is pure and live
 in `src/lib/audio/tools.ts`, so it is verified without a browser:
 `bun scripts/verify-core-tools.ts`.
 
+- **Dual-window AGC** — `agc.fast`. The leveller's slow window
+  (`thresholdDb`, `ratio`, `attackMs`, `releaseMs`) rides long-term level,
+  while an optional fast peak window with its own threshold, ratio and
+  short release sits ahead of it and catches transients the long release
+  would let through. Both windows are summed on the AGC meter, and the fast
+  window's own reduction is reported separately (`gr.agcFast`). It ships
+  bypassed (ratio 1 = unity), so every existing preset sounds unchanged.
 - **Window gate (AGC)** — `agc.windowDb`, 0–9 dB (0 = off). While the
   programme's peak-to-trough spread over the last 1.5 s stays inside the
   window, the AGC gain is held instead of re-ridden, so quiet intros and
