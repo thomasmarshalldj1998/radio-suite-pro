@@ -21,7 +21,7 @@ const https = require("node:https");
 const MAX_BACKLOG_BYTES = 2 * 1024 * 1024;
 
 /** How long to wait for the server's response line before giving up. */
-const CONNECT_TIMEOUT_MS = 8000;
+const CONNECT_TIMEOUT_MS = 5000;
 
 /**
  * Build the source request target.
