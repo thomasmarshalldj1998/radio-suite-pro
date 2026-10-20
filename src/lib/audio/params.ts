@@ -4031,6 +4031,57 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     }),
   },
   {
+    id: "mobile-stream",
+    name: "Mobile-Stream",
+    description:
+      "HE-AAC/mobile delivery: 15 kHz codec pre-shaping, presence lift with de-essing, 90 Hz HPF and −16 LUFS at a −1 dBTP ceiling.",
+    tags: ["v3.1", "Mobile", "HE-AAC"],
+    family: "Signalpath v3.1",
+    params: merge({
+      hpf: { on: true, freqHz: 90 },
+      loudness: { standard: "apple", customLufs: -16, customTpDb: -1 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 80 },
+      advanced: {
+        limiter: {
+          codec: { on: true, target: "aac", bitrate: "auto", lowpassHz: 15000, hfPreserve: 35 },
+        },
+        eq: {
+          presence: {
+            on: true,
+            presenceGainDb: 1.5,
+            presenceWidth: 1.2,
+            presenceMode: "natural",
+            brillianceGainDb: 0.5,
+            airType: "smooth",
+          },
+          deess: { on: true },
+        },
+      },
+    }),
+  },
+  {
+    id: "reference-flat",
+    name: "Reference-Flat",
+    description:
+      "Direct signal path: EQ, dynamics, de-essing, limiting, rider, HPF and phase rotation all bypassed for an unprocessed reference.",
+    tags: ["v3.1", "Reference", "Flat"],
+    family: "Signalpath v3.1",
+    params: merge({
+      eq: { on: false },
+      deq: { on: false },
+      agc: { on: false },
+      multiband: { on: false },
+      deess: { on: false },
+      limiter: { on: false },
+      rider: { on: false },
+      hpf: { on: false },
+      phase: { on: false },
+      exciter: { on: false },
+      outputGainDb: 0,
+      monitorDb: 0,
+    }),
+  },
+  {
     id: "reference-mastering-off",
     name: "Reference-Mastering-Off",
     description:

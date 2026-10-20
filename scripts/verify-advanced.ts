@@ -263,6 +263,8 @@ console.log("\n5 · v3.1 factory presets");
     "Punchy-Compact",
     "Clean-Voice",
     "Broadcast-Glue",
+    "Mobile-Stream",
+    "Reference-Flat",
   ];
   for (const name of extended) {
     check(Boolean(BUILTIN_PRESETS.find((p) => p.name === name)), `${name} exists`);
@@ -303,6 +305,28 @@ console.log("\n5 · v3.1 factory presets");
       glue.compliance.truePeak.factor === 16 &&
       glue.compliance.truePeak.ceilingDb === -0.5,
     "Broadcast-Glue sets the 16× −0.5 dBTP pre-guard",
+  );
+
+  const mobile = BUILTIN_PRESETS.find((p) => p.name === "Mobile-Stream")?.params.advanced;
+  check(
+    mobile?.limiter.codec.on === true &&
+      mobile.limiter.codec.lowpassHz === 15000 &&
+      mobile.eq.presence.on === true &&
+      mobile.eq.deess.on === true,
+    "Mobile-Stream engages 15 kHz shaping, presence and de-essing",
+  );
+
+  const flat = BUILTIN_PRESETS.find((p) => p.name === "Reference-Flat")?.params;
+  check(
+    flat?.limiter.on === false &&
+      flat?.eq.on === false &&
+      flat?.agc.on === false &&
+      flat?.multiband.on === false &&
+      flat?.deess.on === false &&
+      flat?.rider.on === false &&
+      flat?.hpf.on === false &&
+      flat?.phase.on === false,
+    "Reference-Flat bypasses the whole chain",
   );
 }
 
