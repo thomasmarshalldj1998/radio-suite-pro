@@ -38,7 +38,7 @@ const TRACES: Trace[] = [
   { key: "s", label: "ST", color: "#2fb5b5", width: 1.4 },
   { key: "i", label: "Int", color: "rgba(76,217,100,0.8)", width: 1.2 },
   { key: "tp", label: "TP", color: "rgba(255,59,48,0.85)", width: 1 },
-  { key: "gr", label: "GR", color: "rgba(229,169,59,0.8)", dash: [4, 3], width: 1 },
+  { key: "gr", label: "GR", color: "rgba(0,224,255,0.8)", dash: [4, 3], width: 1 },
 ];
 
 /**

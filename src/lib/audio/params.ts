@@ -3815,6 +3815,157 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
       },
     }),
   },
+  {
+    id: "clean-voice-broadcast",
+    name: "Clean-Voice-Broadcast",
+    description:
+      "Speech-first airchain: DC/subsonic cleanup, dual-band de-essing, gentle harshness control and −18 LUFS practice.",
+    tags: ["v3.1", "Speech", "Clean"],
+    family: "Signalpath v3.1",
+    params: merge({
+      hpf: { on: true, freqHz: 90 },
+      loudness: { standard: "custom", customLufs: -18, customTpDb: -1 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 70 },
+      advanced: {
+        restoration: { dc: { on: true, hpfHz: 30 } },
+        eq: { deess: { on: true }, air: { on: true, sparkle: 30 } },
+        psycho: { harshness: { on: true, suppress: 55 } },
+      },
+    }),
+  },
+  {
+    id: "podcast-voice-plus",
+    name: "Podcast-Voice-Plus",
+    description:
+      "Podcast delivery at −16 LUFS with a lookahead gate, low-mid mud control, profile levelling and a −1 dBTP ceiling.",
+    tags: ["v3.1", "Podcast", "−16 LUFS"],
+    family: "Signalpath v3.1",
+    params: merge({
+      loudness: { standard: "apple", customLufs: -16, customTpDb: -1 },
+      rider: { on: true, targetLufs: -16, maxRideDb: 8, gateDb: -50, speed: "fast" },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 80 },
+      advanced: {
+        leveling: {
+          gate: { on: true, openDb: -42, closeDb: -48 },
+          agcProfile: { on: true, profile: "speech" },
+        },
+        eq: { mudGate: { on: true, freqHz: 300 } },
+      },
+    }),
+  },
+  {
+    id: "jazz-open-dynamic",
+    name: "Jazz-Open-Dynamic",
+    description:
+      "Open jazz setting: slow levelling, ambience recovery, a 10 LU range target and a −1.0 dBTP ceiling.",
+    tags: ["v3.1", "Jazz", "Dynamic"],
+    family: "Signalpath v3.1",
+    params: merge({
+      density: 3,
+      limiter: { on: true, ceilingDb: -1, attackMs: 2, releaseMs: 220 },
+      advanced: {
+        spatial: { ambience: { on: true, earlyLift: 35, tailRecover: 30 } },
+        compliance: { lra: { on: true, targetLu: 10, mode: "expand" } },
+      },
+    }),
+  },
+  {
+    id: "rock-dense-competitive",
+    name: "Rock-Dense-Competitive",
+    description:
+      "Competitive rock density: a 8 dB crest target, variable-Q guitar bite, harmonic clipping and a −0.8 dBTP ceiling.",
+    tags: ["v3.1", "Rock", "Dense"],
+    family: "Signalpath v3.1",
+    params: merge({
+      density: 8,
+      limiter: { on: true, ceilingDb: -0.8, attackMs: 0.8, releaseMs: 60 },
+      advanced: {
+        leveling: { crest: { on: true, targetDb: 8, response: "fast" } },
+        eq: { variableQ: { on: true, band: 7, q: 1.4, gainDb: 1.5 } },
+        limiter: { harmonics: { on: true, odd: 18, saturation: 12 } },
+      },
+    }),
+  },
+  {
+    id: "club-dance-bass-forward",
+    name: "Club-Dance-Bass-Forward",
+    description:
+      "Club master: low-end perceptual alignment, bass spatial locking, tight limiting and −14 LUFS / −0.5 dBTP.",
+    tags: ["v3.1", "Dance", "Bass"],
+    family: "Signalpath v3.1",
+    params: merge({
+      loudness: { standard: "spotify", customLufs: -14, customTpDb: -0.5 },
+      eq: {
+        on: true,
+        bands: [
+          { freq: 60, gainDb: 3, q: 0.7, type: "lowshelf" },
+          { freq: 200, gainDb: 1.5, q: 1.0, type: "peaking" },
+          { freq: 700, gainDb: -1, q: 1.0, type: "peaking" },
+          { freq: 2500, gainDb: 0.5, q: 1.2, type: "peaking" },
+          { freq: 6000, gainDb: -1, q: 1.4, type: "peaking" },
+          { freq: 12000, gainDb: 1, q: 0.7, type: "highshelf" },
+        ],
+      },
+      limiter: { on: true, ceilingDb: -0.5, attackMs: 0.6, releaseMs: 60 },
+      advanced: {
+        spatial: { bassAlign: { on: true, lockHz: 100 } },
+        psycho: { lowAlign: { on: true, bassBodyHz: 80, kickAnchorHz: 70 } },
+      },
+    }),
+  },
+  {
+    id: "nightmode-consistent-soft",
+    name: "Nightmode-Consistent-Soft",
+    description:
+      "Night-time consistency: soft limiting, a 4 LU range target, deep-silence handling and −18 LUFS.",
+    tags: ["v3.1", "Night", "Soft"],
+    family: "Signalpath v3.1",
+    params: merge({
+      loudness: { standard: "custom", customLufs: -18, customTpDb: -2 },
+      limiter: { on: true, ceilingDb: -2, attackMs: 2, releaseMs: 200 },
+      advanced: {
+        leveling: { silence: { on: true, freezeGain: true } },
+        compliance: { lra: { on: true, targetLu: 4 } },
+        limiter: { output: { on: true, dim: "-10" } },
+      },
+    }),
+  },
+  {
+    id: "reference-mastering-off",
+    name: "Reference-Mastering-Off",
+    description:
+      "Mastering bus bypass: AGC, multiband and limiting out of circuit, leaving the EQ and metering as a reference path.",
+    tags: ["v3.1", "Reference", "Mastering"],
+    family: "Signalpath v3.1",
+    params: merge({
+      agc: { on: false },
+      multiband: { on: false },
+      limiter: { on: false },
+      rider: { on: false },
+      outputGainDb: 0,
+    }),
+  },
+  {
+    id: "source-through-reference",
+    name: "Source-Through-Reference",
+    description:
+      "Straight-through reference: every dynamics stage bypassed, so the source can be compared with the processed chain at matched loudness.",
+    tags: ["v3.1", "Reference", "Bypass"],
+    family: "Signalpath v3.1",
+    params: merge({
+      eq: { on: false },
+      deq: { on: false },
+      agc: { on: false },
+      multiband: { on: false },
+      deess: { on: false },
+      limiter: { on: false },
+      rider: { on: false },
+      hpf: { on: false },
+      phase: { on: false },
+      outputGainDb: 0,
+      monitorDb: 0,
+    }),
+  },
 ];
 
 /* ── EQ response & A/B compare utilities ───────────────────────────────── */

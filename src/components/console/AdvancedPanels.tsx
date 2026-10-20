@@ -360,6 +360,40 @@ const restorationRows: Ctrl[] = [
   ]),
   N("Drive", "restoration.harmonics.drive", 0, 100, 1, 0, " %"),
   N("Mix", "restoration.harmonics.mix", 0, 15, 1, 0, " %"),
+  H("DC offset & subsonic"),
+  T("DC / subsonic", "restoration.dc.on"),
+  E("HPF", "restoration.dc.hpfHz", [
+    { value: "15", label: "15 Hz" },
+    { value: "20", label: "20 Hz" },
+    { value: "30", label: "30 Hz" },
+    { value: "0", label: "Brickwall" },
+  ]),
+  E("DC remove", "restoration.dc.dcRemove", [
+    { value: "auto", label: "Auto" },
+    { value: "manual", label: "Manual" },
+  ]),
+  E("Phase", "restoration.dc.phase", [
+    { value: "linear", label: "Linear" },
+    { value: "minimum", label: "Minimum" },
+  ]),
+  H("Interference rejection"),
+  T("Interference", "restoration.interference.on"),
+  E("Mains", "restoration.interference.mains", [
+    { value: "50", label: "50 Hz" },
+    { value: "60", label: "60 Hz" },
+  ]),
+  T("2nd–8th track", "restoration.interference.harmonics"),
+  T("RF blanking", "restoration.interference.rfBlanking"),
+  N("De-pop sens", "restoration.interference.dePopSens", 0, 100, 1, 0, " %"),
+  H("Input calibration"),
+  T("Calibration", "restoration.calibration.on"),
+  N("Offset", "restoration.calibration.offsetDb", -6, 6, 0.1, 2, " dB"),
+  T("Recall lock", "restoration.calibration.recallLock"),
+  E("Auto-null ref", "restoration.calibration.autoNull", [
+    { value: "-18", label: "−18 dBFS" },
+    { value: "-20", label: "−20 dBFS" },
+    { value: "-24", label: "−24 dBFS" },
+  ]),
 ];
 
 export function RestorationSuite(props: PanelProps) {
@@ -454,6 +488,27 @@ const levelingRows: Ctrl[] = [
   N("Attack", "leveling.transient.attack", -100, 100, 1, 0, " %"),
   N("Sustain", "leveling.transient.sustain", -100, 100, 1, 0, " %"),
   N("Range", "leveling.transient.rangeMs", 1, 10, 1, 0, " ms"),
+  H("Independent peak / RMS targeting"),
+  T("Peak/RMS target", "leveling.peakRms.on"),
+  N("Peak ceiling", "leveling.peakRms.peakCeilingDb", -6, 0, 0.1, 2, " dB"),
+  N("RMS energy", "leveling.peakRms.rmsTargetDb", -30, -8, 0.5, 1, " dB"),
+  N("Link", "leveling.peakRms.link", 0, 100, 1, 0, " %"),
+  H("Release-shape curves"),
+  T("Release shape", "leveling.releaseShape.on"),
+  E("Curve", "leveling.releaseShape.curve", [
+    { value: "natural", label: "Natural" },
+    { value: "opto", label: "Opto" },
+    { value: "program", label: "Program" },
+    { value: "linear", label: "Linear" },
+  ]),
+  N("Hold before decay", "leveling.releaseShape.holdMs", 0, 500, 5, 0, " ms"),
+  N("Density in release", "leveling.releaseShape.density", 0, 100, 1, 0, " %"),
+  H("Deep silence handling"),
+  T("Silence handling", "leveling.silence.on"),
+  T("Freeze gain", "leveling.silence.freezeGain"),
+  N("Lock time", "leveling.silence.lockS", 0, 30, 1, 0, " s"),
+  N("Resume ramp", "leveling.silence.resumeRampMs", 10, 1000, 10, 0, " ms"),
+  N("Noise floor fill", "leveling.silence.noiseFill", 0, 100, 1, 0, " %"),
 ];
 
 export function LevelingSuite(props: PanelProps) {
@@ -627,6 +682,26 @@ const spatialRows: Ctrl[] = [
   N("Imbalance allow", "spatial.headroom.imbalanceDb", 0, 3, 0.1, 1, " dB"),
   T("Auto redistribute", "spatial.headroom.autoRedistribute"),
   RO("Live correlation", (p, s) => s.correlation.toFixed(2)),
+  H("True mono fold & centre lift"),
+  T("Mono fold", "spatial.monoFold.on"),
+  E("Fold", "spatial.monoFold.fold", [
+    { value: "sum", label: "Sum" },
+    { value: "phase", label: "Phase-align" },
+  ]),
+  N("Centre lift", "spatial.monoFold.centreLiftDb", 0, 6, 0.1, 2, " dB"),
+  N("Low anchor", "spatial.monoFold.lowAnchorHz", 60, 120, 5, 0, " Hz"),
+  T("Collapse warning", "spatial.monoFold.collapseWarning"),
+  H("Time & phase scope calibration"),
+  T("Scope calibration", "spatial.scopeCal.on"),
+  N("L/R offset", "spatial.scopeCal.lrOffsetMs", -5, 5, 0.1, 2, " ms"),
+  N("Rotate", "spatial.scopeCal.rotateDeg", -180, 180, 1, 0, "°"),
+  T("Group delay display", "spatial.scopeCal.groupDelay"),
+  T("Phase rotate detect", "spatial.scopeCal.phaseDetect"),
+  H("Stereo enhance — ambience"),
+  T("Ambience recovery", "spatial.ambience.on"),
+  N("Early reflection", "spatial.ambience.earlyLift", 0, 100, 1, 0, " %"),
+  N("Reverb tail", "spatial.ambience.tailRecover", 0, 100, 1, 0, " %"),
+  T("No colouration", "spatial.ambience.noColouration"),
 ];
 
 export function SpatialSuite(props: PanelProps) {
@@ -845,6 +920,48 @@ const eqRows: Ctrl[] = [
   N("Notch 2 width", "eq.notch.notch2.widthOct", 0.05, 4, 0.05, 2, " oct"),
   T("Notch 2 track", "eq.notch.notch2.autoTrack"),
   T("Leakage detect", "eq.notch.leakageDetect"),
+  H("Shelving & tilt linearisation"),
+  T("Shelves/tilt", "eq.shelves.on"),
+  E("Analog shelf", "eq.shelves.analog", [
+    { value: "a", label: "A · Warm" },
+    { value: "b", label: "B · Neutral" },
+    { value: "c", label: "C · Tight" },
+  ]),
+  N("Digital tilt", "eq.shelves.tiltDb", -3, 3, 0.1, 2, " dB"),
+  T("Compensate Q", "eq.shelves.compensateQ"),
+  H("Variable-Q peak / dip"),
+  T("Variable Q", "eq.variableQ.on"),
+  N("Band (1–10)", "eq.variableQ.band", 1, 10, 1, 0),
+  N("Q", "eq.variableQ.q", 0.4, 7, 0.1, 2),
+  E("Shape", "eq.variableQ.shape", [
+    { value: "bell", label: "Bell" },
+    { value: "highShelf", label: "High shelf" },
+    { value: "lowShelf", label: "Low shelf" },
+    { value: "notch", label: "Notch" },
+  ]),
+  N("Gain", "eq.variableQ.gainDb", -15, 15, 0.1, 2, " dB"),
+  H("Low-mid mud gate"),
+  T("Mud gate", "eq.mudGate.on"),
+  N("Freq", "eq.mudGate.freqHz", 200, 400, 5, 0, " Hz"),
+  N("Density limit", "eq.mudGate.density", 0, 100, 1, 0, " %"),
+  E("Release", "eq.mudGate.release", [
+    { value: "fast", label: "Fast" },
+    { value: "slow", label: "Slow" },
+  ]),
+  N("Keep warmth", "eq.mudGate.keepWarmth", 0, 100, 1, 0, " %"),
+  H("Air band"),
+  T("Air band", "eq.air.on"),
+  E("Corner", "eq.air.corner", [
+    { value: "12", label: "12 kHz" },
+    { value: "16", label: "16 kHz" },
+    { value: "20", label: "20 kHz" },
+  ]),
+  E("Slope", "eq.air.slope", [
+    { value: "6", label: "6 dB/oct" },
+    { value: "12", label: "12 dB/oct" },
+  ]),
+  N("Sparkle", "eq.air.sparkle", 0, 100, 1, 0, " %"),
+  T("No sibilance boost", "eq.air.noSibilance"),
 ];
 
 export function PrecisionEqSuite(props: PanelProps) {
@@ -939,6 +1056,53 @@ const limiterRows: Ctrl[] = [
     { value: "normal", label: "Normal" },
   ]),
   N("Window", "limiter.undershoot.windowMs", 1, 5, 1, 0, " ms"),
+  H("Multi-stage bypass & solo"),
+  T("Stage control", "limiter.stageSolo.on"),
+  T("Bypass stage 1", "limiter.stageSolo.bypass1"),
+  T("Bypass stage 2", "limiter.stageSolo.bypass2"),
+  T("Bypass stage 3", "limiter.stageSolo.bypass3"),
+  E("Solo mode", "limiter.stageSolo.solo", [
+    { value: "off", label: "Off" },
+    { value: "1", label: "Stage 1" },
+    { value: "2", label: "Stage 2" },
+    { value: "3", label: "Stage 3" },
+  ]),
+  E("Compare", "limiter.stageSolo.compare", [
+    { value: "A", label: "A" },
+    { value: "B", label: "B" },
+    { value: "C", label: "C" },
+    { value: "D", label: "D" },
+  ]),
+  RO("Snapshots", (p) =>
+    `${(p.advanced ?? DEFAULT_ADVANCED).limiter.stageSolo.snapshots} × recall`,
+  ),
+  H("ISP ceiling safety margin"),
+  T("ISP guard", "limiter.isp.on"),
+  N("Hard guard", "limiter.isp.guardDb", -3, -0.1, 0.1, 2, " dB"),
+  E("Oversample", "limiter.isp.oversample", [
+    { value: "16", label: "16×" },
+    { value: "32", label: "32×" },
+  ]),
+  T("Post-encode predict", "limiter.isp.postEncodePredict"),
+  H("Bit-depth & format"),
+  T("Bit depth", "limiter.bitDepth.on"),
+  E("Depth", "limiter.bitDepth.depth", [
+    { value: "16", label: "16-bit" },
+    { value: "24", label: "24-bit" },
+    { value: "32", label: "32-float" },
+  ]),
+  T("Dither per output", "limiter.bitDepth.ditherPerOutput"),
+  T("Auto-apply on source", "limiter.bitDepth.autoApply"),
+  H("Output mute / dim / sleep"),
+  T("Output management", "limiter.output.on"),
+  E("Dim level", "limiter.output.dim", [
+    { value: "-10", label: "−10 dB" },
+    { value: "-20", label: "−20 dB" },
+    { value: "-30", label: "−30 dB" },
+  ]),
+  N("Fade time", "limiter.output.fadeS", 0, 5, 0.5, 1, " s"),
+  N("Auto-sleep", "limiter.output.autoSleepS", 5, 60, 5, 0, " s"),
+  T("Wake on signal", "limiter.output.wakeOnSignal"),
 ];
 
 export function Limiter31Suite(props: PanelProps) {
@@ -1022,6 +1186,54 @@ const intelligenceRows: Ctrl[] = [
   RO("CPU per frame", (p, s) => `${s.perf.frameMs.toFixed(2)} ms`),
   RO("Clock drift", (p, s) => `${s.perf.driftMs.toFixed(1)} ms`),
   RO("Uptime", (p, s) => `${(s.measureMs / 60000).toFixed(1)} min`),
+  H("Auto-save & session restore"),
+  T("Auto-save", "intelligence.autosave.on"),
+  E("Interval", "intelligence.autosave.intervalMin", [
+    { value: "1", label: "1 min" },
+    { value: "5", label: "5 min" },
+    { value: "15", label: "15 min" },
+    { value: "30", label: "30 min" },
+  ]),
+  T("Restore on start", "intelligence.autosave.restoreOnStart"),
+  T("Backup on save", "intelligence.autosave.backup"),
+  T("Versioned snapshots", "intelligence.autosave.versioned"),
+  H("Hardware integration"),
+  T("Hardware", "intelligence.hardware.on"),
+  T("MIDI in/out", "intelligence.hardware.midi"),
+  T("Learn CC", "intelligence.hardware.learnCC"),
+  T("MMC control", "intelligence.hardware.mmc"),
+  T("GPIO tally", "intelligence.hardware.gpio"),
+  E("Display protocol", "intelligence.hardware.display", [
+    { value: "scpi", label: "SCPI" },
+    { value: "serial", label: "Serial" },
+  ]),
+  H("Multi-user & permissions"),
+  T("Multi-user", "intelligence.users.on"),
+  E("Role", "intelligence.users.role", [
+    { value: "operator", label: "Operator" },
+    { value: "engineer", label: "Engineer" },
+    { value: "admin", label: "Admin" },
+  ]),
+  T("Lock tabs", "intelligence.users.lockTabs"),
+  T("Preset protect", "intelligence.users.presetProtect"),
+  T("Log changes", "intelligence.users.logChanges"),
+  H("Redundancy & failover"),
+  T("Redundancy", "intelligence.redundancy.on"),
+  T("Auto-switch input", "intelligence.redundancy.autoSwitch"),
+  T("Silence detect", "intelligence.redundancy.silenceDetect"),
+  N("Cross-fade", "intelligence.redundancy.crossfadeS", 0, 5, 0.5, 1, " s"),
+  T("Dual-engine sync", "intelligence.redundancy.dualEngine"),
+  T("Mirror output", "intelligence.redundancy.mirror"),
+  H("Update & diagnostics"),
+  T("Updates & diagnostics", "intelligence.updates.on"),
+  T("Check for updates", "intelligence.updates.check"),
+  T("Changelog", "intelligence.updates.changelog"),
+  T("Verify install", "intelligence.updates.verifyInstall"),
+  T("Clear cache", "intelligence.updates.clearCache"),
+  T("Export system info", "intelligence.updates.exportInfo"),
+  T("Benchmark DSP load", "intelligence.updates.benchmark"),
+  T("Latency test", "intelligence.updates.latencyTest"),
+  T("Loopback check", "intelligence.updates.loopback"),
 ];
 
 export function IntelligenceSuite(props: PanelProps) {
@@ -1030,6 +1242,114 @@ export function IntelligenceSuite(props: PanelProps) {
       title="System intelligence"
       subtitle="Auto source · morphing · gain staging · watchdog · remote · health"
       rows={intelligenceRows}
+      {...props}
+    />
+  );
+}
+
+/* ── 8 · psychoacoustic processing ─────────────────────────────────────── */
+
+const psychoRows: Ctrl[] = [
+  H("Perceptual masking limiter"),
+  T("Masking limiter", "psycho.masking.on"),
+  RO("Bands", () => "24 critical"),
+  N("Temporal window", "psycho.masking.windowMs", 5, 50, 1, 0, " ms"),
+  N("Distortion floor", "psycho.masking.distortionFloorDb", -60, -20, 1, 0, " dB"),
+  N("Mask strength", "psycho.masking.strength", 0, 100, 1, 0, " %"),
+  H("Adaptive perceptual reconstruction"),
+  T("APR", "psycho.apr.on"),
+  E("Mode", "psycho.apr.mode", [
+    { value: "light", label: "Light" },
+    { value: "medium", label: "Medium" },
+    { value: "heavy", label: "Heavy" },
+    { value: "auto", label: "Auto" },
+  ]),
+  N("Harmonic regen", "psycho.apr.harmonicRegen", 0, 60, 1, 0, " %"),
+  N("Transient restore", "psycho.apr.transientRestore", 0, 100, 1, 0, " %"),
+  H("Fatigue index & listener comfort"),
+  T("Fatigue monitor", "psycho.fatigue.on"),
+  RO("Fatigue now", (p, s) =>
+    `${Math.max(0, Math.min(100, 55 + (s.lufsS + 14) * 4)).toFixed(1)} / 100`,
+  ),
+  N("Warning threshold", "psycho.fatigue.threshold", 50, 100, 1, 0),
+  N("Auto-ease", "psycho.fatigue.autoEase", 0, 100, 1, 0, " %"),
+  H("Spectral loudness balance"),
+  T("Spectral balance", "psycho.spectralBalance.on"),
+  N("Perceptual tilt", "psycho.spectralBalance.tiltDb", -2, 2, 0.1, 2, " dB"),
+  E("Equal-loudness", "psycho.spectralBalance.contour", [
+    { value: "40", label: "40 phon" },
+    { value: "60", label: "60 phon" },
+    { value: "80", label: "80 phon" },
+  ]),
+  N("Smooth", "psycho.spectralBalance.smooth", 0, 100, 1, 0, " %"),
+  H("Sibilance & harshness psycho-control"),
+  T("Harshness control", "psycho.harshness.on"),
+  N("Ear-model detect", "psycho.harshness.detectMaxHz", 2000, 16000, 500, 0, " Hz"),
+  T("Pre-mask", "psycho.harshness.preMask"),
+  N("Gentle suppress", "psycho.harshness.suppress", 0, 100, 1, 0, " %"),
+  H("Low-frequency perceptual alignment"),
+  T("Low alignment", "psycho.lowAlign.on"),
+  N("Bass-body balance", "psycho.lowAlign.bassBodyHz", 60, 200, 5, 0, " Hz"),
+  N("Kick anchor", "psycho.lowAlign.kickAnchorHz", 60, 90, 5, 0, " Hz"),
+  N("Warmth zone", "psycho.lowAlign.warmthHz", 200, 400, 5, 0, " Hz"),
+  T("Bleed protect", "psycho.lowAlign.bleedProtect"),
+];
+
+export function PsychoSuite(props: PanelProps) {
+  return (
+    <AdvancedCard
+      title="Psychoacoustic processing"
+      subtitle="Masking · APR · fatigue · contours · harshness · low-frequency alignment"
+      rows={psychoRows}
+      {...props}
+    />
+  );
+}
+
+/* ── 9 · preset, telemetry & logging system ────────────────────────────── */
+
+const presetRows: Ctrl[] = [
+  H("Preset management"),
+  T("Folders / categories", "presets.folders"),
+  T("Search / filter", "presets.search"),
+  T("Lock / protect", "presets.lock"),
+  T("Read-only", "presets.readOnly"),
+  T("Factory / user split", "presets.factoryUser"),
+  T("Import / export .spreset", "presets.importExport"),
+  TXT("Version tag", "presets.version", "3.1"),
+  TXT("Author", "presets.author", "Signalpath"),
+  TXT("Notes", "presets.notes", "Session notes"),
+  H("A/B/C/D compare"),
+  T("Compare system", "presets.compare"),
+  T("Overlay meter graphs", "presets.overlay"),
+  RO("Slots", () => "4 parallel · A/B/C/D"),
+  H("Meter hold & snapshot"),
+  T("Meter hold", "presets.meterHold"),
+  T("Freeze display", "presets.freeze"),
+  T("Save image/PDF", "presets.saveImage"),
+  H("Stream health & event log"),
+  T("Stream health log", "presets.streamHealth"),
+  T("Email alert", "presets.emailAlert"),
+  TXT("Webhook", "presets.webhook", "https://…"),
+  H("Loudness compliance report"),
+  T("Daily summary", "presets.dailySummary"),
+  T("Weekly compliance %", "presets.weeklyCompliance"),
+  E("Platform preset", "presets.platform", [
+    { value: "youtube", label: "YouTube" },
+    { value: "spotify", label: "Spotify" },
+    { value: "appleMusic", label: "Apple Music" },
+    { value: "alexa", label: "Alexa" },
+    { value: "fm", label: "FM" },
+    { value: "dab", label: "DAB" },
+  ]),
+];
+
+export function PresetSystemSuite(props: PanelProps) {
+  return (
+    <AdvancedCard
+      title="Preset & telemetry system"
+      subtitle="Library · A/B/C/D · meter hold · stream health · compliance reports"
+      rows={presetRows}
       {...props}
     />
   );

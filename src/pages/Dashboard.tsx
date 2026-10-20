@@ -11,6 +11,7 @@ import {
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { CompactView } from "@/components/console/CompactView";
 import { BatchPanel } from "@/components/console/BatchPanel";
+import { PresetSystemSuite } from "@/components/console/AdvancedPanels";
 import { Button } from "@/components/ui/button";
 import {
   useAlarms,
@@ -930,7 +931,7 @@ export default function Dashboard() {
                 onClick={() => void startEngine("start")}
                 disabled={powerBusy}
                 aria-label="Start the audio engine"
-                className="h-9 cursor-pointer gap-1.5 border-signal bg-signal px-2.5 text-[11px] font-bold tracking-[0.1em] text-signal-fg uppercase shadow-[0_0_18px_rgba(229,169,59,0.4)] hover:bg-signal-strong sm:px-3"
+                className="h-9 cursor-pointer gap-1.5 border-signal bg-signal px-2.5 text-[11px] font-bold tracking-[0.1em] text-signal-fg uppercase shadow-[0_0_18px_rgba(0,224,255,0.4)] hover:bg-signal-strong sm:px-3"
               >
                 <Power className="size-3.5" />
                 {/* phones keep the transport on one row — icon + short label */}
@@ -1109,6 +1110,7 @@ export default function Dashboard() {
                   onPreview={(p) => setParams(coerceParams(p))}
                 />
                 <ScheduleCard params={params} activeName={activePreset} />
+                <PresetSystemSuite params={params} setParams={setParams} />
               </div>
             )}
             {tab === "batch" && <BatchPanel params={params} />}

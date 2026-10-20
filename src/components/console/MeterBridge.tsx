@@ -18,7 +18,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 /* Meter-bridge palette — teal info, amber program, alarm red/green. */
 const LED = {
   cyan: "#2fb5b5",
-  blue: "#e5a93b",
+  blue: "#00e0ff",
   red: "#ff3b30",
   green: "#4cd964",
   amber: "#ffcc00",
@@ -493,7 +493,7 @@ export function MeterBridge({
               onChange={(e) => onDensity(Number(e.target.value))}
               aria-label="Master density: 1 open, 10 dense"
               aria-valuetext={`${params.density} of ${DENSITY_MAX} — ${densityProfile(params.density).label}`}
-              className="h-1.5 w-full cursor-pointer accent-[#e5a93b]"
+              className="h-1.5 w-full cursor-pointer accent-[#00e0ff]"
             />
             <div
               className="flex items-center justify-between"

@@ -18,7 +18,12 @@ import {
   DEFAULT_ADVANCED,
   advancedIsNeutral,
   agcProfileEnvelope,
+  airShelf,
   channelTrim,
+  dcHighpassHz,
+  dimDb,
+  mainsNotchHz,
+  variableQFrequency,
   classifyProgram,
   codecLowpassHz,
   crestDriveDb,
@@ -165,6 +170,21 @@ console.log("\n3 · compliance, tone and spatial");
   });
   check(pre50.gainDb > 0, "a 50 µs curve asks for high-frequency lift", `${pre50.gainDb.toFixed(2)} dB`);
 
+  check(dcHighpassHz(DEFAULT_ADVANCED.restoration.dc) === 0, "DC/subsonic filter is off by default");
+  check(
+    dcHighpassHz({ ...DEFAULT_ADVANCED.restoration.dc, on: true, hpfHz: 0 }) === 30,
+    "brickwall maps to the 30 Hz corner",
+  );
+  check(mainsNotchHz(DEFAULT_ADVANCED.restoration.interference) === 0, "mains notch is off by default");
+  check(
+    mainsNotchHz({ ...DEFAULT_ADVANCED.restoration.interference, on: true, mains: 60 }) === 60,
+    "the mains notch follows 50/60 Hz",
+  );
+  const air = airShelf(DEFAULT_ADVANCED.eq.air);
+  check(air.gainDb === 0, "air band is 0 dB when off");
+  check(dimDb(DEFAULT_ADVANCED.limiter.output) === 0, "output dim is 0 dB when off");
+  check(variableQFrequency(1) === 31 && variableQFrequency(10) === 16000, "variable-Q bands span 31 Hz–16 kHz");
+
   const presence = presenceGains(DEFAULT_ADVANCED.eq.presence);
   check(presence.presenceDb === 0 && presence.brillianceDb === 0, "presence and brilliance are flat when off");
 
@@ -215,6 +235,27 @@ console.log("\n5 · v3.1 factory presets");
   check(web?.params.advanced.limiter.codec.target === "opus", "Web-Loud-Compliant pre-shapes for Opus");
   const hifi = BUILTIN_PRESETS.find((p) => p.name === "Music-HiFi-Open");
   check(hifi?.params.advanced.restoration.drr.expansion === 80, "Music-HiFi-Open recovers dynamic range");
+
+  const extended = [
+    "Clean-Voice-Broadcast",
+    "Podcast-Voice-Plus",
+    "Jazz-Open-Dynamic",
+    "Rock-Dense-Competitive",
+    "Club-Dance-Bass-Forward",
+    "Nightmode-Consistent-Soft",
+    "Reference-Mastering-Off",
+    "Source-Through-Reference",
+  ];
+  for (const name of extended) {
+    check(Boolean(BUILTIN_PRESETS.find((p) => p.name === name)), `${name} exists`);
+  }
+  const night = BUILTIN_PRESETS.find((p) => p.name === "Nightmode-Consistent-Soft");
+  check(night?.params.advanced.leveling.silence.on === true, "Nightmode handles deep silence");
+  const ref = BUILTIN_PRESETS.find((p) => p.name === "Source-Through-Reference");
+  check(
+    ref?.params.limiter.on === false && ref?.params.agc.on === false && ref?.params.eq.on === false,
+    "Source-Through-Reference bypasses every dynamics stage",
+  );
 }
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);

@@ -62,6 +62,25 @@ export interface AdvancedParams {
       drive: number;
       mix: number;
     };
+    dc: {
+      on: boolean;
+      hpfHz: 15 | 20 | 30 | 0;
+      dcRemove: "auto" | "manual";
+      phase: "linear" | "minimum";
+    };
+    interference: {
+      on: boolean;
+      mains: 50 | 60;
+      harmonics: boolean;
+      rfBlanking: boolean;
+      dePopSens: number;
+    };
+    calibration: {
+      on: boolean;
+      offsetDb: number;
+      recallLock: boolean;
+      autoNull: -18 | -20 | -24;
+    };
   };
   leveling: {
     agcProfile: {
@@ -105,6 +124,63 @@ export interface AdvancedParams {
       attack: number;
       sustain: number;
       rangeMs: number;
+    };
+    peakRms: {
+      on: boolean;
+      peakCeilingDb: number;
+      rmsTargetDb: number;
+      link: number;
+    };
+    releaseShape: {
+      on: boolean;
+      curve: "natural" | "opto" | "program" | "linear";
+      holdMs: number;
+      density: number;
+    };
+    silence: {
+      on: boolean;
+      freezeGain: boolean;
+      lockS: number;
+      resumeRampMs: number;
+      noiseFill: number;
+    };
+  };
+  psycho: {
+    masking: {
+      on: boolean;
+      windowMs: number;
+      distortionFloorDb: number;
+      strength: number;
+    };
+    apr: {
+      on: boolean;
+      mode: "light" | "medium" | "heavy" | "auto";
+      harmonicRegen: number;
+      transientRestore: number;
+    };
+    fatigue: {
+      on: boolean;
+      threshold: number;
+      autoEase: number;
+    };
+    spectralBalance: {
+      on: boolean;
+      tiltDb: number;
+      contour: "40" | "60" | "80";
+      smooth: number;
+    };
+    harshness: {
+      on: boolean;
+      detectMaxHz: number;
+      preMask: boolean;
+      suppress: number;
+    };
+    lowAlign: {
+      on: boolean;
+      bassBodyHz: number;
+      kickAnchorHz: number;
+      warmthHz: number;
+      bleedProtect: boolean;
     };
   };
   compliance: {
@@ -178,6 +254,26 @@ export interface AdvancedParams {
       imbalanceDb: number;
       autoRedistribute: boolean;
     };
+    monoFold: {
+      on: boolean;
+      fold: "sum" | "phase";
+      centreLiftDb: number;
+      lowAnchorHz: number;
+      collapseWarning: boolean;
+    };
+    scopeCal: {
+      on: boolean;
+      lrOffsetMs: number;
+      rotateDeg: number;
+      groupDelay: boolean;
+      phaseDetect: boolean;
+    };
+    ambience: {
+      on: boolean;
+      earlyLift: number;
+      tailRecover: number;
+      noColouration: boolean;
+    };
   };
   eq: {
     dynamic: {
@@ -223,6 +319,33 @@ export interface AdvancedParams {
       notch1: { freqHz: number; widthOct: number; autoTrack: boolean };
       notch2: { freqHz: number; widthOct: number; autoTrack: boolean };
       leakageDetect: boolean;
+    };
+    shelves: {
+      on: boolean;
+      analog: "a" | "b" | "c";
+      tiltDb: number;
+      compensateQ: boolean;
+    };
+    variableQ: {
+      on: boolean;
+      band: number;
+      q: number;
+      shape: "bell" | "highShelf" | "lowShelf" | "notch";
+      gainDb: number;
+    };
+    mudGate: {
+      on: boolean;
+      freqHz: number;
+      density: number;
+      release: "fast" | "slow";
+      keepWarmth: number;
+    };
+    air: {
+      on: boolean;
+      corner: 12 | 16 | 20;
+      slope: 6 | 12;
+      sparkle: number;
+      noSibilance: boolean;
     };
   };
   limiter: {
@@ -274,6 +397,56 @@ export interface AdvancedParams {
       recovery: "fast" | "normal";
       windowMs: number;
     };
+    stageSolo: {
+      on: boolean;
+      bypass1: boolean;
+      bypass2: boolean;
+      bypass3: boolean;
+      solo: "off" | "1" | "2" | "3";
+      compare: "A" | "B" | "C" | "D";
+      snapshots: number;
+    };
+    isp: {
+      on: boolean;
+      guardDb: number;
+      oversample: 16 | 32;
+      postEncodePredict: boolean;
+    };
+    bitDepth: {
+      on: boolean;
+      depth: 16 | 24 | 32;
+      ditherPerOutput: boolean;
+      autoApply: boolean;
+    };
+    output: {
+      on: boolean;
+      dim: "-10" | "-20" | "-30";
+      fadeS: number;
+      autoSleepS: number;
+      wakeOnSignal: boolean;
+    };
+  };
+  presets: {
+    folders: boolean;
+    search: boolean;
+    lock: boolean;
+    readOnly: boolean;
+    factoryUser: boolean;
+    importExport: boolean;
+    version: string;
+    author: string;
+    notes: string;
+    compare: boolean;
+    overlay: boolean;
+    meterHold: boolean;
+    freeze: boolean;
+    saveImage: boolean;
+    streamHealth: boolean;
+    emailAlert: boolean;
+    webhook: string;
+    dailySummary: boolean;
+    weeklyCompliance: boolean;
+    platform: "youtube" | "spotify" | "appleMusic" | "alexa" | "fm" | "dab";
   };
   intelligence: {
     autoSource: {
@@ -313,6 +486,47 @@ export interface AdvancedParams {
       auth: "password" | "token";
       token: string;
     };
+    autosave: {
+      on: boolean;
+      intervalMin: 1 | 5 | 15 | 30;
+      restoreOnStart: boolean;
+      backup: boolean;
+      versioned: boolean;
+    };
+    hardware: {
+      on: boolean;
+      midi: boolean;
+      learnCC: boolean;
+      mmc: boolean;
+      gpio: boolean;
+      display: "scpi" | "serial";
+    };
+    users: {
+      on: boolean;
+      role: "operator" | "engineer" | "admin";
+      lockTabs: boolean;
+      presetProtect: boolean;
+      logChanges: boolean;
+    };
+    redundancy: {
+      on: boolean;
+      autoSwitch: boolean;
+      silenceDetect: boolean;
+      crossfadeS: number;
+      dualEngine: boolean;
+      mirror: boolean;
+    };
+    updates: {
+      on: boolean;
+      check: boolean;
+      changelog: boolean;
+      verifyInstall: boolean;
+      clearCache: boolean;
+      exportInfo: boolean;
+      benchmark: boolean;
+      latencyTest: boolean;
+      loopback: boolean;
+    };
     health: { on: boolean };
   };
 }
@@ -351,6 +565,15 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
     src: { on: false, target: "auto", attenuationDb: 128, dither: "tpdf", lock: "auto" },
     drr: { on: false, expansion: 0, timeS: 4, crestTargetDb: 10, depthPreserve: 50 },
     harmonics: { on: false, even: 0, odd: 0, band: "mid", drive: 0, mix: 0 },
+    dc: { on: false, hpfHz: 20, dcRemove: "auto", phase: "minimum" },
+    interference: {
+      on: false,
+      mains: 50,
+      harmonics: true,
+      rfBlanking: false,
+      dePopSens: 50,
+    },
+    calibration: { on: false, offsetDb: 0, recallLock: false, autoNull: -20 },
   },
   leveling: {
     agcProfile: {
@@ -374,6 +597,29 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
     drift: { on: false, windowH: 6, rangeDb: 2, rate: "normal" },
     dualAnchor: { on: false, lufsTarget: -16, densityTargetDb: -18, balance: 50 },
     transient: { on: false, band: "all", attack: 0, sustain: 0, rangeMs: 3 },
+    peakRms: { on: false, peakCeilingDb: -1, rmsTargetDb: -18, link: 50 },
+    releaseShape: { on: false, curve: "natural", holdMs: 0, density: 50 },
+    silence: {
+      on: false,
+      freezeGain: true,
+      lockS: 5,
+      resumeRampMs: 120,
+      noiseFill: 0,
+    },
+  },
+  psycho: {
+    masking: { on: false, windowMs: 20, distortionFloorDb: -35, strength: 50 },
+    apr: { on: false, mode: "medium", harmonicRegen: 30, transientRestore: 50 },
+    fatigue: { on: false, threshold: 75, autoEase: 50 },
+    spectralBalance: { on: false, tiltDb: 0, contour: "60", smooth: 50 },
+    harshness: { on: false, detectMaxHz: 12000, preMask: true, suppress: 50 },
+    lowAlign: {
+      on: false,
+      bassBodyHz: 100,
+      kickAnchorHz: 70,
+      warmthHz: 300,
+      bleedProtect: true,
+    },
   },
   compliance: {
     dual: { on: false, standardA: "ebu", standardB: "atsc" },
@@ -409,6 +655,15 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
       imbalanceDb: 1,
       autoRedistribute: false,
     },
+    monoFold: {
+      on: false,
+      fold: "sum",
+      centreLiftDb: 0,
+      lowAnchorHz: 80,
+      collapseWarning: true,
+    },
+    scopeCal: { on: false, lrOffsetMs: 0, rotateDeg: 0, groupDelay: true, phaseDetect: true },
+    ambience: { on: false, earlyLift: 0, tailRecover: 0, noColouration: true },
   },
   eq: {
     dynamic: {
@@ -444,6 +699,10 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
       notch2: { freqHz: 1000, widthOct: 0.2, autoTrack: false },
       leakageDetect: true,
     },
+    shelves: { on: false, analog: "a", tiltDb: 0, compensateQ: true },
+    variableQ: { on: false, band: 1, q: 1, shape: "bell", gainDb: 0 },
+    mudGate: { on: false, freqHz: 300, density: 50, release: "fast", keepWarmth: 50 },
+    air: { on: false, corner: 16, slope: 6, sparkle: 0, noSibilance: true },
   },
   limiter: {
     window: {
@@ -478,6 +737,40 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
     preEmph: { on: false, curve: "50", apply: "after", compensateHf: 50 },
     codec: { on: false, target: "auto", bitrate: "auto", lowpassHz: 16000, hfPreserve: 50 },
     undershoot: { on: false, depth: 0, recovery: "normal", windowMs: 3 },
+    stageSolo: {
+      on: false,
+      bypass1: false,
+      bypass2: false,
+      bypass3: false,
+      solo: "off",
+      compare: "A",
+      snapshots: 8,
+    },
+    isp: { on: false, guardDb: -0.5, oversample: 16, postEncodePredict: false },
+    bitDepth: { on: false, depth: 24, ditherPerOutput: true, autoApply: true },
+    output: { on: false, dim: "-20", fadeS: 0.5, autoSleepS: 15, wakeOnSignal: true },
+  },
+  presets: {
+    folders: true,
+    search: true,
+    lock: false,
+    readOnly: false,
+    factoryUser: true,
+    importExport: true,
+    version: "3.1",
+    author: "Signalpath",
+    notes: "",
+    compare: false,
+    overlay: false,
+    meterHold: false,
+    freeze: false,
+    saveImage: false,
+    streamHealth: false,
+    emailAlert: false,
+    webhook: "",
+    dailySummary: false,
+    weeklyCompliance: false,
+    platform: "fm",
   },
   intelligence: {
     autoSource: {
@@ -500,6 +793,40 @@ export const DEFAULT_ADVANCED: AdvancedParams = {
       failSafe: "last",
     },
     remote: { on: false, protocol: "both", port: 9000, auth: "token", token: "" },
+    autosave: {
+      on: false,
+      intervalMin: 5,
+      restoreOnStart: true,
+      backup: true,
+      versioned: true,
+    },
+    hardware: { on: false, midi: true, learnCC: false, mmc: false, gpio: false, display: "scpi" },
+    users: {
+      on: false,
+      role: "operator",
+      lockTabs: true,
+      presetProtect: true,
+      logChanges: true,
+    },
+    redundancy: {
+      on: false,
+      autoSwitch: true,
+      silenceDetect: true,
+      crossfadeS: 1.5,
+      dualEngine: false,
+      mirror: false,
+    },
+    updates: {
+      on: false,
+      check: true,
+      changelog: true,
+      verifyInstall: true,
+      clearCache: false,
+      exportInfo: true,
+      benchmark: false,
+      latencyTest: false,
+      loopback: false,
+    },
     health: { on: true },
   },
 };
@@ -672,6 +999,45 @@ export function preEmphCorrection(
   return { freqHz: pre.curve === "75" ? 6500 : 7500, gainDb: curveDb * amount };
 }
 
+/** DC/subsonic high-pass corner (0 Hz when bypassed; brickwall = 30 Hz). */
+export function dcHighpassHz(dc: AdvancedParams["restoration"]["dc"]): number {
+  if (!dc.on) return 0;
+  return dc.hpfHz === 0 ? 30 : dc.hpfHz;
+}
+
+/** Mains interference notch corner. */
+export function mainsNotchHz(
+  interference: AdvancedParams["restoration"]["interference"],
+): number {
+  return interference.on ? interference.mains : 0;
+}
+
+/** Air-band shelf from the gentle-lift module. */
+export function airShelf(air: AdvancedParams["eq"]["air"]): {
+  freqHz: number;
+  gainDb: number;
+  q: number;
+} {
+  if (!air.on) return { freqHz: 20000, gainDb: 0, q: 0.7 };
+  return {
+    freqHz: air.corner * 1000,
+    gainDb: (air.sparkle / 100) * 3,
+    q: air.slope === 12 ? 1.2 : 0.7,
+  };
+}
+
+/** Output dim attenuation in dB (0 when the module is off). */
+export function dimDb(output: AdvancedParams["limiter"]["output"]): number {
+  if (!output.on) return 0;
+  return Number(output.dim);
+}
+
+/** Fixed variable-Q band centre (band 1 = 31 Hz … band 10 = 16 kHz). */
+export function variableQFrequency(band: number): number {
+  const index = Math.min(MS_BANDS.length, Math.max(1, Math.round(band))) - 1;
+  return MS_BANDS[index];
+}
+
 /** Latency target in ms for the operator-facing mode selector. */
 export function latencyTargetMs(mode: LatencyMode): number {
   return mode === "low" ? 10 : mode === "max" ? 96 : 32;
@@ -713,12 +1079,24 @@ export function advancedIsNeutral(adv: AdvancedParams): boolean {
     !adv.restoration.src.on &&
     !adv.restoration.drr.on &&
     !adv.restoration.harmonics.on &&
+    !adv.restoration.dc.on &&
+    !adv.restoration.interference.on &&
+    !adv.restoration.calibration.on &&
     !adv.leveling.agcProfile.on &&
     !adv.leveling.gate.on &&
     !adv.leveling.crest.on &&
     !adv.leveling.drift.on &&
     !adv.leveling.dualAnchor.on &&
     !adv.leveling.transient.on &&
+    !adv.leveling.peakRms.on &&
+    !adv.leveling.releaseShape.on &&
+    !adv.leveling.silence.on &&
+    !adv.psycho.masking.on &&
+    !adv.psycho.apr.on &&
+    !adv.psycho.fatigue.on &&
+    !adv.psycho.spectralBalance.on &&
+    !adv.psycho.harshness.on &&
+    !adv.psycho.lowAlign.on &&
     !adv.compliance.dual.on &&
     !adv.compliance.lra.on &&
     !adv.compliance.truePeak.on &&
@@ -731,23 +1109,39 @@ export function advancedIsNeutral(adv: AdvancedParams): boolean {
     !adv.spatial.signature.on &&
     !adv.spatial.correlation.on &&
     !adv.spatial.headroom.on &&
+    !adv.spatial.monoFold.on &&
+    !adv.spatial.scopeCal.on &&
+    !adv.spatial.ambience.on &&
     !adv.eq.dynamic.on &&
     !adv.eq.crossover.on &&
     !adv.eq.spectral.on &&
     !adv.eq.presence.on &&
     !adv.eq.deess.on &&
     !adv.eq.notch.on &&
+    !adv.eq.shelves.on &&
+    !adv.eq.variableQ.on &&
+    !adv.eq.mudGate.on &&
+    !adv.eq.air.on &&
     !adv.limiter.window.on &&
     !adv.limiter.harmonics.on &&
     !adv.limiter.mpx.on &&
     !adv.limiter.preEmph.on &&
     !adv.limiter.codec.on &&
     !adv.limiter.undershoot.on &&
+    !adv.limiter.stageSolo.on &&
+    !adv.limiter.isp.on &&
+    !adv.limiter.bitDepth.on &&
+    !adv.limiter.output.on &&
     !adv.intelligence.autoSource.on &&
     !adv.intelligence.morph.on &&
     !adv.intelligence.gainStaging.on &&
     !adv.intelligence.safety.on &&
-    !adv.intelligence.remote.on
+    !adv.intelligence.remote.on &&
+    !adv.intelligence.autosave.on &&
+    !adv.intelligence.hardware.on &&
+    !adv.intelligence.users.on &&
+    !adv.intelligence.redundancy.on &&
+    !adv.intelligence.updates.on
   );
 }
 

@@ -25,6 +25,7 @@ import {
   LevelingSuite,
   Limiter31Suite,
   PrecisionEqSuite,
+  PsychoSuite,
   RestorationSuite,
   SpatialSuite,
 } from "@/components/console/AdvancedPanels";
@@ -1937,6 +1938,9 @@ export function ProcessingTab({
         )}
         {section === "limiter" && (
           <Limiter31Suite params={params} setParams={setParams} />
+        )}
+        {section === "limiter" && (
+          <PsychoSuite params={params} setParams={setParams} />
         )}
         {section === "output" && (
           <ComplianceSuite params={params} setParams={setParams} />

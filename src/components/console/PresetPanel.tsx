@@ -154,7 +154,7 @@ function MorphSection({
           onPointerUp={commit}
           onKeyUp={commit}
           aria-label="Morph position between presets"
-          className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#e5a93b]"
+          className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#00e0ff]"
         />
         <select
           aria-label="Morph source B"
@@ -593,7 +593,7 @@ export function PresetPanel({
                   className={cn(
                     "rounded-lg border px-3 py-2.5 text-left transition-all",
                     active
-                      ? "border-signal bg-signal/15 shadow-[0_0_16px_rgba(229,169,59,0.28)]"
+                      ? "border-signal bg-signal/15 shadow-[0_0_16px_rgba(0,224,255,0.28)]"
                       : "border-border/60 bg-muted/40 hover:border-signal/40 hover:bg-accent",
                   )}
                 >

@@ -151,7 +151,7 @@ export function ConsoleSidebar({
                   </span>
                 )}
                 {!collapsed && active && (
-                  <span className="mt-1.5 ml-auto size-1.5 shrink-0 rounded-full bg-signal shadow-[0_0_8px_rgba(229,169,59,0.9)]" />
+                  <span className="mt-1.5 ml-auto size-1.5 shrink-0 rounded-full bg-signal shadow-[0_0_8px_rgba(0,224,255,0.9)]" />
                 )}
               </button>
             </li>

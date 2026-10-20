@@ -57,8 +57,12 @@ import {
 import {
   DEFAULT_ADVANCED,
   agcProfileEnvelope,
+  airShelf,
   channelTrim,
   codecLowpassHz,
+  dcHighpassHz,
+  dimDb,
+  mainsNotchHz,
   crestDriveDb,
   gateGainTarget,
   harmonicMix,
@@ -444,6 +448,9 @@ export class AudioEngine {
   private restHarmShaper!: WaveShaperNode;
   private restHarmWet!: GainNode;
   private restHarmDry!: GainNode;
+  private dcHpf!: BiquadFilterNode;
+  private mainsNotch!: BiquadFilterNode;
+  private airShelf!: BiquadFilterNode;
   private presenceHi!: BiquadFilterNode;
   private brillianceHi!: BiquadFilterNode;
   private preEmphShelf!: BiquadFilterNode;
@@ -807,6 +814,14 @@ export class AudioEngine {
     this.restShelf.type = "highshelf";
     this.restShelf.frequency.value = 8500;
     this.restShelf.gain.value = 0;
+    this.dcHpf = ctx.createBiquadFilter();
+    this.dcHpf.type = "allpass";
+    this.dcHpf.frequency.value = 30;
+    this.dcHpf.Q.value = 0.707;
+    this.mainsNotch = ctx.createBiquadFilter();
+    this.mainsNotch.type = "allpass";
+    this.mainsNotch.frequency.value = 50;
+    this.mainsNotch.Q.value = 20;
     this.restHarmShaper = ctx.createWaveShaper();
     this.restHarmShaper.oversample = "4x";
     this.restHarmDry = g(1);
@@ -832,7 +847,9 @@ export class AudioEngine {
     this.inputGain.connect(this.restNotch1);
     this.restNotch1.connect(this.restNotch2);
     this.restNotch2.connect(this.restLp);
-    this.restLp.connect(this.restShelf);
+    this.restLp.connect(this.dcHpf);
+    this.dcHpf.connect(this.mainsNotch);
+    this.mainsNotch.connect(this.restShelf);
     const restOut = g(1);
     this.restShelf.connect(this.restHarmDry);
     this.restHarmDry.connect(restOut);
@@ -893,14 +910,20 @@ export class AudioEngine {
     this.brillianceHi.frequency.value = 11000;
     this.brillianceHi.Q.value = 0.7;
     this.brillianceHi.gain.value = 0;
+    this.airShelf = ctx.createBiquadFilter();
+    this.airShelf.type = "highshelf";
+    this.airShelf.frequency.value = 16000;
+    this.airShelf.Q.value = 0.7;
+    this.airShelf.gain.value = 0;
     phaseOut.connect(this.presenceHi);
     this.presenceHi.connect(this.brillianceHi);
+    this.brillianceHi.connect(this.airShelf);
 
     // ── 6-band EQ (wet/dry crossfade) ──
     this.eqWetPre = g(1);
     this.eqDry = g(0);
-    this.brillianceHi.connect(this.eqWetPre);
-    this.brillianceHi.connect(this.eqDry);
+    this.airShelf.connect(this.eqWetPre);
+    this.airShelf.connect(this.eqDry);
     let eqNode: AudioNode = this.eqWetPre;
     for (const band of [
       { freq: 60, type: "lowshelf" as BiquadFilterType, q: 0.7 },
@@ -1518,10 +1541,16 @@ export class AudioEngine {
     const set = (key: string, param: AudioParam | undefined, value: number, tc?: number) =>
       this.setNum(key, param, value, tc);
 
-    set("input", this.inputGain.gain, dbToGain(params.inputGainDb));
+    const adv: AdvancedParams = params.advanced ?? DEFAULT_ADVANCED;
+    // input calibration offset is a trim memory, applied with the input gain
+    const calibration = adv.restoration.calibration;
+    set(
+      "input",
+      this.inputGain.gain,
+      dbToGain(params.inputGainDb + (calibration.on ? calibration.offsetDb : 0)),
+    );
 
     // ── v3.1 restoration ──
-    const adv: AdvancedParams = params.advanced ?? DEFAULT_ADVANCED;
     const nr = adv.restoration.nr;
     const nrDepth = nr.mode === "light" ? 4 : nr.mode === "medium" ? 8 : 14;
     set(
@@ -1554,6 +1583,12 @@ export class AudioEngine {
     };
     setNotch(this.restNotch1, notch.notch1, notch.on);
     setNotch(this.restNotch2, notch.notch2, notch.on);
+    const dcHz = dcHighpassHz(adv.restoration.dc);
+    this.dcHpf.type = dcHz > 0 ? "highpass" : "allpass";
+    set("rest.dc", this.dcHpf.frequency, dcHz > 0 ? dcHz : 30);
+    const mains = mainsNotchHz(adv.restoration.interference);
+    this.mainsNotch.type = mains > 0 ? "notch" : "allpass";
+    set("rest.mains", this.mainsNotch.frequency, mains || 50);
     const rest = adv.restoration.harmonics;
     set("rest.harm", this.restHarmWet.gain, rest.on ? (rest.mix / 100) * 0.4 : 0, 0.02);
     set("rest.harm.dry", this.restHarmDry.gain, rest.on ? 1 : 1, 0.02);
@@ -1575,6 +1610,10 @@ export class AudioEngine {
       pres.airType === "open" ? 14000 : pres.airType === "sparkle" ? 12000 : 10500,
     );
     set("brill.g", this.brillianceHi.gain, pres.on ? presGain.brillianceDb : 0);
+    const air = airShelf(adv.eq.air);
+    set("air.f", this.airShelf.frequency, air.freqHz);
+    set("air.q", this.airShelf.Q, air.q);
+    set("air.g", this.airShelf.gain, air.gainDb);
 
     // HPF: 12/24/36/48 dB/oct as 1–4 Butterworth sections in cascade.
     // Sections beyond the selected slope go allpass (unity magnitude) so the
@@ -1831,7 +1870,11 @@ export class AudioEngine {
     set("side.lp", this.sideLp?.frequency, Math.max(40, lm || 120), 0.01);
     this.crossfade("side", this.sideWet, this.sideDry, lm > 0);
 
-    set("output", this.outputGain.gain, dbToGain(params.outputGainDb));
+    set(
+      "output",
+      this.outputGain.gain,
+      dbToGain(params.outputGainDb + dimDb(adv.limiter.output)),
+    );
     this.applyMonitorGain();
 
     // safety mute state survives parameter re-application
@@ -1843,7 +1886,9 @@ export class AudioEngine {
     this.setLowLatency(params.psy.latency === "low" || adv.latency === "low");
     // perceptual tilt: slope = treble-minus-bass pivot 1 kHz, split evenly
     // across the two shelves. Off / 0 dB = exact unity.
-    const slope = params.psy.tilt.on ? params.psy.tilt.slopeDb : 0;
+    const slope =
+      (params.psy.tilt.on ? params.psy.tilt.slopeDb : 0) +
+      (adv.eq.shelves.on ? adv.eq.shelves.tiltDb : 0);
     set("tilt.lo", this.tiltLo?.gain, -slope / 2, 0.03);
     set("tilt.hi", this.tiltHi?.gain, slope / 2, 0.03);
     // every other psy module is STORED (parameter-complete, no DSP yet):
