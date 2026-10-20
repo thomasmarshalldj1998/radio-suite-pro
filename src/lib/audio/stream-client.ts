@@ -14,7 +14,7 @@
  *  - browser: `fetch` with a streaming body (Chromium). Works against a
  *    server that answers the preflight; reported as such in the UI.
  *
- * Retries use exponential backoff (1 s → 30 s) because a live source should
+ * Retries use a 1→2→4→8→15→30 s ladder with ±15 % jitter because a live source should
  * reconnect itself while the operator is looking at something else. Audio
  * produced while offline is dropped, never queued: a stream that catches up
  * is worse than a stream with a gap.
@@ -132,9 +132,26 @@ export function streamTitle(artist: string, title: string): string {
   return line.slice(0, 250);
 }
 
-/** Exponential backoff: 1 s, 2 s, 4 s … capped at 30 s. */
-export function retryDelayMs(attempt: number): number {
-  return Math.min(30_000, 1000 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
+/** Reconnect ladder: 1 s, 2 s, 4 s, 8 s, 15 s, then 30 s. */
+export const RETRY_STEPS_MS = [1000, 2000, 4000, 8000, 15_000, 30_000] as const;
+
+/** App-level keep-alive: re-announce metadata while live, every 30 s. */
+export const KEEPALIVE_MS = 30_000;
+
+/** Deterministic step for a given attempt (1-based). */
+export function retryDelayBaseMs(attempt: number): number {
+  const index = Math.max(0, Math.min(RETRY_STEPS_MS.length - 1, Math.floor(attempt) - 1));
+  return RETRY_STEPS_MS[index];
+}
+
+/**
+ * Reconnect delay with ±15 % jitter so a server restart does not make every
+ * source reconnect in lockstep. `rand` is injectable for tests.
+ */
+export function retryDelayMs(attempt: number, rand: number = Math.random()): number {
+  const base = retryDelayBaseMs(attempt);
+  const jitter = Math.max(-1, Math.min(1, rand * 2 - 1)) * 0.15;
+  return Math.round(Math.min(30_000, Math.max(500, base * (1 + jitter))));
 }
 
 export function streamTransport(): StreamTransport {
@@ -255,6 +272,7 @@ export class StreamClient {
   private unsubBridge: (() => void) | null = null;
   private retryTimer: number | null = null;
   private countdownTimer: number | null = null;
+  private keepAliveTimer: number | null = null;
   /** Dual-mount policy for this session (null before start). */
   private router: DualMountFailover | null = null;
   /** Identifies the current open attempt, so stale failures are ignored. */
@@ -288,7 +306,7 @@ export class StreamClient {
     return this.state;
   }
 
-  /** TX buffer defaults: 500 ms in hand, 500 ms pre-buffer, limits on. */
+  /** TX buffer defaults: 500 ms in hand, 400 ms pre-buffer, limits on. */
   configureTx(patch: Partial<TxSettings>): void {
     this.tx.configure(patch);
   }
@@ -311,7 +329,7 @@ export class StreamClient {
     this.cfg = cfg;
     this.stopped = false;
     // A new session starts with an empty queue; the configured pre-buffer
-    // (500 ms by default) holds the first frames so the server is not fed a
+    // (400 ms by default) holds the first frames so the server is not fed a
     // burst. Settings survive start() — only the queue is cleared.
     this.tx.reset();
     const router = new DualMountFailover(cfg.mount, cfg.backupMount);
@@ -376,6 +394,7 @@ export class StreamClient {
       // title has to be announced again or listeners see an empty field.
       if (this.metadata) window.signalpath?.stream?.metadata(this.metadata);
       this.router?.recordLive(Date.now(), mount);
+      this.startKeepAlive();
       this.update({
         status: "live",
         attempt: 0,
@@ -418,6 +437,7 @@ export class StreamClient {
     if (attemptId !== undefined && attemptId !== this.attemptId) return;
     this.unsubBridge?.();
     this.unsubBridge = null;
+    this.clearKeepAlive();
     this.writer = null;
     // Audio produced while the socket was down is stale — never send it late.
     this.tx.reset();
@@ -478,6 +498,8 @@ export class StreamClient {
   setMetadata(text: string) {
     this.metadata = text;
     window.signalpath?.stream?.metadata(text);
+    // A title that arrives after the socket went live still needs the timer.
+    if (this.state.status === "live") this.startKeepAlive();
   }
 
   /** The title a fresh connection will announce. */
@@ -513,9 +535,29 @@ export class StreamClient {
     }
   }
 
+  /**
+   * Keep the source session warm and the listener title fresh. Icecast drops
+   * a source that goes quiet; a metadata frame every 30 s is cheap and the
+   * desktop socket also sets TCP keep-alive.
+   */
+  private startKeepAlive() {
+    this.clearKeepAlive();
+    if (!this.metadata) return;
+    this.keepAliveTimer = window.setInterval(() => {
+      if (this.stopped || this.state.status !== "live" || !this.metadata) return;
+      window.signalpath?.stream?.metadata(this.metadata);
+    }, KEEPALIVE_MS);
+  }
+
+  private clearKeepAlive() {
+    if (this.keepAliveTimer !== null) window.clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = null;
+  }
+
   private clearTimers() {
     if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
     if (this.countdownTimer !== null) window.clearInterval(this.countdownTimer);
+    this.clearKeepAlive();
     this.retryTimer = null;
     this.countdownTimer = null;
   }

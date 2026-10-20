@@ -115,6 +115,7 @@ class StreamSource {
       "Ice-Genre": cfg.genre || "various",
       "Ice-Public": "0",
       Accept: "*/*",
+      Connection: "keep-alive",
     };
     if (cfg.bitrateKbps > 0) headers["Ice-Bitrate"] = String(cfg.bitrateKbps);
     if (this.metaint) headers["icy-metaint"] = String(this.metaint);
@@ -147,6 +148,12 @@ class StreamSource {
         return;
       }
       this.req = req;
+      // Live audio: Nagle would batch frames and add latency, and an idle
+      // source socket is dropped by some servers without TCP keep-alive.
+      req.on("socket", (socket) => {
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true, 30_000);
+      });
       this.timer = setTimeout(() => {
         if (generation !== this.generation) return;
         req.destroy(new Error("timed out waiting for the server"));

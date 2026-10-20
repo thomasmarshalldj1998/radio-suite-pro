@@ -22,6 +22,16 @@ export interface Badge<Code extends string = TxBadge | RxBadge> {
   tone: BadgeTone;
 }
 
+/** Panel glyphs for the TX badge: ● LIVE, ○ CONNECTING, ⦸ RECONNECTING,
+ *  ⚠ WARN, ✗ FAILED. */
+export const TX_BADGE_GLYPH: Record<TxBadge, string> = {
+  LIVE: "●",
+  CONNECTING: "○",
+  RECONNECTING: "⦸",
+  WARN: "⚠",
+  FAILED: "✗",
+};
+
 /**
  * Map a transport state to its badge. `warning` promotes a live socket to
  * WARN when the protective limits have engaged (dropped audio, pacing

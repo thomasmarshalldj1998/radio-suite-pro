@@ -145,6 +145,16 @@ export const FORMATS: BroadcastFormat[] = [
     use: "Minimum-bandwidth AAC+ mobile feed",
   },
   {
+    id: "mp3-96",
+    label: "MP3 @ 96 kbps",
+    bitrateKbps: 96,
+    sampleRateKhz: 44.1,
+    channels: "Joint Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "Low-bandwidth MP3 / mobile fallback",
+  },
+  {
     id: "mp3-192",
     label: "MP3 @ 192 kbps",
     bitrateKbps: 192,
@@ -173,6 +183,16 @@ export const FORMATS: BroadcastFormat[] = [
     mimes: ["audio/mpeg"],
     ext: "mp3",
     use: "Talk radio / weak-network fallback",
+  },
+  {
+    id: "mp3-256",
+    label: "MP3 @ 256 kbps",
+    bitrateKbps: 256,
+    sampleRateKhz: 44.1,
+    channels: "Stereo",
+    mimes: ["audio/mpeg"],
+    ext: "mp3",
+    use: "High-quality MP3 without the 320 kbps cost",
   },
   {
     id: "opus-96",
@@ -313,8 +333,10 @@ export type JsFormat = "mp3" | "flac" | "ogg" | "aac" | "aac-lc" | "opus";
 export const JS_ENCODED: Record<string, JsFormat> = {
   "opus-96": "opus",
   "mp3-320": "mp3",
+  "mp3-256": "mp3",
   "mp3-192": "mp3",
   "mp3-128": "mp3",
+  "mp3-96": "mp3",
   "mp3-64": "mp3",
   "aac-lc-192": "aac-lc",
   "aac-lc-128": "aac-lc",
@@ -326,6 +348,37 @@ export const JS_ENCODED: Record<string, JsFormat> = {
 
 export function jsFormatFor(formatId: string): JsFormat | null {
   return JS_ENCODED[formatId] ?? null;
+}
+
+/**
+ * Typical encoder latency and lookahead per profile, ms. These are codec
+ * class figures for planning a live link, not a measurement of this machine;
+ * the panel labels them as typical. MPX is the composite generator itself.
+ */
+export const CODEC_TIMING: Record<string, { latencyMs: number; lookaheadMs: number }> = {
+  "mp3-320": { latencyMs: 45, lookaheadMs: 25 },
+  "mp3-256": { latencyMs: 45, lookaheadMs: 25 },
+  "mp3-192": { latencyMs: 45, lookaheadMs: 25 },
+  "mp3-128": { latencyMs: 45, lookaheadMs: 25 },
+  "mp3-96": { latencyMs: 45, lookaheadMs: 25 },
+  "mp3-64": { latencyMs: 55, lookaheadMs: 30 },
+  "aac-lc-192": { latencyMs: 45, lookaheadMs: 20 },
+  "aac-lc-128": { latencyMs: 45, lookaheadMs: 20 },
+  "heaac2-64": { latencyMs: 60, lookaheadMs: 30 },
+  "heaac2-48": { latencyMs: 60, lookaheadMs: 30 },
+  "opus-96": { latencyMs: 20, lookaheadMs: 7 },
+  "vorbis-128": { latencyMs: 40, lookaheadMs: 20 },
+  "flac-16": { latencyMs: 10, lookaheadMs: 0 },
+  "hls-abr": { latencyMs: 60, lookaheadMs: 30 },
+  "mpx-flac-192": { latencyMs: 2, lookaheadMs: 0 },
+};
+
+/** Timing for a profile; unknown relay profiles report no estimate. */
+export function formatTiming(f: BroadcastFormat): {
+  latencyMs: number;
+  lookaheadMs: number;
+} | null {
+  return CODEC_TIMING[f.id] ?? null;
 }
 
 export class StreamEncoder {

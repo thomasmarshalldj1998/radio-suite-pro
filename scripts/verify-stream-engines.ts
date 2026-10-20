@@ -22,8 +22,14 @@ import {
   type RxFrame,
 } from "../src/lib/audio/stream-rx";
 import { AdaptiveClock } from "../src/lib/audio/stream-shared-clock";
-import { retryDelayMs } from "../src/lib/audio/stream-client";
-import { rxBadge, txBadge } from "../src/lib/audio/stream-status";
+import {
+  KEEPALIVE_MS,
+  RETRY_STEPS_MS,
+  retryDelayBaseMs,
+  retryDelayMs,
+} from "../src/lib/audio/stream-client";
+import { TX_BADGE_GLYPH, rxBadge, txBadge } from "../src/lib/audio/stream-status";
+import { CODEC_TIMING, FORMATS, formatTiming } from "../src/lib/audio/encoder";
 
 let passed = 0;
 let failed = 0;
@@ -45,14 +51,38 @@ const tick = (ms: number, bitrate: number) =>
 
 console.log("\n1 · TX defaults");
 check(DEFAULT_TX_SETTINGS.bufferMs === 500, "TX buffer defaults to 500 ms");
-check(DEFAULT_TX_SETTINGS.prebufferMs === 500, "TX pre-buffer defaults to 500 ms");
+check(DEFAULT_TX_SETTINGS.prebufferMs === 400, "TX pre-buffer defaults to 400 ms");
 check(DEFAULT_TX_SETTINGS.protectiveLimits, "TX protective limits default on");
 check(bytesToMs(320_000, 320) === 8000, "320 kB at 320 kbps is 8 s", `${bytesToMs(320_000, 320)} ms`);
 check(msToBytes(500, 320) === 20_000, "500 ms at 320 kbps is 20 kB");
 check(bytesToMs(1000, 0) === 0, "unknown bitrate yields no duration estimate");
-check(retryDelayMs(1) === 1000, "first reconnect waits 1 s");
-check(retryDelayMs(2) === 2000, "second reconnect waits 2 s");
-check(retryDelayMs(99) === 30_000, "backoff caps at 30 s");
+check(retryDelayMs(1, 0.5) === 1000, "first reconnect waits 1 s");
+check(retryDelayMs(2, 0.5) === 2000, "second reconnect waits 2 s");
+check(retryDelayMs(5, 0.5) === 15_000, "the fifth step is 15 s");
+check(retryDelayMs(99, 0.5) === 30_000, "backoff caps at 30 s");
+check(RETRY_STEPS_MS.join(",") === "1000,2000,4000,8000,15000,30000", "the reconnect ladder is 1→2→4→8→15→30 s");
+check(retryDelayBaseMs(3) === 4000, "the base step is readable without jitter");
+{
+  const low = retryDelayMs(4, 0);
+  const high = retryDelayMs(4, 1);
+  check(low >= 6800 && high <= 9200, "each step carries ±15 % jitter", `${low}–${high} ms`);
+  check(low !== high, "jitter varies the delay");
+}
+check(KEEPALIVE_MS === 30_000, "the keep-alive interval is 30 s");
+check(
+  ["mp3-96", "mp3-128", "mp3-192", "mp3-256", "mp3-320"].every((id) =>
+    FORMATS.some((f) => f.id === id),
+  ),
+  "the MP3 ladder covers 96/128/192/256/320",
+);
+check(
+  FORMATS.every((f) => CODEC_TIMING[f.id] != null),
+  "every delivery profile publishes latency and lookahead",
+);
+check(
+  formatTiming(FORMATS.find((f) => f.id === "opus-96")!)!.lookaheadMs < 10,
+  "Opus lookahead is under 10 ms",
+);
 
 /* ── 2 · pre-buffer ───────────────────────────────────────────────────── */
 
@@ -62,17 +92,17 @@ console.log("\n2 · TX pre-buffer");
   const bitrate = 320;
   let writes = 0;
   let firstWriteAt = -1;
-  for (let i = 0; i < 24; i += 1) {
+  for (let i = 0; i < 19; i += 1) {
     writes += q.enqueue(tick(20, bitrate), bitrate).length;
     if (writes > 0 && firstWriteAt < 0) firstWriteAt = i + 1;
   }
-  check(writes === 0, "no audio is written before 500 ms is accumulated");
+  check(writes === 0, "no audio is written before 400 ms is accumulated");
   check(q.snapshot().priming, "queue reports pre-buffering");
-  check(Math.abs(q.snapshot().bufferedMs - 480) < 0.01, "480 ms is held", `${q.snapshot().bufferedMs.toFixed(2)} ms`);
+  check(Math.abs(q.snapshot().bufferedMs - 380) < 0.01, "380 ms is held", `${q.snapshot().bufferedMs.toFixed(2)} ms`);
 
   const out = q.enqueue(tick(20, bitrate), bitrate);
   const total = out.reduce((n, c) => n + c.byteLength, 0);
-  check(out.length === 1 && total === Math.round(msToBytes(500, bitrate)), "the pre-buffer flushes as one write at 500 ms");
+  check(out.length === 1 && total === Math.round(msToBytes(400, bitrate)), "the pre-buffer flushes as one write at 400 ms");
   check(!q.snapshot().priming, "pre-buffering ends when the target is met");
   check(q.snapshot().bufferedMs === 0, "a flush empties the queue");
 
@@ -291,6 +321,13 @@ console.log("\n7 · RX lock and badges");
   check(txBadge("retrying").code === "RECONNECTING", "retrying TX reads RECONNECTING");
   check(txBadge("offline").code === "FAILED", "offline TX reads FAILED");
   check(txBadge("idle").tone === "idle", "idle is not shown as a failure");
+  check(
+    ["LIVE", "CONNECTING", "RECONNECTING", "WARN", "FAILED"].every((code) =>
+      Boolean(TX_BADGE_GLYPH[code as keyof typeof TX_BADGE_GLYPH]),
+    ),
+    "every TX badge has its glyph",
+  );
+  check(TX_BADGE_GLYPH.LIVE === "●" && TX_BADGE_GLYPH.FAILED === "✗", "glyphs match the panel spec");
 
   check(
     rxBadge({ locked: false, silent: false, dropping: true, drifting: true }).code === "DROPPING",

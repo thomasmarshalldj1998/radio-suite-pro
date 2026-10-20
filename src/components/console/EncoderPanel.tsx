@@ -15,6 +15,7 @@ import {
   formatBytes,
   FORMATS,
   formatProfile,
+  formatTiming,
   formatUptime,
   isCodecSupported,
   jsFormatFor,
@@ -35,7 +36,7 @@ import {
   streamTitle,
   type StreamClientState,
 } from "@/lib/audio/stream-client";
-import { txBadge } from "@/lib/audio/stream-status";
+import { TX_BADGE_GLYPH, txBadge } from "@/lib/audio/stream-status";
 import type { ProcessorParams } from "@/lib/audio/params";
 import type { ProgramEncoder } from "@/lib/audio/encoder";
 import {
@@ -980,7 +981,7 @@ export function EncoderPanel({
                             : "bg-panel-mut",
                     )}
                   />
-                  Uplink · {uplinkBadge.code}
+                  {TX_BADGE_GLYPH[uplinkBadge.code]} {uplinkBadge.code}
                 </span>
               )}
             </div>
@@ -1217,6 +1218,16 @@ export function EncoderPanel({
             </Select>
           </Field>
         </div>
+        {activeFmt && (
+          <p className="text-readout mt-2 text-[10px] text-muted-foreground">
+            {(() => {
+              const timing = formatTiming(activeFmt);
+              return timing
+                ? `Latency ~${timing.latencyMs} ms · lookahead ${timing.lookaheadMs} ms · ${activeFmt.use}`
+                : `Relay profile · ${activeFmt.use}`;
+            })()}
+          </p>
+        )}
         <p className="mt-3 text-[10px] leading-4 text-muted-foreground">
           MP3, AAC and OGG encode locally in a WASM worker; HLS has no browser
           packager and is stored as a relay target for your transcoder. The

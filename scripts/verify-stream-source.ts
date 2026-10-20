@@ -100,8 +100,15 @@ console.log("\n2 · stream helpers");
   check(streamTitle("", "Title") === "Title", "a missing artist leaves the title alone");
   check(streamTitle("Artist", "") === "Artist", "a missing title leaves the artist alone");
   check(streamTitle("A", "B").length <= 250, "the title is capped at 250 chars");
-  check(retryDelayMs(1) === 1000 && retryDelayMs(2) === 2000 && retryDelayMs(3) === 4000, "backoff doubles from one second");
-  check(retryDelayMs(9) === 30000, "backoff is capped at thirty seconds");
+  check(
+    retryDelayMs(1, 0.5) === 1000 &&
+      retryDelayMs(2, 0.5) === 2000 &&
+      retryDelayMs(3, 0.5) === 4000 &&
+      retryDelayMs(4, 0.5) === 8000 &&
+      retryDelayMs(5, 0.5) === 15000,
+    "backoff follows 1→2→4→8→15 s",
+  );
+  check(retryDelayMs(9, 0.5) === 30000, "backoff is capped at thirty seconds");
   check(MAX_BACKLOG_BYTES >= 1024 * 1024, "the backlog cap allows a real socket buffer", `${MAX_BACKLOG_BYTES} bytes`);
 }
 

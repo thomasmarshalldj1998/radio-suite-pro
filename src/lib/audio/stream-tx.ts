@@ -5,8 +5,9 @@
  * codec) while a source socket wants a steady flow at the configured
  * bitrate. This buffer does two jobs:
  *
- *  - pre-buffer: hold the first `prebufferMs` of audio before the socket is
- *    fed, so the first seconds are not a burst the server has to absorb;
+ *  - pre-buffer: hold the first `prebufferMs` (400 ms by default) of audio
+ *    before the socket is fed, so the first seconds are not a burst the
+ *    server has to absorb and listeners can start immediately;
  *  - pacing: in steady state, hold `bufferMs` of audio in hand and release
  *    only the excess, which keeps the write rate tied to the encode rate
  *    instead of to the shell's IPC scheduling.
@@ -28,7 +29,7 @@ export interface TxSettings {
 
 export const DEFAULT_TX_SETTINGS: TxSettings = {
   bufferMs: 500,
-  prebufferMs: 500,
+  prebufferMs: 400,
   protectiveLimits: true,
 };
 
