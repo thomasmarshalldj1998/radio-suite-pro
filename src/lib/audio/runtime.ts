@@ -1,4 +1,5 @@
 import type { EncoderStats, ProgramEncoder } from "./encoder";
+import { IDLE_TX, type StreamClient, type StreamClientState } from "./stream-client";
 
 /**
  * Module-scope broadcast runtime. The encoder must survive tab switches
@@ -26,6 +27,10 @@ export interface StreamRuntime {
   connects: number;
   /** Last connection failure (message + time) — cleared on success or manual stop. */
   lastError: { message: string; at: number } | null;
+  /** Upload side of the broadcast: nil until a source connection starts. */
+  source: StreamClient | null;
+  /** Last reported upload state (live / retrying / offline + byte counts). */
+  tx: StreamClientState;
 }
 
 const runtime: StreamRuntime = {
@@ -36,6 +41,8 @@ const runtime: StreamRuntime = {
   takes: [],
   connects: 0,
   lastError: null,
+  source: null,
+  tx: { ...IDLE_TX },
 };
 
 const listeners = new Set<() => void>();

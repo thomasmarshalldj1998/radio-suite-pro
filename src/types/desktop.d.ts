@@ -68,10 +68,55 @@ export interface SignalpathAudio {
   onCommand: (cb: (cmd: SignalpathAudioCommand) => void) => () => void;
 }
 
+export interface StreamOpenConfig {
+  protocol: string;
+  server: string;
+  port: number;
+  mount: string;
+  username: string;
+  password: string;
+  contentType: string;
+  metaint?: number;
+  name?: string;
+  description?: string;
+  genre?: string;
+  bitrateKbps?: number;
+  metadata?: string;
+  secure?: boolean;
+}
+
+export interface StreamTransportState {
+  status: "idle" | "connecting" | "live" | "offline" | "ended";
+  sent: number;
+  dropped: number;
+  error: string | null;
+}
+
+export interface SignalpathStream {
+  available: boolean;
+  open: (cfg: StreamOpenConfig) => Promise<{
+    ok: boolean;
+    error?: string;
+    sent?: number;
+  }>;
+  write: (bytes: Uint8Array) => void;
+  metadata: (text: string) => void;
+  close: () => Promise<{ ok: boolean }>;
+  stats: () => Promise<{
+    status: string;
+    sent: number;
+    dropped: number;
+    uptimeMs: number;
+    error: string | null;
+  } | null>;
+  onState: (cb: (state: StreamTransportState) => void) => () => void;
+}
+
 export interface SignalpathBridge {
   platform?: string;
   udp?: SignalpathUdp;
   audio?: SignalpathAudio;
+  stream?: SignalpathStream;
 }
 
 declare global {

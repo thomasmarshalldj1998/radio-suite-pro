@@ -145,6 +145,7 @@ interface WorkerOutMsg {
  */
 export class JsStreamEncoder implements ProgramEncoder {
   onStats: ((stats: EncoderStats) => void) | null = null;
+  onChunk: ((bytes: Uint8Array) => void) | null = null;
   readonly mime: string;
   readonly ext: string;
 
@@ -240,6 +241,7 @@ export class JsStreamEncoder implements ProgramEncoder {
       this.chunks.push(bytes);
       this.totalBytes += bytes.byteLength;
       this.chunkCount += 1;
+      this.onChunk?.(bytes);
       const now = performance.now();
       if (this.active && now - this.lastReportAt >= 500) {
         // bits per ms = kbps

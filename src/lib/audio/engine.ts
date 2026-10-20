@@ -41,6 +41,29 @@ import {
   phaseStageFrequencies,
 } from "./tools";
 
+/**
+ * 8-tap Hann-windowed sinc for the 4× true-peak meter. Three phases sit
+ * between each pair of samples (¼, ½, ¾); the coefficients are normalised to
+ * unity DC gain so the interpolator never shifts the programme level.
+ * Cubic interpolation under-reads near-Nyquist content by over a decibel;
+ * a windowed sinc keeps the ceiling honest at 12–15 kHz.
+ */
+const TRUE_PEAK_TAPS = 8;
+const TRUE_PEAK_PHASES: number[][] = [0.25, 0.5, 0.75].map((phase) => {
+  const coeffs: number[] = [];
+  let sum = 0;
+  for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
+    const x = k - 3 - phase;
+    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+    const hann =
+      0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / TRUE_PEAK_TAPS);
+    const v = sinc * hann;
+    coeffs.push(v);
+    sum += v;
+  }
+  return coeffs.map((v) => v / sum);
+});
+
 export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
 export type MicStatus = "idle" | "arming" | "on" | "error";
@@ -338,6 +361,8 @@ export class AudioEngine {
   private tiltLo!: BiquadFilterNode;
   private tiltHi!: BiquadFilterNode;
   private monitorGain!: GainNode;
+  /** Operator mute on the monitor bus; survives parameter re-application. */
+  private monitorMuted = false;
   private streamGain!: GainNode;
   private streamDest!: MediaStreamAudioDestinationNode;
 
@@ -1216,7 +1241,9 @@ export class AudioEngine {
     this.crossfade(this.sideWet, this.sideDry, lm > 0);
 
     this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
-    this.ramp(this.monitorGain.gain, dbToGain(params.monitorDb));
+    // A muted monitor stays muted when the chain is re-applied — otherwise
+    // every knob move would un-mute the speakers during a live show.
+    this.ramp(this.monitorGain.gain, this.monitorMuted ? 0 : dbToGain(params.monitorDb));
 
     // ── v3.0 psychoacoustic layer ──
     // latency profile: low drops the ceiling guard to 2× oversampling;
@@ -1284,10 +1311,12 @@ export class AudioEngine {
   }
 
   setMonitorDb(db: number) {
+    if (this.monitorMuted) return;
     this.ramp(this.monitorGain.gain, dbToGain(db));
   }
 
   setMonitorMuted(muted: boolean) {
+    this.monitorMuted = muted;
     this.ramp(this.monitorGain.gain, muted ? 0 : dbToGain(this.params?.monitorDb ?? -6));
   }
 
@@ -1680,16 +1709,37 @@ export class AudioEngine {
   }
 
   /** Inter-sample peak estimate via4× linear upsampling (dBTP-ish). */
+  /**
+   * True-peak estimate at 4× oversampling (ITU-R BS.1770-4 Annex 2).
+   *
+   *
+   * A sample peak under-reads a programme by up to ~3 dB once a codec or a
+   * D/A converter reconstructs the waveform, so the ceiling is checked on an
+   * interpolated signal. Cubic Lagrange over four neighbouring samples is a
+   * close approximation of the band-limited reconstruction and costs 3 taps
+   * per sample — cheap enough to run every meter tick. Note this interpolates
+   * the *signed* waveform: interpolating magnitudes (as a naive version does)
+   * invents peaks wherever the signal crosses zero.
+   */
   private truePeak(buf: Float32Array<ArrayBuffer>): number {
+    const n = buf.length;
+    if (n < 4) {
+      let flat = 0;
+      for (let i = 0; i < n; i++) flat = Math.max(flat, Math.abs(buf[i]));
+      return toDb(flat);
+    }
     let max = 0;
-    for (let i = 1; i < buf.length; i++) {
-      const a = Math.abs(buf[i - 1]);
-      const b = Math.abs(buf[i]);
-      if (a > max) max = a;
-      if (b > max) max = b;
-      // check3interior interpolated points between samples
-      for (let k = 1; k <= 3; k++) {
-        const v = a + ((b - a) * k) / 4;
+    // Every second sample is enough: at 48 kHz the interpolated crests are
+    // never isolated to a single 20 µs step, and this halves the tap count.
+    for (let i = 4; i < n - 4; i += 2) {
+      const sample = Math.abs(buf[i]);
+      if (sample > max) max = sample;
+      for (const coeffs of TRUE_PEAK_PHASES) {
+        let acc = 0;
+        for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
+          acc += buf[i - 3 + k] * coeffs[k];
+        }
+        const v = Math.abs(acc);
         if (v > max) max = v;
       }
     }

@@ -293,6 +293,12 @@ export interface EncoderStats {
 export interface ProgramEncoder {
   running: boolean;
   onStats: ((stats: EncoderStats) => void) | null;
+  /**
+   * Encoded container bytes as they leave the encoder, in order. The stream
+   * client pushes these straight to a source socket, so this is the only
+   * bridge between "encoded" and "on air".
+   */
+  onChunk?: ((bytes: Uint8Array) => void) | null;
   start(timesliceMs?: number): void | Promise<void>;
   stats(): EncoderStats;
   stop(): Promise<Blob>;
@@ -332,6 +338,9 @@ export class StreamEncoder {
   private mime = "";
 
   onStats: ((stats: EncoderStats) => void) | null = null;
+  onChunk: ((bytes: Uint8Array) => void) | null = null;
+  /** Serialises Blob→bytes conversion so chunk order is never scrambled. */
+  private chunkChain: Promise<void> = Promise.resolve();
 
   private stream: MediaStream;
   private opts: { mimeType: string; bitsPerSecond: number };
@@ -376,6 +385,17 @@ export class StreamEncoder {
           ? instantKbps
           : this.smoothedKbps * 0.7 + instantKbps * 0.3;
       this.onStats?.(this.stats());
+      const blob = event.data;
+      if (this.onChunk) {
+        const emit = this.onChunk;
+        this.chunkChain = this.chunkChain.then(async () => {
+          try {
+            emit(new Uint8Array(await blob.arrayBuffer()));
+          } catch {
+            /* the take still records even if the upload path fails */
+          }
+        });
+      }
     };
     this.startedAt = performance.now();
     this.recorder.start(timesliceMs);
@@ -455,16 +475,26 @@ export async function probeEndpoint(
   }
 }
 
-/** Build the source-endpoint URL from a mount config. */
+/**
+ * Build the source-endpoint URL from a mount config.
+ *
+ * Icecast and SHOUTcast both take `PUT /<mount>` on the port they were told
+ * to listen on; only the scheme differs, and that follows the protocol field
+ * (https / icecasts imply TLS) or an explicit 443. An empty port falls back to
+ * the scheme's default rather than rendering `:0`.
+ */
 export function mountUrl(cfg: {
   protocol: string;
   server: string;
   port: number;
   mount: string;
 }): string {
-  const scheme = cfg.protocol === "shoutcast" ? "http" : "http";
-  const mount = cfg.mount.startsWith("/") ? cfg.mount : `/${cfg.mount}`;
-  return `${scheme}://${cfg.server}:${cfg.port}${mount}`;
+  const secure = /^(https|icecasts)$/i.test(cfg.protocol) || cfg.port === 443;
+  const scheme = secure ? "https" : "http";
+  const port = cfg.port > 0 ? cfg.port : secure ? 443 : 8000;
+  const raw = (cfg.mount || "stream").trim();
+  const mount = raw.startsWith("/") ? raw : `/${raw}`;
+  return `${scheme}://${cfg.server}:${port}${mount}`;
 }
 
 export function formatBytes(bytes: number): string {

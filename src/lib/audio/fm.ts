@@ -192,6 +192,7 @@ export function subscribeComposite(cb: (l: Float32Array) => void): () => void {
  */
 export class MpxStreamEncoder implements ProgramEncoder {
   onStats: ((stats: EncoderStats) => void) | null = null;
+  onChunk: ((bytes: Uint8Array) => void) | null = null;
   readonly ext = "flac";
   readonly mime = "audio/flac";
 
@@ -262,6 +263,7 @@ export class MpxStreamEncoder implements ProgramEncoder {
       this.chunks.push(bytes);
       this.totalBytes += bytes.byteLength;
       this.chunkCount += 1;
+      this.onChunk?.(bytes);
       const now = performance.now();
       if (this.active && now - this.lastReportAt >= 500) {
         const inst = (this.totalBytes * 8) / Math.max(now - this.startedAt, 1);

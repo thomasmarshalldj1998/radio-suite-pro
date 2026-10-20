@@ -27,7 +27,16 @@ import {
 } from "@/lib/audio/encoder";
 import { JsStreamEncoder } from "@/lib/audio/js-encoder";
 import { MpxStreamEncoder } from "@/lib/audio/fm";
+import {
+  IDLE_TX,
+  STREAM_METAINT,
+  StreamClient,
+  isStreamableContainer,
+  streamTitle,
+  type StreamClientState,
+} from "@/lib/audio/stream-client";
 import type { ProcessorParams } from "@/lib/audio/params";
+import type { ProgramEncoder } from "@/lib/audio/encoder";
 import {
   EMPTY_SLOT,
   OUTPUT_COUNT,
@@ -153,6 +162,82 @@ function Field({
 }
 
 /**
+ * Open a source socket for an encoder that is already producing bytes.
+ *
+ * Module scope on purpose: the connection lifecycle is not render state, and
+ * keeping the impure bits (Date.now, sockets, retry timers) out of the
+ * component body keeps the deck's render path pure.
+ */
+function startSourceUplink({
+  encoder,
+  mime,
+  label,
+  form,
+  url,
+  title,
+  log,
+}: {
+  encoder: ProgramEncoder;
+  mime: string;
+  label: string;
+  form: MountForm;
+  url: string;
+  title: string;
+  log: (entry: {
+    kind: "session" | "error";
+    title: string;
+    detail?: string;
+  }) => Promise<unknown>;
+}): StreamClient | null {
+  if (!isStreamableContainer(mime)) {
+    toast.warning("Uplink skipped — this container can't be a source", {
+      description:
+        "The take is still recorded locally. Pick an MP3, Ogg/Opus, AAC or FLAC profile to go live.",
+    });
+    patchRuntime({
+      tx: { ...getRuntime().tx, status: "offline", transport: "none" },
+    });
+    return null;
+  }
+  const client = new StreamClient();
+  let lastStatus = "";
+  client.onState = (s: StreamClientState) => {
+    patchRuntime({ tx: s });
+    if (s.status === lastStatus) return;
+    lastStatus = s.status;
+    if (s.status === "live") {
+      void log({
+        kind: "session",
+        title: `Source connected — ${form.name}`,
+        detail: `${label} → ${url}`,
+      });
+    } else if (s.status === "retrying") {
+      void log({
+        kind: "error",
+        title: "Source connection lost — retrying",
+        detail: s.error ?? "unknown error",
+      });
+    }
+  };
+  encoder.onChunk = (bytes) => client.push(bytes);
+  if (title) client.setMetadata(title);
+  void client.start({
+    protocol: form.protocol,
+    server: form.server,
+    port: form.port,
+    mount: form.mount,
+    username: form.username || "source",
+    password: form.password,
+    contentType: mime,
+    metaint: STREAM_METAINT,
+    name: form.name || "Signalpath",
+    bitrateKbps: form.bitrateKbps,
+    secure: /^https/i.test(form.protocol) || form.port === 443,
+  });
+  return client;
+}
+
+/**
  * Self-subscribing output-signal chip — only this chip re-renders on meter
  * ticks, keeping the whole TX deck out of the hot path.
  */
@@ -226,6 +311,8 @@ export function EncoderPanel({
   const [rotAuto, setRotAuto] = useState(false);
   const txtInputRef = useRef<HTMLInputElement>(null);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
+  /** Last ICY title pushed this session — re-sent after a reconnect. */
+  const lastMetaRef = useRef("");
   const [probing, setProbing] = useState(false);
   const [saving, setSaving] = useState(false);
   const loadedRef = useRef(false);
@@ -238,6 +325,7 @@ export function EncoderPanel({
     takes: getRuntime().takes,
     connects: getRuntime().connects,
     lastError: getRuntime().lastError,
+    tx: getRuntime().tx,
   }));
   useEffect(
     () =>
@@ -250,6 +338,7 @@ export function EncoderPanel({
           takes: r.takes,
           connects: r.connects,
           lastError: r.lastError,
+          tx: r.tx,
         });
       }),
     [],
@@ -290,6 +379,22 @@ export function EncoderPanel({
 
   const supported = supportedCodecs();
   const currentCodec = codecById(form.codec);
+  /**
+   * Uplink truth. `onAir` means the encoder is running; only a live source
+   * socket actually puts the programme on a server. The deck says both.
+   */
+  const tx = rt.tx;
+  const uplinkLabel = !rt.onAir
+    ? null
+    : tx.status === "live"
+      ? "Live"
+      : tx.status === "connecting"
+        ? "Connecting"
+        : tx.status === "retrying"
+          ? `Retry ${Math.max(1, Math.ceil((tx.nextRetryMs ?? 0) / 1000))}s`
+          : tx.transport === "none"
+            ? "Local only"
+            : "Uplink down";
   const url = isConfigured(form) ? mountUrl(form) : "";
   const uptime = rt.onAir ? liveUptimeMs : rt.stats.elapsedMs;
 
@@ -388,6 +493,18 @@ export function EncoderPanel({
         });
         enc.onStats = (stats: EncoderStats) => patchRuntime({ stats });
         await enc.start();
+        {
+          const source = startSourceUplink({
+            encoder: enc,
+            mime: enc.mime,
+            label: targetFmt.label,
+            form,
+            url,
+            title: lastMetaRef.current || streamTitle(npArtist, npTitle),
+            log: pushLog,
+          });
+          if (source) patchRuntime({ source });
+        }
         patchRuntime({
           encoder: enc,
           onAir: true,
@@ -446,6 +563,18 @@ export function EncoderPanel({
       });
       encoder.onStats = (stats: EncoderStats) => patchRuntime({ stats });
       encoder.start(1000);
+      {
+        const source = startSourceUplink({
+          encoder,
+          mime: currentCodec.mimeType,
+          label: currentCodec.label,
+          form,
+          url,
+          title: lastMetaRef.current || streamTitle(npArtist, npTitle),
+          log: pushLog,
+        });
+        if (source) patchRuntime({ source });
+      }
       patchRuntime({
         encoder,
         onAir: true,
@@ -490,6 +619,10 @@ export function EncoderPanel({
       patchRuntime({ onAir: false });
       return;
     }
+    const uplink = runtime.source;
+    const sentBytes = runtime.tx.sentBytes;
+    await uplink?.stop();
+    patchRuntime({ source: null, tx: { ...IDLE_TX } });
     const pre = runtime.encoder.stats();
     const blob = await runtime.encoder.stop();
     addTake({
@@ -505,7 +638,9 @@ export function EncoderPanel({
     void pushLog({
       kind: "session",
       title: `OFF AIR — ${form.name}`,
-      detail: `${formatBytes(pre.bytes)} encoded over ${formatUptime(pre.elapsedMs)}`,
+      detail: `${formatBytes(pre.bytes)} encoded over ${formatUptime(pre.elapsedMs)}${
+        sentBytes > 0 ? ` · ${formatBytes(sentBytes)} sent to the server` : ""
+      }`,
     });
     toast.success("Broadcast stopped", {
       description: "The take was saved to the library below.",
@@ -588,6 +723,8 @@ export function EncoderPanel({
     }
     try {
       await setNowPlaying(npTitle.trim(), npArtist.trim() || undefined);
+      lastMetaRef.current = streamTitle(npArtist, npTitle);
+      getRuntime().source?.setMetadata(lastMetaRef.current);
       toast.success("Metadata sent to listeners");
     } catch {
       toast.error("Could not send metadata");
@@ -629,6 +766,8 @@ export function EncoderPanel({
     if (!entry) return;
     try {
       await setNowPlaying(entry.title, entry.artist || undefined);
+      lastMetaRef.current = streamTitle(entry.artist ?? "", entry.title);
+      getRuntime().source?.setMetadata(lastMetaRef.current);
       toast.success(
         `Metadata sent — ${entry.artist ? `${entry.artist} · ` : ""}${entry.title}`,
       );
@@ -638,6 +777,18 @@ export function EncoderPanel({
     }
   };
   const sendRotation = () => void sendEntry(rotIdx);
+
+  // Guard against a reload or window close while the programme is on air —
+  // the encoder dies with the document, and a listener would hear silence.
+  useEffect(() => {
+    if (!rt.onAir) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [rt.onAir]);
 
   // auto-rotation every 30 s (ref indirection keeps the interval stable)
   const sendRef = useRef<() => void>(() => {});
@@ -675,11 +826,44 @@ export function EncoderPanel({
               <p
                 className={cn(
                   "text-xl leading-6 font-bold tracking-[0.08em] uppercase",
-                  rt.onAir ? "text-[#ff3b30]" : "text-panel-mut",
+                  rt.onAir && tx.status === "live"
+                    ? "text-[#ff3b30]"
+                    : rt.onAir
+                      ? "text-amber-led"
+                      : "text-panel-mut",
                 )}
               >
-                {rt.onAir ? "On air" : "Off air"}
+                {rt.onAir ? (tx.status === "live" ? "On air" : "Encoding") : "Off air"}
               </p>
+              {uplinkLabel && (
+                <span
+                  className={cn(
+                    "mt-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-[0.1em] uppercase",
+                    tx.status === "live"
+                      ? "border-meter-ok/40 bg-meter-ok/10 text-meter-ok"
+                      : tx.status === "retrying" || tx.status === "connecting"
+                        ? "border-amber-led/45 bg-amber-led/10 text-amber-led"
+                        : "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+                  )}
+                  title={
+                    tx.error ??
+                    "Source socket state — audio only reaches listeners while this reads Live"
+                  }
+                >
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "size-1.5 rounded-full",
+                      tx.status === "live"
+                        ? "bg-meter-ok"
+                        : tx.status === "retrying" || tx.status === "connecting"
+                          ? "animate-pulse bg-amber-led"
+                          : "bg-meter-hot",
+                    )}
+                  />
+                  Uplink · {uplinkLabel}
+                </span>
+              )}
             </div>
           </div>
 
@@ -713,7 +897,11 @@ export function EncoderPanel({
                 value: form.bitrateKbps ? String(form.bitrateKbps) : "—",
                 sub: form.bitrateKbps ? "kbps" : undefined,
               },
-              { label: "Sent", value: formatBytes(rt.stats.bytes) },
+              {
+                label: "Sent",
+                value: formatBytes(tx.sentBytes || rt.stats.bytes),
+                sub: tx.sentBytes > 0 ? "to server" : "encoded",
+              },
               {
                 label: "Reconnects",
                 value: String(Math.max(0, rt.connects - 1)),
@@ -770,7 +958,11 @@ export function EncoderPanel({
           <OutPresence />
           <p className="min-w-0 flex-1 truncate text-[10px] text-panel-mut">
             {rt.onAir
-              ? `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
+              ? tx.status === "live"
+                ? `Sending ${codecLabel} @ ${form.bitrateKbps} kbps → ${url}`
+                : tx.status === "retrying"
+                  ? `Source socket down — attempt ${tx.attempt} failed, retrying. ${formatBytes(tx.droppedBytes)} dropped so far.`
+                  : `Encoding ${codecLabel} @ ${form.bitrateKbps} kbps — no source socket yet.`
               : "The encoder keeps running across tabs until you stop it."}
           </p>
         </div>

@@ -303,6 +303,9 @@ const fakeCtx = {
 
 interface EngineInternals {
   buildGraph: (ctx: unknown) => void;
+  truePeak: (buf: Float32Array) => number;
+  monitorGain: FakeNode;
+  setMonitorMuted: (muted: boolean) => void;
   hpfStages: FakeNode[];
   eqFilters: FakeNode[];
   clipShaper: FakeNode;
@@ -390,6 +393,73 @@ engine.apply({
 });
 check(internals.eqFilters[3].type === "notch", "a band's shape is applied to its filter", internals.eqFilters[3].type);
 check(internals.eqFilters[4].type === "allpass", "a bypassed band goes magnitude-neutral", internals.eqFilters[4].type);
+
+// true peak: 4× oversampling must find crests between samples, and must not
+// invent them where the signal crosses zero
+{
+  const fs = 48000;
+  const amp = 0.5;
+  const n = 4096;
+  const sine = (phaseOffset: number, freq = 997) => {
+    const buf = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      buf[i] = amp * Math.sin((2 * Math.PI * freq * i) / fs + phaseOffset);
+    }
+    return buf;
+  };
+  const expected = 20 * Math.log10(amp);
+  const peaks = [0, 0.4, 0.9, 1.4, 2.2].map((phase) => internals.truePeak(sine(phase)));
+  const worst = Math.max(...peaks.map((p) => Math.abs(p - expected)));
+  check(
+    peaks.every((p) => p >= expected - 0.05 && p <= expected + 0.35),
+    "4× true peak recovers the crest at every phase",
+    `worst ${worst.toFixed(2)} dB off`,
+  );
+  const samplePeak = (buf: Float32Array) => {
+    let m = 0;
+    for (const v of buf) m = Math.max(m, Math.abs(v));
+    return 20 * Math.log10(m);
+  };
+  // fs/4 with a 45° phase offset puts every sample at 0.707 × the crest, so a
+  // sample-peak meter under-reads by 3 dB and only interpolation finds the top.
+  const missPeak = sine(Math.PI / 4, fs / 4);
+  const tpMiss = internals.truePeak(missPeak);
+  const spMiss = samplePeak(missPeak);
+  check(
+    spMiss < expected - 2.5 && tpMiss > spMiss + 2,
+    "4× true peak finds a crest the samples miss",
+    `sample ${spMiss.toFixed(2)} → true ${tpMiss.toFixed(2)} dB`,
+  );
+  check(
+    Math.abs(tpMiss - expected) < 0.6,
+    "and lands within half a dB of the real amplitude",
+    `${Math.abs(tpMiss - expected).toFixed(2)} dB off`,
+  );
+  const offset = sine(1.4);
+  check(
+    internals.truePeak(offset) >= samplePeak(offset) - 0.01,
+    "true peak is never below the sample peak",
+    `${internals.truePeak(offset).toFixed(2)} vs ${samplePeak(offset).toFixed(2)} dB`,
+  );
+  const silence = new Float32Array(n);
+  check(internals.truePeak(silence) <= -100, "silence reads as silence", `${internals.truePeak(silence).toFixed(1)} dB`);
+}
+
+// monitor mute survives a parameter re-apply
+engine.apply(DEFAULT_PARAMS);
+engine.setMonitorMuted(true);
+check(internals.monitorGain.gain.value === 0, "monitor mute zeroes the monitor bus");
+engine.apply({ ...DEFAULT_PARAMS, inputGainDb: 3 });
+check(
+  internals.monitorGain.gain.value === 0,
+  "re-applying the chain does not un-mute the monitor",
+);
+engine.setMonitorMuted(false);
+check(
+  near(internals.monitorGain.gain.value, dbToGain(DEFAULT_PARAMS.monitorDb)),
+  "un-muting restores the configured monitor level",
+  `${internals.monitorGain.gain.value.toFixed(3)}`,
+);
 
 // dual-window AGC: fast peak window ahead of the slow leveller
 engine.apply(DEFAULT_PARAMS);

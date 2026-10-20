@@ -20,6 +20,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { UdpEndpoint } = require("./udp-link.cjs");
+const { StreamSource } = require("./stream-source.cjs");
 
 const DIST = path.join(__dirname, "..", "dist-desktop");
 const isMac = process.platform === "darwin";
@@ -95,6 +96,55 @@ ipcMain.handle("mpx:close", (event, id) => {
   links.get(which)?.close();
   links.delete(which);
   return { ok: true };
+});
+
+/* ── Icecast source: the renderer's one way out to a stream server ─────── */
+
+/**
+ * One source connection for the console. The renderer owns retry policy; the
+ * shell owns the socket, the Basic auth and the ICY metadata framing.
+ * @type {InstanceType<typeof StreamSource> | null}
+ */
+let streamSource = null;
+
+function streamLink() {
+  if (!streamSource) {
+    streamSource = new StreamSource({
+      onState: (state) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("stream:state", state);
+        }
+      },
+    });
+  }
+  return streamSource;
+}
+
+ipcMain.handle("stream:open", async (event, cfg) => {
+  if (!fromApp(event)) return { ok: false, error: "not the console window" };
+  return streamLink().open(cfg);
+});
+
+ipcMain.on("stream:write", (event, bytes) => {
+  if (!fromApp(event)) return;
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return;
+  streamLink().write(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+});
+
+ipcMain.on("stream:metadata", (event, text) => {
+  if (!fromApp(event)) return;
+  streamLink().setMetadata(typeof text === "string" ? text : "");
+});
+
+ipcMain.handle("stream:close", (event) => {
+  if (!fromApp(event)) return { ok: false };
+  streamSource?.close();
+  return { ok: true };
+});
+
+ipcMain.handle("stream:stats", (event) => {
+  if (!fromApp(event)) return null;
+  return streamSource?.stats() ?? null;
 });
 
 /* ── audio devices: console ⇄ Devices window ──────────────────────────── */
@@ -301,7 +351,10 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
-  app.on("before-quit", closeAllLinks);
+  app.on("before-quit", () => {
+    closeAllLinks();
+    streamSource?.close();
+  });
 
   // A broadcast console quits when its last window closes — on every OS.
   app.on("window-all-closed", () => app.quit());

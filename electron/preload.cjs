@@ -23,6 +23,12 @@ ipcRenderer.on("audio:command", (_event, cmd) => {
   for (const handler of audioCommandHandlers) handler(cmd);
 });
 
+/** Source-connection state broadcasts (connecting / live / offline / ended). */
+const streamStateHandlers = new Set();
+ipcRenderer.on("stream:state", (_event, state) => {
+  for (const handler of streamStateHandlers) handler(state);
+});
+
 contextBridge.exposeInMainWorld("signalpath", {
   platform: process.platform,
   udp: {
@@ -46,6 +52,26 @@ contextBridge.exposeInMainWorld("signalpath", {
       dataHandlers.add(cb);
       return () => {
         dataHandlers.delete(cb);
+      };
+    },
+  },
+  /**
+   * Icecast source socket. The renderer encodes; this sends. A browser PUT
+   * with an Authorization header cannot pass CORS against an Icecast server,
+   * so the desktop shell is the only client that can actually go on air.
+   */
+  stream: {
+    available: true,
+    open: (cfg) => ipcRenderer.invoke("stream:open", cfg),
+    write: (bytes) => ipcRenderer.send("stream:write", bytes),
+    metadata: (text) => ipcRenderer.send("stream:metadata", text),
+    close: () => ipcRenderer.invoke("stream:close"),
+    stats: () => ipcRenderer.invoke("stream:stats"),
+    onState: (cb) => {
+      if (typeof cb !== "function") return () => {};
+      streamStateHandlers.add(cb);
+      return () => {
+        streamStateHandlers.delete(cb);
       };
     },
   },

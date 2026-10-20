@@ -56,6 +56,20 @@ after a gesture.
 - **Workflow** — A/B morph (0–100 % interpolation of every numeric parameter),
   preset library, and auto-speech sensing that switches the AGC and all five
   band compressors to a faster profile while voice is detected.
+- **Stream TX (source uplink)** — the encoder's container bytes are pushed to
+  a real Icecast/SHOUTcast source socket: `PUT /<mount>` with Basic auth,
+  `Ice-Name`/`Ice-Bitrate` headers and `icy-metaint` ICY metadata framing
+  (`StreamTitle='…'`, re-sent automatically after a reconnect). Encoded
+  chunks reach the socket through `onChunk` on every encoder (MediaRecorder,
+  the WASM workers and the MPX FLAC feed). In the desktop build the socket
+  lives in `electron/stream-source.cjs` behind the `signalpath.stream`
+  bridge, because a browser `PUT` with an Authorization header cannot pass an
+  Icecast CORS preflight; the web build falls back to a streaming `fetch`
+  body where the server allows it. Drops reconnect with exponential backoff
+  (1 s → 30 s), audio produced while offline is discarded rather than queued,
+  and the deck reports live / retrying / local-only plus bytes sent and
+  dropped. Containers Icecast cannot take (M4A/WebM) record locally and say so
+  instead of pretending to be on air.
 - **Streaming & automation** — codec preview through MP3 64/128/320, AAC-HE 64k
   and Opus 96k (band-limited monitor plus a 3.2 ms pre-echo comb), with
   auto-codec HF compensation that limits the top band harder and backs off the
