@@ -29,38 +29,40 @@ const TAP_WORKLET = `
 class SignalpathPcmTap extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.parts = [[], []];
-    this.have = 0;
+    // One batch pair, allocated at load. process() only copies samples.
+    this.l = new Float32Array(${BATCH});
+    this.r = new Float32Array(${BATCH});
+    this.fill = 0;
   }
   process(inputs) {
     const input = inputs[0];
-    if (input && input.length > 0 && input[0] && input[0].length > 0) {
-      const l = input[0];
-      const r = input.length > 1 && input[1] ? input[1] : input[0];
-      this.parts[0].push(new Float32Array(l));
-      this.parts[1].push(new Float32Array(r));
-      this.have += l.length;
-      if (this.have >= ${BATCH}) {
-        const a = concat(this.parts[0], this.have);
-        const b = concat(this.parts[1], this.have);
-        this.parts = [[], []];
-        this.have = 0;
-        this.port.postMessage({ l: a, r: b }, [a.buffer, b.buffer]);
+    if (!input || input.length === 0 || !input[0] || input[0].length === 0) return true;
+    const l = input[0];
+    const r = input.length > 1 && input[1] ? input[1] : input[0];
+    // Copy sample by sample: no views, no arrays, no growth. The message is
+    // cloned synchronously at postMessage, so the staging buffers are reused
+    // by the very next block and the audio thread never allocates.
+    for (let i = 0; i < l.length; i++) {
+      this.l[this.fill] = l[i];
+      this.r[this.fill] = r[i];
+      this.fill += 1;
+      if (this.fill === ${BATCH}) {
+        this.port.postMessage({ l: this.l, r: this.r });
+        this.fill = 0;
       }
     }
     return true;
   }
 }
-function concat(parts, total) {
-  const out = new Float32Array(total);
-  let o = 0;
-  for (let i = 0; i < parts.length; i++) { out.set(parts[i], o); o += parts[i].length; }
-  return out;
-}
 try { registerProcessor("${TAP_NAME}", SignalpathPcmTap); } catch (e) { /* already registered */ }
 `;
 
 type TapCallback = (l: Float32Array, r: Float32Array) => void;
+
+/** The generated tap module — exported so the RT-safety suite can inspect it. */
+export function pcmTapWorkletSource(): string {
+  return TAP_WORKLET;
+}
 
 /**
  * Attach a silent PCM tap to the program bus. Returns a cleanup function.

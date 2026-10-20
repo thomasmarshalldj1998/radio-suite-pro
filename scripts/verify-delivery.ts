@@ -21,6 +21,7 @@ import {
   LookaheadLimiter,
   limiterWorkletSource,
 } from "../src/lib/audio/limiter";
+import { createSpscRing } from "../src/lib/audio/spsc-ring";
 import {
   DualMountFailover,
   mountCandidates,
@@ -179,11 +180,11 @@ console.log("\n1 · lookahead limiter");
     };
     process: (inputs: Float32Array[][], outputs: Float32Array[][]) => boolean;
   }
-  const posted: { gr?: number }[] = [];
+  const posted: unknown[] = [];
   const scope = globalThis as unknown as Record<string, unknown>;
   let registered = "";
   scope.AudioWorkletProcessor = class {
-    port = { postMessage: (msg: unknown) => posted.push(msg as { gr?: number }), onmessage: null };
+    port = { postMessage: (msg: unknown) => posted.push(msg), onmessage: null };
   };
   scope.sampleRate = SR;
   scope.registerProcessor = (name: string) => {
@@ -191,7 +192,9 @@ console.log("\n1 · lookahead limiter");
   };
   const Processor = new Function(
     `${source}\nreturn SignalpathLimiterProcessor;`,
-  )() as new () => WorkletNode;
+  )() as new (options?: {
+    processorOptions?: { meter?: SharedArrayBuffer };
+  }) => WorkletNode;
   const node = new Processor();
   node.port.onmessage?.({ data: { ceilingDb: -1, releaseMs: 60, holdMs: 0, lookaheadMs: 5 } });
   const inL = new Float32Array(128).fill(0.99);
@@ -200,7 +203,16 @@ console.log("\n1 · lookahead limiter");
   for (let i = 0; i < 64; i++) node.process([[inL, inL]], [[outL, outR]]);
   check(registered === LIMITER_WORKLET_NAME, "the generated module registers its processor");
   check(peak(outL) <= Math.pow(10, -1 / 20) + 1e-4, "the running worklet holds the ceiling", `${(20 * Math.log10(peak(outL))).toFixed(2)} dBFS`);
-  check((posted.at(-1)?.gr ?? 0) > 0, "the worklet posts gain reduction", `${(posted.at(-1)?.gr ?? 0).toFixed(2)} dB`);
+  const fallbackGr = posted.at(-1);
+  check(typeof fallbackGr === "number" && fallbackGr > 0, "the worklet posts gain reduction as a bare number", `${Number(fallbackGr ?? 0).toFixed(2)} dB`);
+
+  // With a shared meter ring the callback writes the slot and posts nothing.
+  const meter = createSpscRing(16);
+  const withRing = new Processor({ processorOptions: { meter: meter.sab } });
+  const before = posted.length;
+  for (let i = 0; i < 64; i++) withRing.process([[inL, inL]], [[outL, outR]]);
+  check(meter.ring.latest() > 0, "the meter ring receives gain reduction", `${meter.ring.latest().toFixed(2)} dB`);
+  check(posted.length === before, "a ring meter posts no messages from the audio thread");
 }
 
 /* ── 5 · dual mount ────────────────────────────────────────────────────── */

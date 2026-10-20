@@ -54,6 +54,7 @@ import {
   LIMITER_WORKLET_NAME,
   limiterWorkletSource,
 } from "./limiter";
+import { createSpscRing, type SpscRing } from "./spsc-ring";
 import {
   DEFAULT_ADVANCED,
   agcProfileEnvelope,
@@ -463,6 +464,8 @@ export class AudioEngine {
   private crestDrive = 0;
   /** Lookahead worklet — null when the platform has no AudioWorklet. */
   private workletLimiter: AudioWorkletNode | null = null;
+  /** Lock-free meter slot written by the limiter worklet, read by snapshots. */
+  private limiterMeter: SpscRing | null = null;
   private workletReady = false;
   private workletGr = 0;
   private workletConfig = "";
@@ -696,6 +699,7 @@ export class AudioEngine {
     }
     this.written.clear();
     this.workletLimiter = null;
+    this.limiterMeter = null;
     this.clearGraphRefs();
   }
 
@@ -708,6 +712,7 @@ export class AudioEngine {
   private async loadLimiterWorklet(ctx: AudioContext): Promise<void> {
     this.workletReady = false;
     this.workletLimiter = null;
+    this.limiterMeter = null;
     if (!ctx.audioWorklet) return;
     let url = "";
     try {
@@ -1215,6 +1220,11 @@ export class AudioEngine {
     this.limNative.connect(limOut);
     if (this.workletReady) {
       try {
+        // SharedArrayBuffer is only present when the page is isolated; when
+        // it is, metering crosses threads through the ring instead of a
+        // postMessage object per report.
+        const meter =
+          typeof SharedArrayBuffer !== "undefined" ? createSpscRing(64) : null;
         const node = new AudioWorkletNode(ctx, LIMITER_WORKLET_NAME, {
           numberOfInputs: 1,
           numberOfOutputs: 1,
@@ -1222,11 +1232,14 @@ export class AudioEngine {
           channelCount: 2,
           channelCountMode: "explicit",
           channelInterpretation: "speakers",
+          processorOptions: meter ? { meter: meter.sab } : undefined,
         });
+        this.limiterMeter = meter?.ring ?? null;
         node.port.onmessage = (e: MessageEvent) => {
-          const data = e.data as { gr?: number };
-          if (typeof data?.gr === "number" && Number.isFinite(data.gr)) {
-            this.workletGr = Math.max(0, Math.min(60, data.gr));
+          const data = e.data as number | { gr?: number };
+          const gr = typeof data === "number" ? data : data?.gr;
+          if (typeof gr === "number" && Number.isFinite(gr)) {
+            this.workletGr = Math.max(0, Math.min(60, gr));
           }
         };
         this.limSum.connect(node);
@@ -2928,6 +2941,19 @@ export class AudioEngine {
       Math.max(0, -(comp?.reduction ?? 0));
     const agcOn = this.params?.agc.on ?? false;
 
+    if (this.limiterMeter) {
+      // Drain the meter ring at snapshot rate: the newest value wins, and the
+      // producer keeps free slots instead of counting drops forever.
+      let gr: number | null = this.limiterMeter.read();
+      let newest: number | null = null;
+      while (gr !== null) {
+        newest = gr;
+        gr = this.limiterMeter.read();
+      }
+      if (newest !== null && Number.isFinite(newest)) {
+        this.workletGr = Math.max(0, Math.min(60, newest));
+      }
+    }
     this.snapshotValue = {
       t: now,
       powered: true,

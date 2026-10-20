@@ -17,6 +17,8 @@
  * thread runs exactly the kernel the verification suite exercises.
  */
 
+import { SpscRing } from "./spsc-ring";
+
 export const LIMITER_WORKLET_NAME = "signalpath-limiter";
 
 export interface LimiterKernelConfig {
@@ -64,10 +66,15 @@ export class LookaheadLimiter {
   private reductionDb: number;
 
   // Monotonic queue of gain targets: values decrease front → back, so the
-  // front is the window minimum. Indices let the window expire by age.
-  private qVal: number[];
-  private qIdx: number[];
+  // front is the window minimum. Both rings are sized for the longest
+  // lookahead at construction; the audio thread never grows them. Absolute
+  // head/tail counters mean expiry is a pointer move, with no compaction.
+  private qVal: Float32Array;
+  private qIdx: Float64Array;
   private qHead: number;
+  private qTail: number;
+  private qCount: number;
+  private qCap: number;
 
   constructor(sampleRate = 48000) {
     this.sampleRate = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 48000;
@@ -80,17 +87,23 @@ export class LookaheadLimiter {
     this.gain = 1;
     this.holdLeft = 0;
     this.reductionDb = 0;
-    this.qVal = [];
-    this.qIdx = [];
-    this.qHead = 0;
-    // The delay line is allocated for the longest permitted lookahead once;
-    // reconfiguring only moves the read pointer, so processing never allocates.
+    // The delay line and the monotonic queue are allocated for the longest
+    // permitted lookahead once; reconfiguring only moves pointers, so
+    // processing never allocates or grows a container.
     // Literals on purpose: this class is stringified into the worklet module,
     // where no module-scope constant exists.
     this.maxLookahead = Math.max(1, Math.round(0.02 * this.sampleRate));
     const size = this.maxLookahead + 2;
     this.bufL = new Float32Array(size);
     this.bufR = new Float32Array(size);
+    // One live entry per sample in the window, plus headroom for the push
+    // before the expiry of the oldest entry.
+    this.qCap = this.maxLookahead + 4;
+    this.qVal = new Float32Array(this.qCap);
+    this.qIdx = new Float64Array(this.qCap);
+    this.qHead = 0;
+    this.qTail = 0;
+    this.qCount = 0;
     this.configure(-1, 60, 0, 2);
   }
 
@@ -127,24 +140,33 @@ export class LookaheadLimiter {
     return this.reductionDb;
   }
 
+  /** Live entries in the monotonic queue (fixed capacity, for tests). */
+  get queueDepth(): number {
+    return this.qCount;
+  }
+
+  get queueCapacity(): number {
+    return this.qCap;
+  }
+
   private pushTarget(target: number): void {
-    while (this.qVal.length > this.qHead && this.qVal[this.qVal.length - 1] >= target) {
-      this.qVal.pop();
-      this.qIdx.pop();
+    while (this.qCount > 0) {
+      const back = (this.qTail - 1) % this.qCap;
+      if (this.qVal[back] < target) break;
+      this.qTail -= 1;
+      this.qCount -= 1;
     }
-    this.qVal.push(target);
-    this.qIdx.push(this.total);
+    const slot = this.qTail % this.qCap;
+    this.qVal[slot] = target;
+    this.qIdx[slot] = this.total;
+    this.qTail += 1;
+    this.qCount += 1;
   }
 
   private expire(oldest: number): void {
-    while (this.qVal.length > this.qHead && this.qIdx[this.qHead] < oldest) {
+    while (this.qCount > 0 && this.qIdx[this.qHead % this.qCap] < oldest) {
       this.qHead += 1;
-    }
-    // The consumed prefix would otherwise grow without bound over a long show.
-    if (this.qHead > 1024) {
-      this.qVal = this.qVal.slice(this.qHead);
-      this.qIdx = this.qIdx.slice(this.qHead);
-      this.qHead = 0;
+      this.qCount -= 1;
     }
   }
 
@@ -170,8 +192,7 @@ export class LookaheadLimiter {
 
       this.pushTarget(target);
       this.expire(this.total - window);
-      const windowGain =
-        this.qVal.length > this.qHead ? this.qVal[this.qHead] : 1;
+      const windowGain = this.qCount > 0 ? this.qVal[this.qHead % this.qCap] : 1;
 
       if (windowGain < this.gain) {
         this.gain = windowGain;
@@ -205,12 +226,21 @@ export class LookaheadLimiter {
  */
 export function limiterWorkletSource(): string {
   return `
+const SpscRing = ${SpscRing.toString()};
 const LookaheadLimiter = ${LookaheadLimiter.toString()};
 class SignalpathLimiterProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
     this.lim = new LookaheadLimiter(sampleRate);
     this.blocks = 0;
+    // Metering is lock-free when the host supplies a SharedArrayBuffer: the
+    // audio callback writes one float, the UI reads it, no message objects.
+    try {
+      const sab = options && options.processorOptions && options.processorOptions.meter;
+      this.meter = sab ? new SpscRing(sab) : null;
+    } catch (e) {
+      this.meter = null;
+    }
     this.port.onmessage = (e) => {
       const d = e.data || {};
       if (typeof d.ceilingDb === "number") {
@@ -227,8 +257,10 @@ class SignalpathLimiterProcessor extends AudioWorkletProcessor {
     const outL = output[0];
     const outR = output.length > 1 ? output[1] : output[0];
     this.lim.process(inL, inR, outL, outR);
-    if ((this.blocks++ & 7) === 0) {
-      this.port.postMessage({ gr: this.lim.gainReductionDb });
+    if (this.meter) {
+      this.meter.write(this.lim.gainReductionDb);
+    } else if ((this.blocks++ & 7) === 0) {
+      this.port.postMessage(this.lim.gainReductionDb);
     }
     return true;
   }
