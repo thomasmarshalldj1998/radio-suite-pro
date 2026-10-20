@@ -2,23 +2,38 @@
  * Signalpath audio engine.
  *
  * Signal flow:
- *   source → inputGain → HPF ─┬─ input meters (L/R)
- *                              ├─ spectrum (pre)
- *                              └─ phase rotator (4-stage allpass cascade)
- *                                 → 6-band EQ → harmonic exciter (parallel)
- *                                 → dynamic EQ (3 subtractive bands)
- *                                 → program AGC (window-gated leveller)
- *                                 → 6-band multiband compressor (LR4,
- *                                    scaled by the Less–More macro)
- *                                 → loudness rider
- *                                 → de-esser (dynamic 6–10 kHz cut)
- *                                 → composite limiter → output gain
- *                                 → ceiling guard → M/S stereo width → duck
- *                                  ├─ monitor out (speakers)
- *                                  ├─ encoder send (MediaStream for Icecast)
- *                                  ├─ spectrum (post)
- *                                  ├─ sample-peak / true-peak meters (L/R)
- *                                  └─ K-weighted loudness (BS.1770, L/R)
+ *   source (mic | generator | file) → 2-channel program bus
+ *     → silence gate → failover crossfade → input trim
+ *     → HPF ─┬─ input meters (L/R)
+ *            ├─ spectrum (pre)
+ *            └─ phase rotator (4-stage allpass cascade)
+ *               → 6-band EQ → harmonic exciter (parallel)
+ *               → dynamic EQ (5 subtractive bands)
+ *               → program AGC (dual-window, window-gated leveller)
+ *               → 6-band multiband compressor (LR4)
+ *               → loudness rider
+ *               → de-esser (dynamic 6–10 kHz cut)
+ *               → composite limiter → output gain
+ *               → ceiling guard → M/S stereo width → tilt → duck
+ *                  ├─ monitor out (chosen speakers, setSinkId)
+ *                  ├─ encoder send (MediaStream for Icecast)
+ *                  ├─ spectrum (post)
+ *                  ├─ sample-peak / true-peak meters (L/R)
+ *                  └─ K-weighted loudness (BS.1770, L/R)
+ *
+ * The module is split by responsibility:
+ *   devices.ts  — enumeration, saved picks, loop/virtual-endpoint detection
+ *   measure.ts  — peaks, true peak, loudness windows, gating, correlation
+ *   engine.ts   — this file: the graph, the sources, the control loop
+ *
+ * Invariants this file is responsible for:
+ *   · exactly one program source feeds the bus at any time;
+ *   · the bus is always 2 channels, so a mono interface never leaves the
+ *     right meter (or the S-side of the matrix) silent;
+ *   · power cycling restores the program source — "running" with a dead
+ *     source is the one failure an operator cannot see from the meters;
+ *   · every node write goes through one ramp helper, so re-applying an
+ *     unchanged chain schedules no automation at all.
  */
 
 import { GlitchMonitor } from "./glitch";
@@ -40,39 +55,32 @@ import {
   densityProfile,
   phaseStageFrequencies,
 } from "./tools";
+import {
+  DEVICE_STORE,
+  listDevices,
+  parsePrefs,
+  reconcileSelection,
+  serializePrefs,
+  isFeedbackLoop,
+  isVirtualDevice,
+  type AudioDevice,
+} from "./devices";
+import {
+  LoudnessWindow,
+  correlationOf,
+  gatedIntegrated,
+  loudnessOf,
+  loudnessRange,
+  meanSquare,
+  peakDb,
+  truePeak as measureTruePeak,
+} from "./measure";
 
-/**
- * 8-tap Hann-windowed sinc for the 4× true-peak meter. Three phases sit
- * between each pair of samples (¼, ½, ¾); the coefficients are normalised to
- * unity DC gain so the interpolator never shifts the programme level.
- * Cubic interpolation under-reads near-Nyquist content by over a decibel;
- * a windowed sinc keeps the ceiling honest at 12–15 kHz.
- */
-const TRUE_PEAK_TAPS = 8;
-const TRUE_PEAK_PHASES: number[][] = [0.25, 0.5, 0.75].map((phase) => {
-  const coeffs: number[] = [];
-  let sum = 0;
-  for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
-    const x = k - 3 - phase;
-    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
-    const hann =
-      0.5 - 0.5 * Math.cos((2 * Math.PI * (k + 0.5)) / TRUE_PEAK_TAPS);
-    const v = sinc * hann;
-    coeffs.push(v);
-    sum += v;
-  }
-  return coeffs.map((v) => v / sum);
-});
+export type { AudioDevice } from "./devices";
 
 export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
 export type MicStatus = "idle" | "arming" | "on" | "error";
-
-/** One physical audio device, as listed by the OS. */
-export interface AudioDevice {
-  id: string;
-  label: string;
-}
 
 export interface MeterSnapshot {
   t: number;
@@ -95,7 +103,7 @@ export interface MeterSnapshot {
   /** Maximum sample peak since reset (dBFS) */
   samplePeakDb: number;
   correlation: number;
-  /** per-band GR (6), dynamic-EQ cut (3), AGC GR, limiter GR */
+  /** per-band GR (6), dynamic-EQ cut (5), AGC GR, limiter GR */
   gr: {
     bands: number[];
     deq: number[];
@@ -152,7 +160,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   measureMs: 0,
   samplePeakDb: -120,
   correlation: 1,
-  gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0], agc: 0, agcFast: 0, limiter: 0 },
+  gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0, 0, 0], agc: 0, agcFast: 0, limiter: 0 },
   agcWindow: { frozen: false, spreadDb: 0 },
   deessCut: 0,
   riderDb: 0,
@@ -174,20 +182,22 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   backupActive: false,
 };
 
-const METER_FLOOR = -120;
+/** One heavy measurement pass every N ms (true peak, loudness, blocks). */
+const HEAVY_BASE_MS = 40;
+/** Tail of the output buffer used for the true-peak estimate. */
+const TRUE_PEAK_WINDOW = 1024;
+/** Clip indicator hold (ms). */
+const CLIP_HOLD_MS = 600;
 
-function toDb(v: number): number {
-  const db = 20 * Math.log10(Math.max(Math.abs(v), 1e-12));
-  return db < METER_FLOOR ? METER_FLOOR : db;
-}
+/**
+ * A source switch fades the program bus out, rebuilds the source, and fades
+ * back in. Cutting a live feed at programme level is a click on air.
+ */
+const SOURCE_FADE_MS = 20;
 
-interface LufsPoint {
-  t: number;
-  ms: number;
-}
-
-/** Persisted I/O prefs: last input/output device + source. */
-const DEVICE_STORE = "signalpath.devices.v1";
+const stopStream = (stream: MediaStream) => {
+  for (const track of stream.getTracks()) track.stop();
+};
 
 export class AudioEngine {
   ctx: AudioContext | null = null;
@@ -219,9 +229,10 @@ export class AudioEngine {
 
   private raf = 0;
   private frame = 0;
-  private notifyAcc = 0;
+  private lastHeavyAt = 0;
+  private heavyIntervalMs = HEAVY_BASE_MS;
 
-  private lufsPoints: LufsPoint[] = [];
+  private loudnessWindow = new LoudnessWindow(3200);
   private clipInUntil = 0;
   private clipOutUntil = 0;
   private clipEvents = 0;
@@ -288,7 +299,7 @@ export class AudioEngine {
   private deqBpAudio: BiquadFilterNode[] = [];
   private deqDets: DynamicsCompressorNode[] = [];
   private deqSubs: GainNode[] = [];
-  private deqCutDb: number[] = [0, 0, 0];
+  private deqCutDb: number[] = [0, 0, 0, 0, 0];
   // composite ceiling guard (per-sample soft clip after output trim)
   private guardWet!: GainNode;
   private guardDry!: GainNode;
@@ -324,8 +335,10 @@ export class AudioEngine {
   private fadeToken = 0;
   /** Invalidates a pending source switch when another one is requested. */
   private sourceToken = 0;
+  /** Invalidates an in-flight microphone arm when the device changes. */
+  private micToken = 0;
+  private micArm: Promise<void> | null = null;
   private frameCostMs = 0;
-  private meterTick = 0;
   private driftMs = 0;
   private clockRefWall = 0;
   private clockRefCtx = 0;
@@ -378,10 +391,11 @@ export class AudioEngine {
   private inKsAnalyserL!: AnalyserNode;
   private inKsAnalyserR!: AnalyserNode;
 
-  // buffers
-  private timeBuf!: Float32Array<ArrayBuffer>;
-  /** Output-tap scratch (outAnalyser fftSize) — never shared with the
-   * shorter K-weighting buffers or getFloatTimeDomainData throws. */
+  // buffers — one per analyser size: reading a 2048-point analyser into a
+  // 4096-sample buffer would leave half the block holding the previous
+  // reader's samples, and the peak meter would report them as signal.
+  private inBufL!: Float32Array<ArrayBuffer>;
+  private inBufR!: Float32Array<ArrayBuffer>;
   private outBufL!: Float32Array<ArrayBuffer>;
   private outBufR!: Float32Array<ArrayBuffer>;
   private ksBufL!: Float32Array<ArrayBuffer>;
@@ -393,9 +407,19 @@ export class AudioEngine {
 
   private signalOsc: AudioScheduledSourceNode | null = null;
   private signalGain: GainNode | null = null;
+  /** Cached test-noise buffer, rebuilt only when the sample rate changes. */
+  private pinkBuffer: AudioBuffer | null = null;
   private micStream: MediaStream | null = null;
   private micNode: MediaStreamAudioSourceNode | null = null;
   private params: ProcessorParams | null = null;
+  /** Last value written per node parameter — re-applying is then free. */
+  private written = new Map<string, number>();
+  /** Guards against a measurement tick re-entering apply(). */
+  private applying = false;
+  /** Programme level ahead of the gate, from the latest meter tick. */
+  private srcLevelDb = -120;
+  private inPeakL = -120;
+  private inPeakR = -120;
 
   /* ── lifecycle ────────────────────────────────────────────────────────── */
 
@@ -405,29 +429,23 @@ export class AudioEngine {
 
   /** Last-used I/O + source survive restarts, so boot restores the rig. */
   private loadDevicePrefs() {
+    let raw: string | null = null;
     try {
-      const raw = localStorage.getItem(DEVICE_STORE);
-      if (!raw) return;
-      const p = JSON.parse(raw) as Partial<{
-        input: string;
-        output: string;
-        source: SourceKind;
-      }>;
-      if (typeof p.input === "string") this.inputDeviceId = p.input;
-      if (typeof p.output === "string") this.outputDeviceId = p.output;
-      if (p.source === "mic" || p.source === "signal" || p.source === "file") {
-        this.sourceKind = p.source;
-      }
+      raw = localStorage.getItem(DEVICE_STORE);
     } catch {
-      /* fresh install or blocked storage — defaults stand */
+      return; // blocked storage — defaults stand
     }
+    const prefs = parsePrefs(raw);
+    this.inputDeviceId = prefs.input;
+    this.outputDeviceId = prefs.output;
+    this.sourceKind = prefs.source;
   }
 
   private saveDevicePrefs() {
     try {
       localStorage.setItem(
         DEVICE_STORE,
-        JSON.stringify({
+        serializePrefs({
           input: this.inputDeviceId,
           output: this.outputDeviceId,
           source: this.sourceKind,
@@ -451,7 +469,7 @@ export class AudioEngine {
       const q = await navigator.permissions.query({
         name: "microphone" as PermissionName,
       });
-      if (q.state === "granted") await this.armMic();
+      if (q.state === "granted") await this.openMic();
     } catch {
       /* permissions API missing — leave idle for an explicit Arm press */
     }
@@ -460,28 +478,40 @@ export class AudioEngine {
   async powerOn(): Promise<void> {
     this.resetLoudness();
     this.fadeToken += 1; // any pending power-off teardown is now stale
-    if (this.ctx) {
-      await this.ctx.resume();
-      this.powered = true;
-      this.openOutput();
-      this.watchDevices();
-      void this.applyOutputDevice();
-      void this.autoInitInput();
-      this.startMeterLoop();
-      this.notify();
-      return;
+    const reuse = this.ctx && this.ctx.state !== "closed" && this.graphReady;
+    if (!reuse) {
+      if (this.ctx && this.ctx.state !== "closed") {
+        void this.ctx.close().catch(() => undefined);
+      }
+      const ctx = new AudioContext({ latencyHint: "interactive" });
+      this.ctx = ctx;
+      this.buildGraph(ctx);
     }
-    const ctx = new AudioContext({ latencyHint: "interactive" });
-    this.ctx = ctx;
-    this.buildGraph(ctx);
-    this.watchDevices();
-    void this.applyOutputDevice();
-    void this.autoInitInput();
+    const ctx = this.ctx;
+    if (!ctx) return;
     if (this.params) this.apply(this.params);
-    await ctx.resume();
+    try {
+      await ctx.resume();
+    } catch {
+      /* autoplay policy — the wake banner offers the gesture */
+    }
     this.powered = true;
+    this.snapshotValue = { ...this.snapshotValue, powered: true };
+    // A power-off mid-fade leaves the program bus at zero. Restore it before
+    // the source is rebuilt, or the console would look alive with no audio.
+    this.sourceToken += 1;
+    if (this.sourceBus) {
+      this.sourceBus.gain.cancelScheduledValues(ctx.currentTime);
+      this.sourceBus.gain.setValueAtTime(1, ctx.currentTime);
+    }
+    this.watchDevices();
     this.openOutput();
-    this.setSource(this.sourceKind);
+    void this.applyOutputDevice();
+    // A saved microphone is only re-armed when the OS already allows it —
+    // boot must never throw a permission prompt at the operator. Every other
+    // source is safe to start directly.
+    if (this.sourceKind === "mic") void this.autoInitInput();
+    else this.startSource(this.sourceKind);
     this.startMeterLoop();
     this.notify();
   }
@@ -499,22 +529,27 @@ export class AudioEngine {
   powerOff() {
     const ctx = this.ctx;
     const token = ++this.fadeToken;
+    this.sourceToken += 1; // a pending source switch must not fade back in
     this.cancelMeterLoop();
     this.powered = false;
-    this.lufsPoints = [];
+    this.loudnessWindow.clear();
     this.snapshotValue = { ...SILENT_SNAPSHOT };
     this.notify();
 
     const teardown = () => {
       this.stopFile();
-      this.disarmMic();
       this.stopSignal();
+      this.releaseMic();
       // the standby source never outlives the on-air chain
       if (this.backupEl) this.backupEl.pause();
       this.backupActiveFlag = false;
-      if (this.srcGain) this.srcGain.gain.value = 1;
-      if (this.backupGain) this.backupGain.gain.value = 0;
+      // Through the ramp cache, not a raw write: a raw value here would leave
+      // the cache claiming the failover crossfade is still applied, and the
+      // next take-over would be a no-op.
+      this.setNum("failover.src", this.srcGain?.gain, 1, 0.01);
+      this.setNum("failover.backup", this.backupGain?.gain, 0, 0.01);
       if (ctx && ctx.state !== "closed") void ctx.suspend();
+      this.notify();
     };
 
     // Suspend only after the bus has faded: stopping the graph at programme
@@ -523,7 +558,7 @@ export class AudioEngine {
       const now = ctx.currentTime;
       this.duckGain.gain.cancelScheduledValues(now);
       this.duckGain.gain.setTargetAtTime(0, now, 0.005);
-      window.setTimeout(() => {
+      globalThis.setTimeout(() => {
         if (this.fadeToken === token && !this.powered) teardown();
       }, 45);
     } else {
@@ -539,19 +574,53 @@ export class AudioEngine {
     if (this.backupUrl) URL.revokeObjectURL(this.backupUrl);
     this.backupUrl = null;
     if (this.ctx) {
-      void this.ctx.close();
+      void this.ctx.close().catch(() => undefined);
       this.ctx = null;
     }
+    this.written.clear();
+    this.clearGraphRefs();
+  }
+
+  /**
+   * Drop every node reference so a later buildGraph cannot write to a
+   * teardown graph, and so node arrays are rebuilt from empty rather than
+   * appended to (which duplicated HPF/EQ/split filters on every boot).
+   */
+  private clearGraphRefs() {
+    this.hpfStages = [];
+    this.phaseStages = [];
+    this.eqFilters = [];
+    this.mbComps = [];
+    this.mbMakeups = [];
+    this.mbSplitFilters = [];
+    this.deqBpAudio = [];
+    this.deqBpDet = [];
+    this.deqDets = [];
+    this.deqSubs = [];
+    this.deqCutDb = [0, 0, 0, 0, 0];
   }
 
   /* ── graph construction ───────────────────────────────────────────────── */
 
-  private ramp(param: AudioParam | undefined, value: number, tc = 0.02) {
-    if (!this.ctx || !param) return;
+  /**
+   * One write path for every node parameter. Identical values are dropped, so
+   * dragging a slider (which re-applies the whole chain on every pointer
+   * move) schedules automation only for what actually changed.
+   */
+  private setNum(key: string, param: AudioParam | undefined, value: number, tc = 0.02) {
+    if (!this.ctx || !param || !Number.isFinite(value)) return;
+    const prev = this.written.get(key);
+    if (prev !== undefined && Math.abs(prev - value) < 1e-7) return;
+    this.written.set(key, value);
     param.setTargetAtTime(value, this.ctx.currentTime, tc);
   }
 
   private buildGraph(ctx: AudioContext) {
+    this.clearGraphRefs();
+    this.written.clear();
+    this.frameCostMs = 0;
+    this.heavyIntervalMs = HEAVY_BASE_MS;
+    this.lastHeavyAt = 0;
     // A context suspended by the platform (sleep, device change, tab
     // eviction) is a hard glitch. Resume it as soon as we are allowed to;
     // a deliberate power-off sets `powered` false first, so it is not undone.
@@ -565,6 +634,12 @@ export class AudioEngine {
     };
 
     this.sourceBus = g(1);
+    // Always hand the chain two channels. A mono interface (or a mono file)
+    // would otherwise leave the right channel silent: the R meter dead, the
+    // correlation hard right, and the M/S matrix dropping half the signal.
+    this.sourceBus.channelCount = 2;
+    this.sourceBus.channelCountMode = "explicit";
+    this.sourceBus.channelInterpretation = "speakers";
 
     // input stage: silence gate → trim → HPF → phase rotation
     this.gateGain = g(1);
@@ -1038,7 +1113,8 @@ export class AudioEngine {
     inKsSplit.connect(this.inKsAnalyserL, 0);
     inKsSplit.connect(this.inKsAnalyserR, 1);
 
-    this.timeBuf = new Float32Array(this.outAnalyserL.fftSize);
+    this.inBufL = new Float32Array(this.inAnalyserL.fftSize);
+    this.inBufR = new Float32Array(this.inAnalyserR.fftSize);
     this.outBufL = new Float32Array(this.outAnalyserL.fftSize);
     this.outBufR = new Float32Array(this.outAnalyserR.fftSize);
     this.ksBufL = new Float32Array(this.ksAnalyserL.fftSize);
@@ -1055,9 +1131,22 @@ export class AudioEngine {
   apply(params: ProcessorParams) {
     this.params = params;
     const ctx = this.ctx;
-    if (!ctx || !this.graphReady) return; // applied on powerOn
+    if (!ctx || !this.graphReady || this.applying) return; // applied on powerOn
+    this.applying = true;
+    try {
+      this.applyChain(params);
+    } finally {
+      this.applying = false;
+    }
+  }
 
-    this.ramp(this.inputGain.gain, dbToGain(params.inputGainDb));
+  private applyChain(params: ProcessorParams) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const set = (key: string, param: AudioParam | undefined, value: number, tc?: number) =>
+      this.setNum(key, param, value, tc);
+
+    set("input", this.inputGain.gain, dbToGain(params.inputGainDb));
 
     // HPF: 12/24/36/48 dB/oct as 1–4 Butterworth sections in cascade.
     // Sections beyond the selected slope go allpass (unity magnitude) so the
@@ -1066,23 +1155,24 @@ export class AudioEngine {
     this.hpfStages.forEach((stage, i) => {
       const active = params.hpf.on && i < hpfQs.length;
       stage.type = active ? "highpass" : "allpass";
-      this.ramp(stage.frequency, params.hpf.freqHz);
-      this.ramp(stage.Q, hpfQs[i] ?? 0.7071);
+      set(`hpf.${i}.f`, stage.frequency, params.hpf.freqHz);
+      set(`hpf.${i}.q`, stage.Q, hpfQs[i] ?? 0.7071);
     });
 
     // phase rotator: auto = fixed voice window, manual = user frequency;
     // the cascade is retuned as a whole and bypassed as a whole
     const phaseBase = params.phase.mode === "auto" ? 300 : params.phase.freqHz;
     phaseStageFrequencies(phaseBase).forEach((hz, i) => {
-      this.ramp(this.phaseStages[i]?.frequency, hz);
+      set(`phase.${i}`, this.phaseStages[i]?.frequency, hz);
     });
-    this.crossfade(this.phaseWet, this.phaseDry, params.phase.on);
+    this.crossfade("phase", this.phaseWet, this.phaseDry, params.phase.on);
+
     // silence-gate bypass
     if (!params.gate.on) {
       this.gateCloseAt = 0;
       if (!this.gateOpen) {
         this.gateOpen = true;
-        this.ramp(this.gateGain.gain, 1, 0.02);
+        set("gate", this.gateGain.gain, 1, 0.02);
       }
     }
 
@@ -1092,14 +1182,16 @@ export class AudioEngine {
       // Per-band bypass keeps the band's settings: it just leaves the
       // cascade as an allpass section, which is magnitude-neutral.
       f.type = eqBandOn(band) ? band.type : "allpass";
-      this.ramp(f.gain, band.gainDb);
-      this.ramp(f.frequency, band.freq);
-      this.ramp(f.Q, Math.max(band.q, 0.01));
+      set(`eq.${i}.g`, f.gain, band.gainDb);
+      set(`eq.${i}.f`, f.frequency, band.freq);
+      set(`eq.${i}.q`, f.Q, Math.max(band.q, 0.01));
     });
-    this.crossfade(this.eqWetPre, this.eqDry, params.eq.on);
+    this.crossfade("eq", this.eqWetPre, this.eqDry, params.eq.on);
 
     params.multiband.splitsHz.forEach((hz, split) => {
-      for (const f of this.mbSplitFilters[split] ?? []) this.ramp(f.frequency, hz);
+      (this.mbSplitFilters[split] ?? []).forEach((f, i) => {
+        set(`mb.split.${split}.${i}`, f.frequency, hz);
+      });
     });
     // Less–More macro: one setting scales every band's ratio and envelope.
     // 5 is the preset's own tuning, so the loaded preset is heard as designed
@@ -1109,34 +1201,36 @@ export class AudioEngine {
       const comp = this.mbComps[i];
       const makeup = this.mbMakeups[i];
       if (!comp || !makeup) return;
-      this.ramp(comp.threshold, band.thresholdDb);
-      this.ramp(comp.ratio, Math.min(20, Math.max(1, band.ratio * dens.ratioScale)));
-      this.ramp(
+      set(`mb.${i}.t`, comp.threshold, band.thresholdDb);
+      set(`mb.${i}.r`, comp.ratio, Math.min(20, Math.max(1, band.ratio * dens.ratioScale)));
+      set(
+        `mb.${i}.a`,
         comp.attack,
         (Math.max(band.attackMs, 0) * dens.timeScale * (this.speechFast ? 0.5 : 1)) / 1000,
       );
-      this.ramp(
+      set(
+        `mb.${i}.rel`,
         comp.release,
         (Math.max(band.releaseMs, 10) * dens.timeScale * (this.speechFast ? 0.5 : 1)) / 1000,
       );
-      this.ramp(makeup.gain, dbToGain(band.makeupDb));
+      set(`mb.${i}.m`, makeup.gain, dbToGain(band.makeupDb));
     });
-    this.crossfade(this.mbWetPre, this.mbDry, params.multiband.on);
+    this.crossfade("mb", this.mbWetPre, this.mbDry, params.multiband.on);
 
     // dynamic EQ: ramp band + detector filters; force α → 0 when bypassed
     params.deq.bands.forEach((band, i) => {
       const det = this.deqDets[i];
       const sub = this.deqSubs[i];
       if (!det || !sub) return;
-      this.ramp(this.deqBpAudio[i]?.frequency, band.freqHz);
-      this.ramp(this.deqBpDet[i]?.frequency, band.freqHz);
-      this.ramp(this.deqBpAudio[i]?.Q, Math.max(band.q, 0.05));
-      this.ramp(this.deqBpDet[i]?.Q, Math.max(band.q, 0.05));
-      this.ramp(det.threshold, band.thresholdDb);
-      this.ramp(det.attack, Math.max(band.attackMs, 1) / 1000);
-      this.ramp(det.release, Math.max(band.releaseMs, 20) / 1000);
+      set(`deq.${i}.af`, this.deqBpAudio[i]?.frequency, band.freqHz);
+      set(`deq.${i}.df`, this.deqBpDet[i]?.frequency, band.freqHz);
+      set(`deq.${i}.aq`, this.deqBpAudio[i]?.Q, Math.max(band.q, 0.05));
+      set(`deq.${i}.dq`, this.deqBpDet[i]?.Q, Math.max(band.q, 0.05));
+      set(`deq.${i}.t`, det.threshold, band.thresholdDb);
+      set(`deq.${i}.a`, det.attack, Math.max(band.attackMs, 1) / 1000);
+      set(`deq.${i}.r`, det.release, Math.max(band.releaseMs, 20) / 1000);
       if (!params.deq.on) {
-        this.ramp(sub.gain, 0, 0.01);
+        set(`deq.${i}.sub`, sub.gain, 0, 0.01);
         this.deqCutDb[i] = 0;
       }
     });
@@ -1150,60 +1244,45 @@ export class AudioEngine {
     // the long release would let through.
     const fast = agcFast(params.agc);
     const fastOn = params.agc.on && fast.on;
-    this.ramp(this.agcFastComp.threshold, fastOn ? fast.thresholdDb : 0);
-    this.ramp(this.agcFastComp.ratio, fastOn ? Math.min(20, Math.max(1, fast.ratio)) : 1);
-    this.ramp(this.agcFastComp.knee, fastOn ? Math.max(0, fast.kneeDb) : 0);
-    this.ramp(
-      this.agcFastComp.attack,
-      (Math.max(fast.attackMs, 0.1) * spd) / 1000,
-    );
-    this.ramp(
-      this.agcFastComp.release,
-      (Math.max(fast.releaseMs, 20) * spd) / 1000,
-    );
+    set("agcFast.t", this.agcFastComp.threshold, fastOn ? fast.thresholdDb : 0);
+    set("agcFast.r", this.agcFastComp.ratio, fastOn ? Math.min(20, Math.max(1, fast.ratio)) : 1);
+    set("agcFast.k", this.agcFastComp.knee, fastOn ? Math.max(0, fast.kneeDb) : 0);
+    set("agcFast.a", this.agcFastComp.attack, (Math.max(fast.attackMs, 0.1) * spd) / 1000);
+    set("agcFast.rel", this.agcFastComp.release, (Math.max(fast.releaseMs, 20) * spd) / 1000);
 
-    this.ramp(this.agcComp.threshold, params.agc.thresholdDb);
-    this.ramp(this.agcComp.ratio, params.agc.ratio);
-    this.ramp(this.agcComp.knee, params.agc.kneeDb);
-    this.ramp(this.agcComp.attack, (Math.max(params.agc.attackMs, 0) * spd) / 1000);
-    this.ramp(this.agcComp.release, (Math.max(params.agc.releaseMs, 10) * spd) / 1000);
-    this.ramp(this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
-    this.crossfade(this.agcWetPre, this.agcDry, params.agc.on);
+    set("agc.t", this.agcComp.threshold, params.agc.thresholdDb);
+    set("agc.r", this.agcComp.ratio, params.agc.ratio);
+    set("agc.k", this.agcComp.knee, params.agc.kneeDb);
+    set("agc.a", this.agcComp.attack, (Math.max(params.agc.attackMs, 0) * spd) / 1000);
+    set("agc.rel", this.agcComp.release, (Math.max(params.agc.releaseMs, 10) * spd) / 1000);
+    set("agc.makeup", this.agcMakeup.gain, dbToGain(params.agc.makeupDb));
+    this.crossfade("agc", this.agcWetPre, this.agcDry, params.agc.on);
     this.windowGate.configure({ windowDb: params.agc.windowDb });
     if (!params.agc.on || params.agc.windowDb <= 0) {
       this.agcFrozen = false;
       this.agcSpreadDb = 0;
-      this.ramp(this.agcHold.gain, 0, 0.02);
-      this.ramp(this.agcWetOut.gain, 1, 0.02);
+      set("agc.hold", this.agcHold.gain, 0, 0.02);
+      set("agc.wet", this.agcWetOut.gain, 1, 0.02);
     }
 
     // de-esser: retune the band and detector; a bypass closes the cut
     const deessHz = clampDeessFreq(params.deess.freqHz);
-    this.ramp(this.deessBpAudio?.frequency, deessHz);
-    this.ramp(this.deessBpDet?.frequency, deessHz);
-    this.ramp(this.deessDet?.threshold, params.deess.thresholdDb);
-    this.ramp(
-      this.deessDet?.attack,
-      Math.max(params.deess.attackMs, 0.1) / 1000,
-    );
-    this.ramp(
-      this.deessDet?.release,
-      Math.max(params.deess.releaseMs, 10) / 1000,
-    );
+    set("deess.f", this.deessBpAudio?.frequency, deessHz);
+    set("deess.df", this.deessBpDet?.frequency, deessHz);
+    set("deess.t", this.deessDet?.threshold, params.deess.thresholdDb);
+    set("deess.a", this.deessDet?.attack, Math.max(params.deess.attackMs, 0.1) / 1000);
+    set("deess.r", this.deessDet?.release, Math.max(params.deess.releaseMs, 10) / 1000);
     if (!params.deess.on) {
       this.deessCutDb = 0;
-      this.ramp(this.deessSub?.gain, 0, 0.01);
+      set("deess.sub", this.deessSub?.gain, 0, 0.01);
     }
 
     // density drives the limiter from the front; the ceiling is untouched
-    this.ramp(
-      this.limDrive?.gain,
-      params.limiter.on ? dbToGain(dens.driveDb) : 1,
-    );
-    this.ramp(this.limComp.threshold, params.limiter.ceilingDb);
-    this.ramp(this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
-    this.ramp(this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
-    this.crossfade(this.limWetPre, this.limDry, params.limiter.on);
+    set("lim.drive", this.limDrive?.gain, params.limiter.on ? dbToGain(dens.driveDb) : 1);
+    set("lim.t", this.limComp.threshold, params.limiter.ceilingDb);
+    set("lim.a", this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
+    set("lim.r", this.limComp.release, Math.max(params.limiter.releaseMs, 10) / 1000);
+    this.crossfade("lim", this.limWetPre, this.limDry, params.limiter.on);
 
     // Soft clipper: rebuilds its curve only when the threshold moves, then
     // blends wet/dry by the mix control. Bypassed (dry only) by default.
@@ -1213,37 +1292,32 @@ export class AudioEngine {
     }
     const clipMix = Math.min(1, Math.max(0, clip.mix / 100));
     const clipOn = params.limiter.on && clip.on;
-    this.ramp(this.clipWet.gain, clipOn ? clipMix : 0, 0.02);
-    this.ramp(this.clipDry.gain, clipOn ? 1 - clipMix : 1, 0.02);
+    set("clip.wet", this.clipWet.gain, clipOn ? clipMix : 0, 0.02);
+    set("clip.dry", this.clipDry.gain, clipOn ? 1 - clipMix : 1, 0.02);
 
     // composite ceiling guard follows the limiter ceiling
     if (params.limiter.ceilingDb !== this.guardCeilingDb) {
       this.rebuildGuardCurve(params.limiter.ceilingDb);
     }
-    this.crossfade(this.guardWet, this.guardDry, params.limiter.on);
+    this.crossfade("guard", this.guardWet, this.guardDry, params.limiter.on);
 
     // harmonic exciter
-    this.ramp(this.exBp1?.frequency, params.exciter.freqHz);
-    this.ramp(this.exBp2?.frequency, params.exciter.freqHz * 1.7);
-    this.ramp(
-      this.exMix?.gain,
-      params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0,
-    );
+    set("ex.f1", this.exBp1?.frequency, params.exciter.freqHz);
+    set("ex.f2", this.exBp2?.frequency, params.exciter.freqHz * 1.7);
+    set("ex.mix", this.exMix?.gain, params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0);
 
     // stereo width: engage the M/S matrix only away from unity so the dry
     // path (exact for mono sources) stays in circuit at width = 1
     const widen = Math.abs(params.stereo.width - 1) > 0.01;
-    this.ramp(this.widthGain?.gain, params.stereo.width);
-    this.crossfade(this.widthWet, this.widthDry, widen);
+    set("width.gain", this.widthGain?.gain, params.stereo.width);
+    this.crossfade("width", this.widthWet, this.widthDry, widen);
     // low-end mono: 0 = off, otherwise fold side-bass below the crossover
     const lm = Math.min(500, Math.max(0, params.stereo.lowMonoHz ?? 120));
-    if (this.sideLp) this.sideLp.frequency.setTargetAtTime(Math.max(40, lm || 120), ctx.currentTime, 0.01);
-    this.crossfade(this.sideWet, this.sideDry, lm > 0);
+    set("side.lp", this.sideLp?.frequency, Math.max(40, lm || 120), 0.01);
+    this.crossfade("side", this.sideWet, this.sideDry, lm > 0);
 
-    this.ramp(this.outputGain.gain, dbToGain(params.outputGainDb));
-    // A muted monitor stays muted when the chain is re-applied — otherwise
-    // every knob move would un-mute the speakers during a live show.
-    this.ramp(this.monitorGain.gain, this.monitorMuted ? 0 : dbToGain(params.monitorDb));
+    set("output", this.outputGain.gain, dbToGain(params.outputGainDb));
+    this.applyMonitorGain();
 
     // ── v3.0 psychoacoustic layer ──
     // latency profile: low drops the ceiling guard to 2× oversampling;
@@ -1253,10 +1327,19 @@ export class AudioEngine {
     // perceptual tilt: slope = treble-minus-bass pivot 1 kHz, split evenly
     // across the two shelves. Off / 0 dB = exact unity.
     const slope = params.psy.tilt.on ? params.psy.tilt.slopeDb : 0;
-    this.ramp(this.tiltLo?.gain, -slope / 2, 0.03);
-    this.ramp(this.tiltHi?.gain, slope / 2, 0.03);
+    set("tilt.lo", this.tiltLo?.gain, -slope / 2, 0.03);
+    set("tilt.hi", this.tiltHi?.gain, slope / 2, 0.03);
     // every other psy module is STORED (parameter-complete, no DSP yet):
     // engaged or not, the graph above is the whole audible path.
+  }
+
+  /** Monitor level, honouring the operator mute that survives re-applies. */
+  private applyMonitorGain() {
+    this.setNum(
+      "monitor",
+      this.monitorGain?.gain,
+      this.monitorMuted ? 0 : dbToGain(this.params?.monitorDb ?? -6),
+    );
   }
 
   /** Low-latency profile: lighter 2× oversampling on the ceiling guard. */
@@ -1265,13 +1348,12 @@ export class AudioEngine {
     if (this.guardShaper) this.guardShaper.oversample = low ? "2x" : "4x";
   }
 
-  private crossfade(wet: GainNode, dry: GainNode, on: boolean) {
+  private crossfade(key: string, wet: GainNode, dry: GainNode, on: boolean) {
     if (!wet || !dry) return; // teardown race: nodes not (or no longer) built
-    this.ramp(wet.gain, on ? 1 : 0, 0.015);
-    this.ramp(dry.gain, on ? 0 : 1, 0.015);
+    this.setNum(`${key}.wet`, wet.gain, on ? 1 : 0, 0.015);
+    this.setNum(`${key}.dry`, dry.gain, on ? 0 : 1, 0.015);
   }
 
-  /** Per-sample soft-clip curve that enforces the composite ceiling. */
   /**
    * Soft-clip transfer for the pre-limiter stage: linear below 72 % of the
    * threshold, then a tanh knee that asymptotes at the threshold itself, so
@@ -1312,12 +1394,16 @@ export class AudioEngine {
 
   setMonitorDb(db: number) {
     if (this.monitorMuted) return;
-    this.ramp(this.monitorGain.gain, dbToGain(db));
+    this.setNum("monitor", this.monitorGain?.gain, dbToGain(db));
   }
 
   setMonitorMuted(muted: boolean) {
     this.monitorMuted = muted;
-    this.ramp(this.monitorGain.gain, muted ? 0 : dbToGain(this.params?.monitorDb ?? -6));
+    this.applyMonitorGain();
+  }
+
+  get monitorMutedNow(): boolean {
+    return this.monitorMuted;
   }
 
   /**
@@ -1349,40 +1435,51 @@ export class AudioEngine {
   /* ── sources ──────────────────────────────────────────────────────────── */
 
   /**
-   * Switch inputs behind a short fade. Cutting the old source while it is
-   * still at programme level is a click; the input bus is faded out, rebuilt,
-   * and faded back in 20 ms later.
+   * Switch inputs behind a short fade, and make sure exactly one source is
+   * connected afterwards: the generator is stopped, the microphone released,
+   * the file paused — whichever of them is not the new source.
    */
-  setSource(kind: SourceKind) {
-    if (!this.ctx) {
-      this.sourceKind = kind;
-      this.saveDevicePrefs();
-      this.notify();
-      return;
-    }
-    const ctx = this.ctx;
-    const token = ++this.sourceToken;
-    const gain = this.sourceBus.gain;
-    const now = ctx.currentTime;
-    gain.cancelScheduledValues(now);
-    gain.setTargetAtTime(0, now, 0.004);
-    window.setTimeout(() => {
-      if (this.sourceToken !== token || !this.powered) return;
-      this.sourceKind = kind;
-      this.saveDevicePrefs();
-      this.stopSignal();
-      this.pauseFile();
-      if (kind === "signal") void this.startSignal();
-      if (kind === "mic") void this.armMic();
-      if (kind === "file" && this.fileBuffer) this.playFile();
-      const t = ctx.currentTime;
-      gain.cancelScheduledValues(t);
-      gain.setTargetAtTime(1, t, 0.006);
-      this.notify();
-    }, 20);
+  async setSource(kind: SourceKind): Promise<void> {
+    this.sourceKind = kind;
+    this.saveDevicePrefs();
+    this.notify();
+    if (!this.ctx) return; // powerOn starts the source
+    this.activate(kind);
   }
 
-  private async startSignal() {
+  private activate(kind: SourceKind) {
+    const token = ++this.sourceToken;
+    if (!this.ctx || !this.powered || !this.graphReady) {
+      this.startSource(kind);
+      return;
+    }
+    this.fadeBus(0);
+    globalThis.setTimeout(() => {
+      if (token !== this.sourceToken || !this.powered) return;
+      this.startSource(kind);
+      this.fadeBus(1);
+    }, SOURCE_FADE_MS);
+  }
+
+  private fadeBus(target: number) {
+    const ctx = this.ctx;
+    if (!ctx || !this.graphReady || !this.sourceBus) return;
+    const now = ctx.currentTime;
+    const gain = this.sourceBus.gain;
+    gain.cancelScheduledValues(now);
+    gain.setTargetAtTime(target, now, target ? 0.006 : 0.004);
+  }
+
+  private startSource(kind: SourceKind) {
+    if (kind !== "mic") this.releaseMic();
+    if (kind !== "signal") this.stopSignal();
+    if (kind !== "file") this.pauseFile();
+    if (kind === "signal") this.startSignal();
+    if (kind === "mic") void this.openMic();
+    if (kind === "file" && this.fileBuffer) this.startFile();
+  }
+
+  private startSignal() {
     if (!this.ctx) return;
     this.stopSignal();
     const ctx = this.ctx;
@@ -1401,54 +1498,76 @@ export class AudioEngine {
       amp.connect(gain);
       osc.start();
       this.signalOsc = osc;
-    } else {
-      // looped stereo pink noise at −18 dBFS RMS — exercises every band
-      const buf = ctx.createBuffer(2, ctx.sampleRate * 6, ctx.sampleRate);
-      for (let ch = 0; ch < 2; ch++) {
-        const data = buf.getChannelData(ch);
-        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-          const white = Math.random() * 2 - 1;
-          b0 = 0.99886 * b0 + white * 0.0555179;
-          b1 = 0.99332 * b1 + white * 0.0750759;
-          b2 = 0.969 * b2 + white * 0.153852;
-          b3 = 0.8665 * b3 + white * 0.3104856;
-          b4 = 0.55 * b4 + white * 0.5329522;
-          b5 = -0.7616 * b5 - white * 0.016898;
-          const pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
-          b6 = white * 0.115926;
-          data[i] = pink * 0.11;
-          sum += data[i] * data[i];
-        }
-        const rms = Math.sqrt(sum / data.length) || 1;
-        const scale = dbToGain(-18) / rms;
-        for (let i = 0; i < data.length; i++) data[i] *= scale;
-      }
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.loop = true;
-      src.connect(gain);
-      src.start();
-      this.signalOsc = src;
+      this.notify();
+      return;
     }
+
+    // looped stereo pink noise at −18 dBFS RMS — exercises every band. The
+    // buffer is cached per sample rate: rebuilding it on every source switch
+    // blocked the main thread for tens of milliseconds.
+    let buf = this.pinkBuffer;
+    if (!buf || buf.sampleRate !== ctx.sampleRate) {
+      buf = this.buildPinkNoise(ctx);
+      this.pinkBuffer = buf;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.connect(gain);
+    src.start();
+    this.signalOsc = src;
+    this.notify();
+  }
+
+  /** Six seconds of stereo pink noise, normalised to −18 dBFS RMS. */
+  private buildPinkNoise(ctx: AudioContext): AudioBuffer {
+    const buf = ctx.createBuffer(2, Math.floor(ctx.sampleRate * 6), ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = buf.getChannelData(ch);
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const white = Math.random() * 2 - 1;
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.969 * b2 + white * 0.153852;
+        b3 = 0.8665 * b3 + white * 0.3104856;
+        b4 = 0.55 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.016898;
+        const pink = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+        b6 = white * 0.115926;
+        data[i] = pink * 0.11;
+        sum += data[i] * data[i];
+      }
+      const rms = Math.sqrt(sum / data.length) || 1;
+      const scale = dbToGain(-18) / rms;
+      for (let i = 0; i < data.length; i++) data[i] *= scale;
+    }
+    return buf;
   }
 
   private stopSignal() {
+    if (!this.signalOsc) return;
+    const osc = this.signalOsc;
+    this.signalOsc = null;
     try {
-      this.signalOsc?.stop();
+      osc.stop();
     } catch {
       /* already stopped */
     }
-    this.signalOsc?.disconnect();
-    this.signalOsc = null;
+    osc.disconnect();
     this.signalGain?.disconnect();
     this.signalGain = null;
+    this.notify();
   }
 
   async setSignalMode(mode: SignalMode) {
     this.signalMode = mode;
-    if (this.ctx && this.sourceKind === "signal") await this.startSignal();
+    // Only rebuild a generator that is actually on the bus. While a source
+    // switch is fading, the pending startSource() will use the new mode.
+    if (this.ctx && this.sourceKind === "signal" && this.generatorOn) {
+      this.startSignal();
+    }
     this.notify();
   }
 
@@ -1463,177 +1582,140 @@ export class AudioEngine {
     return this.signalOsc !== null;
   }
 
-  /* ── physical I/O devices ─────────────────────────────────────────────── */
+  /* ── microphone ───────────────────────────────────────────────────────── */
 
-  /**
-   * List the OS input/output devices. Labels stay blank until mic permission
-   * is granted (browser privacy rule), so entries fall back to numbered
-   * names and the list refreshes itself after every successful arm.
-   */
-  async refreshDevices(): Promise<void> {
-    try {
-      const all = await navigator.mediaDevices.enumerateDevices();
-      let n = 0;
-      this.inputDevices = all
-        .filter((d) => d.kind === "audioinput")
-        .map((d) => ({ id: d.deviceId, label: d.label || `Input ${++n}` }));
-      n = 0;
-      this.outputDevices = all
-        .filter((d) => d.kind === "audiooutput")
-        .map((d) => ({ id: d.deviceId, label: d.label || `Output ${++n}` }));
-      if (
-        this.inputDeviceId &&
-        !this.inputDevices.some((d) => d.id === this.inputDeviceId)
-      ) {
-        this.inputDeviceId = "";
-      }
-      if (
-        this.outputDeviceId &&
-        !this.outputDevices.some((d) => d.id === this.outputDeviceId)
-      ) {
-        this.outputDeviceId = "";
-      }
-    } catch {
-      /* media devices unavailable — keep whatever was listed */
-    }
-    this.notify();
-  }
-
-  /** Enumerate once + follow plug/unplug while the app runs. */
-  private watchDevices() {
-    void this.refreshDevices();
-    if (this.deviceWatching) return;
-    try {
-      navigator.mediaDevices.addEventListener("devicechange", this.onDeviceChange);
-      this.deviceWatching = true;
-    } catch {
-      /* older runtimes without devicechange — manual refresh still works */
-    }
-  }
-
-  private onDeviceChange = () => {
-    void this.refreshDevices();
-  };
-
-  /** Switch inputs; re-arms live so the new device takes over immediately. */
-  setInputDevice(id: string) {
-    this.inputDeviceId = id;
-    this.saveDevicePrefs();
-    if (this.micStatus === "on") {
-      this.disarmMic();
-      void this.armMic();
-    } else {
-      this.notify();
-    }
-  }
-
-  /** Route the monitor bus to the chosen speakers/headphones. */
-  setOutputDevice(id: string) {
-    this.outputDeviceId = id;
-    this.saveDevicePrefs();
-    void this.applyOutputDevice();
-    this.notify();
+  private micConstraints(deviceId: string): MediaStreamConstraints {
+    return {
+      audio: {
+        // The chain is the only processor: browser DSP would fight it.
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: { ideal: 2 },
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      },
+    };
   }
 
   /**
-   * Push the chosen sink into the AudioContext. setSinkId post-dates the TS
-   * lib.dom in this tree, hence the structural type; Chromium (and the
-   * Electron shell) has shipped it since v110. "" = OS default.
+   * Put the microphone on air. Arming is also a routing decision: the old
+   * engine armed the device but left the generator as the program source, so
+   * the operator heard pink noise while the panel said "live input".
    */
-  private async applyOutputDevice(): Promise<void> {
-    const ctx = this.ctx as (AudioContext & {
-      setSinkId?: (sinkId: string) => Promise<void>;
-    }) | null;
-    if (!ctx || typeof ctx.setSinkId !== "function") return;
-    const wanted = this.outputDeviceId;
-    try {
-      await ctx.setSinkId(wanted);
-    } catch {
-      // The device vanished between enumeration and the switch. Drop back to
-      // the OS default and say so, rather than leaving the panel claiming a
-      // sink nothing is routed to. A closed context is not a dead device.
-      if (!wanted || ctx.state === "closed") return;
-      if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
-      this.outputDeviceId = "";
-      this.saveDevicePrefs();
-      try {
-        await ctx.setSinkId("");
-      } catch {
-        /* context cannot re-open the default sink — nothing left to try */
-      }
-      this.notify();
-    }
-  }
-
   async armMic(): Promise<void> {
-    if (this.micStatus === "on" || this.micStatus === "arming") return;
-    // Claim the arm before booting: powerOn() re-enters here through
-    // autoInitInput/setSource, and a second concurrent arm would open two
-    // streams on two devices.
-    this.micStatus = "arming";
-    this.notify();
-    // Arming is a user gesture — boot the graph for it instead of leaving the
-    // Arm button dead on a console that was never powered on.
+    if (this.sourceKind !== "mic") {
+      this.sourceKind = "mic";
+      this.saveDevicePrefs();
+      this.notify();
+      if (this.ctx) this.activate("mic");
+    }
     if (!this.ctx) await this.powerOn();
     if (!this.ctx) {
       this.micStatus = "error";
       this.notify();
       return;
     }
-    const base = {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 2,
-    };
+    await this.openMic();
+  }
+
+  private openMic(): Promise<void> {
+    if (this.micNode && this.micStream) {
+      if (this.micStatus !== "on") {
+        this.micStatus = "on";
+        this.notify();
+      }
+      return Promise.resolve();
+    }
+    if (this.micArm) return this.micArm;
+    const run = this.doOpenMic().finally(() => {
+      if (this.micArm === run) this.micArm = null;
+    });
+    this.micArm = run;
+    return run;
+  }
+
+  private async doOpenMic(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const token = ++this.micToken;
+    this.micStatus = "arming";
+    this.notify();
     const wanted = this.inputDeviceId;
-    // The device the stream actually opened on — the default after a fallback.
     let openedWith = wanted;
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: wanted ? { ...base, deviceId: { exact: wanted } } : base,
-        });
-      } catch {
+        stream = await navigator.mediaDevices.getUserMedia(this.micConstraints(wanted));
+      } catch (err) {
+        if (token !== this.micToken) return;
+        // No pick at all means the OS default itself failed — that is a real
+        // error, not a missing device to fall back from.
+        if (!wanted) throw err;
         // Chosen device gone (unplugged?) — fall back to the OS default
         // rather than leaving the operator with a dead input. Forget the
         // dead pick too, so the next boot does not restore it.
         this.inputDeviceId = "";
         openedWith = "";
         this.saveDevicePrefs();
-        stream = await navigator.mediaDevices.getUserMedia({ audio: base });
+        stream = await navigator.mediaDevices.getUserMedia(this.micConstraints(""));
+      }
+      // A newer pick (or a disarm) owns the microphone now.
+      if (token !== this.micToken || this.sourceKind !== "mic" || !this.ctx) {
+        stopStream(stream);
+        return;
       }
       this.micStream = stream;
       const track = stream.getAudioTracks()[0];
-      this.micLabel = track?.label ?? "Microphone";
+      this.micLabel = track?.label || "Microphone";
+      track?.addEventListener?.("ended", this.onMicTrackEnded);
       this.micNode = this.ctx.createMediaStreamSource(stream);
       this.micNode.connect(this.sourceBus);
       this.micStatus = "on";
+      this.notify();
       // Permission granted → real device labels are visible now.
       void this.refreshDevices();
       // The operator may have picked another input while getUserMedia was
-      // still resolving (the selection re-arm skips an arm already in
-      // flight). The winning device is always the latest pick.
-      if (this.inputDeviceId !== openedWith) {
-        this.disarmMic();
-        this.notify();
-        void this.armMic();
-        return;
+      // still resolving. The winning device is always the latest pick.
+      if (this.inputDeviceId !== openedWith && token === this.micToken) {
+        this.releaseMic();
+        void this.openMic();
       }
     } catch {
+      if (token !== this.micToken) return;
+      this.micStream = null;
+      this.micNode = null;
       this.micStatus = "error";
+      this.notify();
     }
+  }
+
+  /** Device unplugged mid-show: drop the stream so the panel can say so. */
+  private onMicTrackEnded = () => {
+    if (this.sourceKind !== "mic") return;
+    this.releaseMic();
     this.notify();
+  };
+
+  /** Tear the microphone down without touching the rest of the graph. */
+  private releaseMic() {
+    this.micToken += 1;
+    this.micArm = null;
+    this.micNode?.disconnect();
+    this.micNode = null;
+    if (this.micStream) {
+      for (const track of this.micStream.getTracks()) {
+        track.removeEventListener?.("ended", this.onMicTrackEnded);
+        track.stop();
+      }
+    }
+    this.micStream = null;
+    this.micLabel = "";
+    this.micStatus = "idle";
   }
 
   disarmMic() {
-    this.micNode?.disconnect();
-    this.micNode = null;
-    this.micStream?.getTracks().forEach((t) => t.stop());
-    this.micStream = null;
-    this.micStatus = "idle";
-    this.micLabel = "";
+    this.releaseMic();
+    this.notify();
   }
 
   /* ── file transport ───────────────────────────────────────────────────── */
@@ -1649,11 +1731,20 @@ export class AudioEngine {
     this.fileName = file.name;
     this.fileOffset = 0;
     this.filePeaks = computePeaks(buffer, 1600);
-    if (this.sourceKind === "file") this.playFile();
+    if (this.sourceKind === "file") this.startFile();
     this.notify();
   }
 
+  /** Transport play. Pressing play on a loaded file also selects it. */
   playFile() {
+    if (this.sourceKind !== "file") {
+      void this.setSource("file");
+      return;
+    }
+    this.startFile();
+  }
+
+  private startFile() {
     const ctx = this.ctx;
     const buffer = this.fileBuffer;
     if (!ctx || !buffer || this.filePlaying) return;
@@ -1686,7 +1777,7 @@ export class AudioEngine {
     try {
       this.fileSource.stop();
     } catch {
-      /* noop */
+      /* already stopped */
     }
     this.fileSource.disconnect();
     this.fileSource = null;
@@ -1705,7 +1796,7 @@ export class AudioEngine {
     if (this.filePlaying) {
       this.pauseFile();
       this.fileOffset = clamped;
-      this.playFile();
+      this.startFile();
     } else {
       this.fileOffset = clamped;
     }
@@ -1722,13 +1813,145 @@ export class AudioEngine {
     return Math.min(this.ctx.currentTime - this.fileStartedAt, this.fileBuffer.duration);
   }
 
+  /* ── physical I/O devices ─────────────────────────────────────────────── */
+
+  /**
+   * List the OS input/output devices. Labels stay blank until mic permission
+   * is granted (browser privacy rule), so entries fall back to numbered
+   * names and the list refreshes itself after every successful arm. A list
+   * with no usable ids (pre-permission) never invalidates a saved pick.
+   */
+  async refreshDevices(): Promise<void> {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const listing = listDevices(all);
+      this.inputDevices = listing.inputs;
+      this.outputDevices = listing.outputs;
+      const input = reconcileSelection(
+        this.inputDeviceId,
+        listing.inputs,
+        listing.inputsIdentified,
+      );
+      const output = reconcileSelection(
+        this.outputDeviceId,
+        listing.outputs,
+        listing.outputsIdentified,
+      );
+      if (input !== this.inputDeviceId || output !== this.outputDeviceId) {
+        this.inputDeviceId = input;
+        this.outputDeviceId = output;
+        this.saveDevicePrefs();
+      }
+    } catch {
+      /* media devices unavailable — keep whatever was listed */
+    }
+    this.notify();
+  }
+
+  /** Enumerate once + follow plug/unplug while the app runs. */
+  private watchDevices() {
+    void this.refreshDevices();
+    if (this.deviceWatching) return;
+    try {
+      navigator.mediaDevices.addEventListener("devicechange", this.onDeviceChange);
+      this.deviceWatching = true;
+    } catch {
+      /* older runtimes without devicechange — manual refresh still works */
+    }
+  }
+
+  private onDeviceChange = () => {
+    void this.refreshDevices();
+  };
+
+  /** Switch inputs; re-arms live so the new device takes over immediately. */
+  setInputDevice(id: string) {
+    this.inputDeviceId = id;
+    this.saveDevicePrefs();
+    if (this.sourceKind !== "mic") {
+      this.notify();
+      return;
+    }
+    this.releaseMic();
+    if (!this.ctx) {
+      this.notify();
+      return;
+    }
+    void this.openMic();
+  }
+
+  /** Route the monitor bus to the chosen speakers/headphones. */
+  setOutputDevice(id: string) {
+    this.outputDeviceId = id;
+    this.saveDevicePrefs();
+    void this.applyOutputDevice();
+    this.notify();
+  }
+
+  /**
+   * Push the chosen sink into the AudioContext. setSinkId post-dates the TS
+   * lib.dom in this tree, hence the structural type; Chromium (and the
+   * Electron shell) has shipped it since v110. "" = OS default.
+   */
+  private async applyOutputDevice(): Promise<void> {
+    const ctx = this.ctx as (AudioContext & {
+      setSinkId?: (sinkId: string) => Promise<void>;
+    }) | null;
+    if (!ctx || typeof ctx.setSinkId !== "function") return;
+    const wanted = this.outputDeviceId;
+    try {
+      await ctx.setSinkId(wanted);
+    } catch {
+      // The device vanished between enumeration and the switch. Drop back to
+      // the OS default and say so, rather than leaving the panel claiming a
+      // sink nothing is routed to. A closed context is not a dead device, and
+      // a suspended one may just refuse the call until it resumes — neither
+      // is evidence that the operator picked the wrong speaker.
+      if (!wanted || ctx.state === "closed") return;
+      if (ctx.state !== "running") return;
+      if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
+      this.outputDeviceId = "";
+      this.saveDevicePrefs();
+      try {
+        await ctx.setSinkId("");
+      } catch {
+        /* context cannot re-open the default sink — nothing left to try */
+      }
+      this.notify();
+    }
+  }
+
+  /** The selected input, or undefined for the OS default. */
+  get selectedInput(): AudioDevice | undefined {
+    return this.inputDevices.find((d) => d.id && d.id === this.inputDeviceId);
+  }
+
+  /** The selected monitor sink, or undefined for the OS default. */
+  get selectedOutput(): AudioDevice | undefined {
+    return this.outputDevices.find((d) => d.id && d.id === this.outputDeviceId);
+  }
+
+  /** The chosen monitor is a virtual/loopback endpoint — inaudible locally. */
+  get monitorIsVirtual(): boolean {
+    const label = this.selectedOutput?.label ?? "";
+    return isVirtualDevice(label);
+  }
+
+  /**
+   * The program input and the monitor sink are two sides of one endpoint, so
+   * the chain would feed back into itself. Surfaced in the devices panel.
+   */
+  get feedbackRisk(): boolean {
+    return isFeedbackLoop(this.selectedInput, this.selectedOutput);
+  }
+
   /* ── metering ─────────────────────────────────────────────────────────── */
 
   private startMeterLoop() {
     if (this.raf) return;
     const loop = () => {
-      this.computeMeters();
       this.raf = requestAnimationFrame(loop);
+      this.meterFrame();
     };
     this.raf = requestAnimationFrame(loop);
   }
@@ -1738,88 +1961,140 @@ export class AudioEngine {
     this.raf = 0;
   }
 
-  private meanSquare(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): number {
-    analyser.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-    return sum / buf.length;
-  }
-
-  /** Inter-sample peak estimate via4× linear upsampling (dBTP-ish). */
   /**
-   * True-peak estimate at 4× oversampling (ITU-R BS.1770-4 Annex 2).
+   * One meter tick.
    *
-   *
-   * A sample peak under-reads a programme by up to ~3 dB once a codec or a
-   * D/A converter reconstructs the waveform, so the ceiling is checked on an
-   * interpolated signal. Cubic Lagrange over four neighbouring samples is a
-   * close approximation of the band-limited reconstruction and costs 3 taps
-   * per sample — cheap enough to run every meter tick. Note this interpolates
-   * the *signed* waveform: interpolating magnitudes (as a naive version does)
-   * invents peaks wherever the signal crosses zero.
+   * The steering work (silence gate, AGC window, de-esser, dynamic EQ) runs
+   * every frame: those loops close on measurements, and skipping a frame is
+   * audible as a stepped gate or a de-esser that lets a sibilant through.
+   * The expensive work — true peak, K-weighted loudness, gating blocks — runs
+   * on its own slower clock, and slows down further if it starts costing real
+   * main-thread time.
    */
-  private truePeak(buf: Float32Array<ArrayBuffer>): number {
-    const n = buf.length;
-    if (n < 4) {
-      let flat = 0;
-      for (let i = 0; i < n; i++) flat = Math.max(flat, Math.abs(buf[i]));
-      return toDb(flat);
-    }
-    let max = 0;
-    // Every second sample is enough: at 48 kHz the interpolated crests are
-    // never isolated to a single 20 µs step, and this halves the tap count.
-    for (let i = 4; i < n - 4; i += 2) {
-      const sample = Math.abs(buf[i]);
-      if (sample > max) max = sample;
-      for (const coeffs of TRUE_PEAK_PHASES) {
-        let acc = 0;
-        for (let k = 0; k < TRUE_PEAK_TAPS; k++) {
-          acc += buf[i - 3 + k] * coeffs[k];
-        }
-        const v = Math.abs(acc);
-        if (v > max) max = v;
-      }
-    }
-    return toDb(max);
-  }
-
-  private computeMeters() {
+  private meterFrame() {
     const ctx = this.ctx;
     if (!ctx || !this.powered || !this.graphReady) return;
-    const t0 = performance.now();
-    // adaptive stability: if metering starts costing real main-thread time,
-    // halve its rate instead of competing with the UI
-    this.meterTick += 1;
-    if (this.frameCostMs > 4 && this.meterTick % 2 === 1) {
-      this.snapshotValue = {
-        ...this.snapshotValue,
-        perf: {
-          ...this.snapshotValue.perf,
-          frameMs: this.frameCostMs,
-          throttled: true,
-        },
-      };
-      return;
-    }
     const now = performance.now();
-    const grOf = (comp: DynamicsCompressorNode | undefined): number =>
-      Math.max(0, -(comp?.reduction ?? 0));
-    const agcOn = this.params?.agc.on ?? false;
 
-    // dynamic-EQ cut follows the detector envelopes (control rate ≈ rAF)
-    if (this.params?.deq.on) {
-      this.params.deq.bands.forEach((band, i) => {
-        const det = this.deqDets[i];
-        const sub = this.deqSubs[i];
-        if (!det || !sub) return;
-        const over = Math.max(0, -(det.reduction || 0));
-        const cut = Math.min(band.maxCutDb, over);
-        this.deqCutDb[i] = cut;
-        // subtracting α of the band ≈ a cut of −20·log10(1−α) at its centre
-        const alpha = 1 - Math.pow(10, -cut / 20);
-        this.ramp(sub.gain, alpha, 0.008);
-      });
+    this.controlTick(now);
+
+    if (now - this.lastHeavyAt >= this.heavyIntervalMs) {
+      this.lastHeavyAt = now;
+      this.heavyTick(now);
     }
+
+    if (++this.frame % 3 === 0) this.notify();
+  }
+
+  /** Every-frame control loop over measured levels. */
+  private controlTick(now: number) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+
+    // input peaks
+    this.inAnalyserL.getFloatTimeDomainData(this.inBufL);
+    this.inAnalyserR.getFloatTimeDomainData(this.inBufR);
+    this.inPeakL = peakDb(this.inBufL);
+    this.inPeakR = peakDb(this.inBufR);
+    if (Math.max(this.inPeakL, this.inPeakR) > -0.2) this.clipInUntil = now + CLIP_HOLD_MS;
+
+    // raw programme level, measured ahead of the gate — the value the
+    // dead-air detector, the failover state machine and the window gate read
+    this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
+    const srcLevelDb = peakDb(this.gateBuf);
+    this.srcLevelDb = srcLevelDb;
+
+    const gate = this.params?.gate;
+    let gateWantOpen = true;
+    if (gate?.on) {
+      if (srcLevelDb >= gate.thresholdDb) {
+        this.gateCloseAt = 0;
+      } else if (this.gateCloseAt === 0) {
+        this.gateCloseAt = now + gate.holdMs;
+      } else {
+        gateWantOpen = now < this.gateCloseAt;
+      }
+    } else {
+      this.gateCloseAt = 0;
+    }
+    if (gateWantOpen !== this.gateOpen) {
+      this.gateOpen = gateWantOpen;
+      this.setNum("gate", this.gateGain.gain, gateWantOpen ? 1 : 0, gateWantOpen ? 0.03 : 0.05);
+    }
+
+    this.updateAgcWindow(now, srcLevelDb);
+    this.updateDeesser();
+    this.updateDynamicEq();
+  }
+
+  /** ── AGC window gate: hold the leveller while the programme is steady ── */
+  private updateAgcWindow(now: number, srcLevelDb: number) {
+    const params = this.params;
+    if (!params) return;
+    if (params.agc.on && params.agc.windowDb > 0) {
+      const reading = this.windowGate.update(srcLevelDb, now);
+      this.agcSpreadDb = reading.spreadDb;
+      this.agcFrozen = reading.frozen;
+      if (reading.frozen) {
+        // leave the hold gain where the last unfrozen tick put it: that is
+        // the freeze. The compressor keeps running, muted, so the release is
+        // just a crossfade back to wherever it has since travelled.
+        this.setNum("agc.wet", this.agcWetOut.gain, 0, 0.02);
+      } else {
+        const reduction = this.agcComp.reduction ?? 0;
+        this.agcHoldGainDb = params.agc.makeupDb + reduction;
+        this.setNum("agc.hold", this.agcHold.gain, dbToGain(this.agcHoldGainDb), 0.02);
+        this.setNum("agc.wet", this.agcWetOut.gain, 1, 0.02);
+      }
+    } else if (this.agcFrozen) {
+      this.agcFrozen = false;
+      this.agcSpreadDb = 0;
+      this.windowGate.reset();
+      this.setNum("agc.hold", this.agcHold.gain, 0, 0.02);
+      this.setNum("agc.wet", this.agcWetOut.gain, 1, 0.02);
+    }
+  }
+
+  /** ── de-esser: control-rate cut over the sibilance band ── */
+  private updateDeesser() {
+    const params = this.params;
+    if (!params) return;
+    if (params.deess.on && this.deessDet) {
+      const over = Math.max(0, -(this.deessDet.reduction || 0));
+      const cut = Math.min(params.deess.maxCutDb, over);
+      this.deessCutDb = cut;
+      this.setNum("deess.sub", this.deessSub.gain, deessAlpha(cut), 0.006);
+    } else if (this.deessCutDb !== 0) {
+      this.deessCutDb = 0;
+      this.setNum("deess.sub", this.deessSub?.gain, 0, 0.01);
+    }
+  }
+
+  /** ── dynamic EQ: cut follows the detector envelopes ── */
+  private updateDynamicEq() {
+    const params = this.params;
+    if (!params?.deq.on) return;
+    params.deq.bands.forEach((band, i) => {
+      const det = this.deqDets[i];
+      const sub = this.deqSubs[i];
+      if (!det || !sub) return;
+      const over = Math.max(0, -(det.reduction || 0));
+      const cut = Math.min(band.maxCutDb, over);
+      this.deqCutDb[i] = cut;
+      // subtracting α of the band ≈ a cut of −20·log10(1−α) at its centre
+      const alpha = 1 - Math.pow(10, -cut / 20);
+      this.setNum(`deq.${i}.sub`, sub.gain, alpha, 0.008);
+    });
+  }
+
+  /**
+   * Output measurement pass: peaks, correlation, true peak, loudness, gating
+   * blocks, the loudness rider and the snapshot the whole console reads.
+   */
+  private heavyTick(now: number) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t0 = performance.now();
 
     // audio-clock health: ctx.currentTime vs wall time — sustained negative
     // drift means the audio thread missed deadlines (glitches / bufferbloat)
@@ -1828,125 +2103,26 @@ export class AudioEngine {
       this.clockRefCtx = ctx.currentTime;
     } else if (now - this.clockRefWall >= 1000) {
       const drift =
-        (ctx.currentTime - this.clockRefCtx - (now - this.clockRefWall) / 1000) *
-        1000;
-      this.driftMs =
-        this.driftMs === 0 ? drift : this.driftMs * 0.7 + drift * 0.3;
+        (ctx.currentTime - this.clockRefCtx - (now - this.clockRefWall) / 1000) * 1000;
+      this.driftMs = this.driftMs === 0 ? drift : this.driftMs * 0.7 + drift * 0.3;
       this.glitch.update(this.driftMs, now);
       this.clockRefWall = now;
       this.clockRefCtx = ctx.currentTime;
     }
 
-    // input peaks
-    this.inAnalyserL.getFloatTimeDomainData(this.timeBuf);
-    let inL = 0;
-    for (let i = 0; i < this.timeBuf.length; i++) {
-      const v = Math.abs(this.timeBuf[i]);
-      if (v > inL) inL = v;
-    }
-    this.inAnalyserR.getFloatTimeDomainData(this.timeBuf);
-    let inR = 0;
-    for (let i = 0; i < this.timeBuf.length; i++) {
-      const v = Math.abs(this.timeBuf[i]);
-      if (v > inR) inR = v;
-    }
-    const inPeakL = toDb(inL);
-    const inPeakR = toDb(inR);
-    if (Math.max(inPeakL, inPeakR) > -0.2) this.clipInUntil = now + 600;
-
-    // input-stage silence gate — detected pre-gate on the raw source bus so
-    // a closed gate still hears the program come back
-    // Raw programme level, measured ahead of the gate and always — this is the
-    // value the dead-air detector and the failover state machine act on.
-    this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
-    let srcPeak = 0;
-    for (let i = 0; i < this.gateBuf.length; i++) {
-      const v = Math.abs(this.gateBuf[i]);
-      if (v > srcPeak) srcPeak = v;
-    }
-    const srcLevelDb = toDb(srcPeak);
-
-    const gate = this.params?.gate;
-    let gateWantOpen = true;
-    if (gate?.on) {
-      if (srcLevelDb >= gate.thresholdDb) {
-        this.gateCloseAt = 0;
-      } else {
-        if (this.gateCloseAt === 0) this.gateCloseAt = now + gate.holdMs;
-        else gateWantOpen = now < this.gateCloseAt;
-      }
-    } else {
-      this.gateCloseAt = 0;
-    }
-    if (gateWantOpen !== this.gateOpen) {
-      this.gateOpen = gateWantOpen;
-      this.ramp(
-        this.gateGain.gain,
-        gateWantOpen ? 1 : 0,
-        gateWantOpen ? 0.03 : 0.05,
-      );
-    }
-
-    // ── AGC window gate: hold the leveller while the programme is steady ──
-    if (this.params?.agc.on && this.params.agc.windowDb > 0) {
-      const reading = this.windowGate.update(srcLevelDb, now);
-      this.agcSpreadDb = reading.spreadDb;
-      this.agcFrozen = reading.frozen;
-      if (reading.frozen) {
-        // leave the hold gain where the last unfrozen tick put it: that is
-        // the freeze. The compressor keeps running, muted, so the release is
-        // just a crossfade back to wherever it has since travelled.
-        this.ramp(this.agcWetOut.gain, 0, 0.02);
-      } else {
-        const reduction = this.agcComp.reduction ?? 0;
-        this.agcHoldGainDb = this.params.agc.makeupDb + reduction;
-        this.ramp(this.agcHold.gain, dbToGain(this.agcHoldGainDb), 0.02);
-        this.ramp(this.agcWetOut.gain, 1, 0.02);
-      }
-    } else if (this.agcFrozen) {
-      this.agcFrozen = false;
-      this.agcSpreadDb = 0;
-      this.windowGate.reset();
-      this.ramp(this.agcHold.gain, 0, 0.02);
-      this.ramp(this.agcWetOut.gain, 1, 0.02);
-    }
-
-    // ── de-esser: control-rate cut over the sibilance band ──
-    if (this.params?.deess.on && this.deessDet) {
-      const over = Math.max(0, -(this.deessDet.reduction || 0));
-      const cut = Math.min(this.params.deess.maxCutDb, over);
-      this.deessCutDb = cut;
-      this.ramp(this.deessSub.gain, deessAlpha(cut), 0.006);
-    } else if (this.deessCutDb !== 0) {
-      this.deessCutDb = 0;
-      this.ramp(this.deessSub?.gain, 0, 0.01);
-    }
-
-    // output peaks + true peak + correlation
+    // output peaks + correlation
     this.outAnalyserL.getFloatTimeDomainData(this.outBufL);
     this.outAnalyserR.getFloatTimeDomainData(this.outBufR);
-    let outL = 0;
-    let outR = 0;
-    let dot = 0;
-    let eL = 0;
-    let eR = 0;
-    for (let i = 0; i < this.outBufL.length; i++) {
-      const l = this.outBufL[i];
-      const r = this.outBufR[i];
-      const al = Math.abs(l);
-      const ar = Math.abs(r);
-      if (al > outL) outL = al;
-      if (ar > outR) outR = ar;
-      dot += l * r;
-      eL += l * l;
-      eR += r * r;
-    }
-    const outPeakL = toDb(outL);
-    const outPeakR = toDb(outR);
+    const outPeakL = peakDb(this.outBufL);
+    const outPeakR = peakDb(this.outBufR);
+    const correlation = correlationOf(this.outBufL, this.outBufR);
+
+    const tail = Math.max(0, this.outBufL.length - TRUE_PEAK_WINDOW);
     const tp = Math.max(
-      this.truePeak(this.outBufL),
-      this.truePeak(this.outBufR),
+      measureTruePeak(this.outBufL.subarray(tail)),
+      measureTruePeak(this.outBufR.subarray(tail)),
     );
+
     const clipping = Math.max(outPeakL, outPeakR) > -0.2;
     // rising-edge counter + timestamp: the clip-event detector behind the
     // restoration panel (detection is measured; reconstruction stays stored)
@@ -1954,38 +2130,19 @@ export class AudioEngine {
       this.clipEvents += 1;
       this.clipAt = Date.now();
     }
-    if (clipping) this.clipOutUntil = now + 600;
-    const denom = Math.sqrt(eL * eR);
-    const correlation = denom > 1e-9 ? Math.max(-1, Math.min(1, dot / denom)) : 1;
+    if (clipping) this.clipOutUntil = now + CLIP_HOLD_MS;
 
     // K-weighted loudness (BS.1770-4, no gating — momentary/short-term)
-    const msL = this.meanSquare(this.ksAnalyserL, this.ksBufL);
-    const msR = this.meanSquare(this.ksAnalyserR, this.ksBufR);
-    const sum = msL + msR;
-    const loudness = sum > 1e-12 ? -0.691 + 10 * Math.log10(sum) : -70;
-    const msInL = this.meanSquare(this.inKsAnalyserL, this.ksBufInL);
-    const msInR = this.meanSquare(this.inKsAnalyserR, this.ksBufInR);
-    const sumIn = msInL + msInR;
-    const lufsIn = sumIn > 1e-12 ? -0.691 + 10 * Math.log10(sumIn) : -70;
-    this.lufsPoints.push({ t: now, ms: sum });
-    while (this.lufsPoints.length > 2 && now - this.lufsPoints[0].t > 3200) {
-      this.lufsPoints.shift();
-    }
-    const windowPower = (winMs: number) => {
-      let acc = 0;
-      let n = 0;
-      for (const p of this.lufsPoints) {
-        if (now - p.t <= winMs) {
-          acc += p.ms;
-          n++;
-        }
-      }
-      return n > 0 ? acc / n : 0;
-    };
-    const windowLufs = (winMs: number) => {
-      const v = windowPower(winMs);
-      return v > 1e-12 ? -0.691 + 10 * Math.log10(v) : -70;
-    };
+    this.ksAnalyserL.getFloatTimeDomainData(this.ksBufL);
+    this.ksAnalyserR.getFloatTimeDomainData(this.ksBufR);
+    const sum = meanSquare(this.ksBufL) + meanSquare(this.ksBufR);
+    this.inKsAnalyserL.getFloatTimeDomainData(this.ksBufInL);
+    this.inKsAnalyserR.getFloatTimeDomainData(this.ksBufInR);
+    const sumIn = meanSquare(this.ksBufInL) + meanSquare(this.ksBufInR);
+
+    this.loudnessWindow.push(now, sum);
+    const windowPower = (winMs: number) => this.loudnessWindow.power(winMs, now);
+    const windowLufs = (winMs: number) => this.loudnessWindow.loudness(winMs, now);
 
     // ── integrated loudness + LRA measurement (real, gated per spec) ──
     if (this.lastMeasureT > 0) this.measureMsAcc += now - this.lastMeasureT;
@@ -1994,13 +2151,13 @@ export class AudioEngine {
       this.lastIBlockAt = now;
       this.iBlocks.push(windowPower(400));
       if (this.iBlocks.length > 90_000) this.iBlocks.shift();
-      this.lufsIValue = this.gatedIntegrated(this.iBlocks, this.measureMsAcc);
+      this.lufsIValue = gatedIntegrated(this.iBlocks, this.measureMsAcc);
     }
     if (now - this.lastStBlockAt >= 1000) {
       this.lastStBlockAt = now;
       this.stBlocks.push(windowPower(3000));
       if (this.stBlocks.length > 12_000) this.stBlocks.shift();
-      this.lraValue = this.loudnessRange(this.stBlocks);
+      this.lraValue = loudnessRange(this.stBlocks);
     }
     if (outPeakL > this.samplePeakDb) this.samplePeakDb = outPeakL;
     if (outPeakR > this.samplePeakDb) this.samplePeakDb = outPeakR;
@@ -2015,36 +2172,40 @@ export class AudioEngine {
         const fast = this.params.rider.speed === "fast";
         // Compellor fast leveler ≈ 1.5 s down / 3 s up (setTarget ≈ ×⅓)
         const tc = ride < 0 ? (fast ? 0.5 : 1.7) : fast ? 1.0 : 3.3;
-        this.ramp(this.riderGain.gain, dbToGain(ride), tc);
+        this.setNum("rider", this.riderGain.gain, dbToGain(ride), tc);
         this.riderDb = ride;
       }
     } else {
       this.riderDb = 0;
-      this.ramp(this.riderGain.gain, 1, 0.05);
-    };
+      this.setNum("rider", this.riderGain.gain, 1, 0.05);
+    }
 
     // auto-speech sensing: mic programme present while the sense flag is
     // armed → halve the levelling envelopes with a full (ramped) re-apply
     const wantSpeech =
       !!this.params?.agc.speechSense &&
       this.sourceKind === "mic" &&
-      srcLevelDb > -50;
+      this.srcLevelDb > -50;
     if (wantSpeech !== this.speechFast) {
       this.speechFast = wantSpeech;
       if (this.params) this.apply(this.params);
     }
 
+    const grOf = (comp: DynamicsCompressorNode | undefined): number =>
+      Math.max(0, -(comp?.reduction ?? 0));
+    const agcOn = this.params?.agc.on ?? false;
+
     this.snapshotValue = {
       t: now,
       powered: true,
-      inPeakL,
-      inPeakR,
+      inPeakL: this.inPeakL,
+      inPeakR: this.inPeakR,
       outPeakL,
       outPeakR,
       truePeak: tp,
-      lufsM: loudness > -70 ? loudness : -70,
+      lufsM: loudnessOf(sum),
       lufsS: windowLufs(3000),
-      lufsIn: Math.max(-70, lufsIn),
+      lufsIn: loudnessOf(sumIn),
       lufsI: this.lufsIValue,
       lra: this.lraValue,
       measureMs: this.measureMsAcc,
@@ -2068,7 +2229,7 @@ export class AudioEngine {
         outputLatencyMs: (ctx.outputLatency ?? 0) * 1000,
         frameMs: this.frameCostMs,
         driftMs: this.driftMs,
-        throttled: this.frameCostMs > 4,
+        throttled: this.heavyIntervalMs > HEAVY_BASE_MS,
         stalls: this.glitch.stalls,
         glitchAt: this.glitch.lastStallAt,
       },
@@ -2077,14 +2238,22 @@ export class AudioEngine {
       clipEvents: this.clipEvents,
       clipAt: this.clipAt,
       speechFast: this.speechFast,
-      srcLevelDb,
+      srcLevelDb: this.srcLevelDb,
       backupActive: this.backupActiveFlag,
     };
 
-    if (++this.frame % 3 === 0) this.notify();
     const cost = performance.now() - t0;
-    this.frameCostMs =
-      this.frameCostMs === 0 ? cost : this.frameCostMs * 0.85 + cost * 0.15;
+    this.frameCostMs = this.frameCostMs === 0 ? cost : this.frameCostMs * 0.85 + cost * 0.15;
+    // Adaptive stability: metering must never compete with the UI or the
+    // render thread. Rather than dropping a whole frame (which froze the gate
+    // and de-esser loops), the heavy pass simply runs less often.
+    this.heavyIntervalMs =
+      this.frameCostMs > 8 ? 90 : this.frameCostMs > 4 ? 60 : HEAVY_BASE_MS;
+  }
+
+  /** True-peak estimate used by the meters and the verification suite. */
+  private truePeak(buf: Float32Array<ArrayBuffer>): number {
+    return measureTruePeak(buf);
   }
 
   /**
@@ -2103,59 +2272,9 @@ export class AudioEngine {
     this.samplePeakDb = -120;
     this.clipEvents = 0;
     this.clipAt = 0;
+    this.loudnessWindow.clear();
     this.glitch.reset();
     this.notify();
-  }
-
-  /** BS.1770-4 gated integrated loudness from 400 ms block powers. */
-  private gatedIntegrated(blocks: number[], measureMs: number): number | null {
-    if (measureMs < 20_000 || blocks.length < 50) return null;
-    const abs: number[] = [];
-    for (const b of blocks) {
-      if (b > 1e-12 && -0.691 + 10 * Math.log10(b) >= -70) abs.push(b);
-    }
-    if (abs.length === 0) return null;
-    let sum = 0;
-    for (const b of abs) sum += b;
-    const meanL = -0.691 + 10 * Math.log10(sum / abs.length);
-    const relThreshold = meanL - 10;
-    let gsum = 0;
-    let gn = 0;
-    for (const b of abs) {
-      if (-0.691 + 10 * Math.log10(b) >= relThreshold) {
-        gsum += b;
-        gn++;
-      }
-    }
-    if (gn === 0) return null;
-    return -0.691 + 10 * Math.log10(gsum / gn);
-  }
-
-  /** EBU Tech 3342 loudness range from short-term (3 s) block powers. */
-  private loudnessRange(blocks: number[]): number | null {
-    if (blocks.length < 30) return null;
-    const vals: number[] = [];
-    for (const b of blocks) {
-      if (b > 1e-12 && -0.691 + 10 * Math.log10(b) >= -70) vals.push(b);
-    }
-    if (vals.length < 20) return null;
-    let sum = 0;
-    for (const b of vals) sum += b;
-    const relThreshold = -0.691 + 10 * Math.log10(sum / vals.length) - 20;
-    const gated: number[] = [];
-    for (const b of vals) {
-      const l = -0.691 + 10 * Math.log10(b);
-      if (l >= relThreshold) gated.push(l);
-    }
-    if (gated.length < 10) return null;
-    gated.sort((a, b) => a - b);
-    const pct = (p: number) => {
-      const idx = (gated.length - 1) * p;
-      const lo = Math.floor(idx);
-      const hi = Math.ceil(idx);
-      return gated[lo] + (gated[hi] - gated[lo]) * (idx - lo);
-    };
-    return Math.max(0, pct(0.95) - pct(0.1));
   }
 
   /* ── failover (dead-air protection) ───────────────────────────────────── */
@@ -2239,13 +2358,13 @@ export class AudioEngine {
         }
         void this.backupEl.play().catch(() => {});
       }
-      this.ramp(this.srcGain.gain, 0, tc);
-      this.ramp(this.backupGain.gain, 1, tc);
+      this.setNum("failover.src", this.srcGain.gain, 0, tc);
+      this.setNum("failover.backup", this.backupGain.gain, 1, tc);
     } else {
-      this.ramp(this.srcGain.gain, 1, tc);
-      this.ramp(this.backupGain.gain, 0, tc);
+      this.setNum("failover.src", this.srcGain.gain, 1, tc);
+      this.setNum("failover.backup", this.backupGain.gain, 0, tc);
       if (this.backupEl) {
-        window.setTimeout(() => {
+        globalThis.setTimeout(() => {
           if (!this.backupActiveFlag) this.backupEl?.pause();
         }, fadeMs + 400);
       }
@@ -2266,7 +2385,7 @@ export class AudioEngine {
   getScopeFrames(n = 512): { l: Float32Array; r: Float32Array } {
     const N = Math.min(2048, Math.max(64, Math.floor(n)));
     const empty = { l: new Float32Array(0), r: new Float32Array(0) };
-    if (!this.ctx || !this.powered) return empty;
+    if (!this.ctx || !this.powered || !this.graphReady) return empty;
     try {
       this.outAnalyserL.getFloatTimeDomainData(this.scopeBufL);
       this.outAnalyserR.getFloatTimeDomainData(this.scopeBufR);
@@ -2291,7 +2410,7 @@ export class AudioEngine {
   /* ── spectrum access (canvas components read directly, no re-render) ──── */
 
   getSpectrum(pre: boolean): Uint8Array<ArrayBuffer> | null {
-    if (!this.powered) return null;
+    if (!this.powered || !this.graphReady) return null;
     if (pre) {
       this.preSpec.getByteFrequencyData(this.specBufPre);
       return this.specBufPre;

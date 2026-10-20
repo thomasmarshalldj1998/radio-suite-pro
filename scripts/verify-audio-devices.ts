@@ -268,9 +268,27 @@ check(cold.inputDeviceId === "mic-ghost", "the saved pick is restored at boot");
 await cold.refreshDevices();
 check(cold.inputDeviceId === "" && cold.outputDeviceId === "", "refresh drops devices that are gone", `${cold.inputDeviceId || "default"} / ${cold.outputDeviceId || "default"}`);
 
-/* ── 10 · quiet ────────────────────────────────────────────────────────── */
+/* ── 10 · a sleeping context ────────────────────────────────────────────── */
 
-console.log("\n10 · no noise");
+console.log("\n10 · a sink call while the context is asleep");
+badSinks.add("spk-b");
+const sleepy = new AudioEngine();
+const sleepingCtx = fakeContext();
+sleepingCtx.state = "suspended";
+sleepy.ctx = sleepingCtx as unknown as AudioContext;
+sleepy.setOutputDevice("spk-b");
+await settle();
+check(
+  sleepy.outputDeviceId === "spk-b",
+  "a suspended context keeps the pick for the next resume",
+  sleepy.outputDeviceId || "(default)",
+);
+check(prefs().output === "spk-b", "and does not overwrite the saved preference");
+badSinks.delete("spk-b");
+
+/* ── 11 · quiet ────────────────────────────────────────────────────────── */
+
+console.log("\n11 · no noise");
 await settle();
 check(logs.length === 0, "nothing was logged to console.error/warn", logs.join(" | "));
 check(rejections.length === 0, "no promise rejection escaped", rejections.map(String).join(" | "));

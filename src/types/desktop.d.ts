@@ -32,6 +32,8 @@ export interface SignalpathUdp {
 export interface SignalpathAudioDevice {
   id: string;
   label: string;
+  /** Endpoint group — equal ids mean the same physical/virtual device. */
+  groupId?: string;
 }
 
 export interface SignalpathAudioState {
@@ -41,6 +43,8 @@ export interface SignalpathAudioState {
   outputId: string;
   micStatus: string;
   micLabel: string;
+  /** Which source is feeding the chain right now. */
+  sourceKind: "signal" | "mic" | "file";
   /** 0 = engine off; drives the Devices window status badge. */
   sampleRate: number;
   contextState: string;

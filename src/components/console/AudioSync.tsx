@@ -28,6 +28,7 @@ export function AudioSync() {
         outputId: engine.outputDeviceId,
         micStatus: engine.micStatus,
         micLabel: engine.micLabel,
+        sourceKind: engine.sourceKind,
         sampleRate: engine.sampleRate,
         contextState: engine.ctx?.state ?? "closed",
       };

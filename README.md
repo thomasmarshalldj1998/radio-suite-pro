@@ -98,6 +98,29 @@ EQ → AGC → multiband → limiter chain. Their control maths is pure and live
 in `src/lib/audio/tools.ts`, so it is verified without a browser:
 `bun scripts/verify-core-tools.ts`.
 
+The engine is split by responsibility: `src/lib/audio/devices.ts`
+(enumeration, saved picks, virtual-endpoint and feedback detection),
+`src/lib/audio/measure.ts` (peak, true peak, BS.1770 loudness and its gating)
+and `engine.ts` (the graph, the program sources and the meter control loop).
+That leaves three invariants the engine enforces, each covered by a suite:
+
+- **One program source at a time.** Arming a microphone, selecting the
+generator or loading a file stops and releases the other two, so a mic is
+never mixed with the test tone — and arming a mic makes it the source instead
+of leaving the generator on air.
+- **Power cycling restores the source.** Stop → Start rebuilds the selected
+source (or re-arms the saved mic once the OS already allows it) instead of
+coming back up "running" with silence. Power-off releases the capture track.
+- **Two channels on the program bus.** A mono interface or mono file is
+up-mixed at the bus, so the right meter, the correlation readout and the M/S
+matrix do not silently lose half the programme.
+
+```bash
+bun scripts/verify-audio-sources.ts  # source routing, arming, power cycling, 2-channel bus
+bun scripts/verify-audio-measure.ts  # peaks/true peak/LUFS/LRA + device listing and saved picks
+bun scripts/verify-audio-devices.ts  # device selection, hot-swap, sink fallback
+```
+
 - **Dual-window AGC** — `agc.fast`. The leveller's slow window
   (`thresholdDb`, `ratio`, `attackMs`, `releaseMs`) rides long-term level,
   while an optional fast peak window with its own threshold, ratio and

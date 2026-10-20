@@ -4,6 +4,7 @@ import {
   type AudioDevice,
   type MicStatus,
 } from "@/lib/audio/engine";
+import { isFeedbackLoop, isVirtualDevice } from "@/lib/audio/devices";
 import type { SignalpathAudioState } from "@/types/desktop";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +23,12 @@ export interface AudioPanelController {
   engineOn: boolean;
   contextState: string;
   sampleRate: number;
+  /** Program source currently feeding the chain. */
+  sourceKind: "signal" | "mic" | "file";
+  /** Monitor sink is a virtual/loopback endpoint (inaudible locally). */
+  monitorVirtual?: boolean;
+  /** Input and monitor are two sides of the same endpoint (feedback). */
+  feedbackRisk?: boolean;
   setInput: (id: string) => void;
   setOutput: (id: string) => void;
   refresh: () => void;
@@ -47,6 +54,9 @@ export function useLocalAudioController(): AudioPanelController {
     engineOn: engine.powered,
     contextState: engine.ctx?.state ?? "closed",
     sampleRate: engine.sampleRate,
+    sourceKind: engine.sourceKind,
+    monitorVirtual: engine.monitorIsVirtual,
+    feedbackRisk: engine.feedbackRisk,
     setInput: (id) => engine.setInputDevice(id),
     setOutput: (id) => engine.setOutputDevice(id),
     refresh: () => void engine.refreshDevices(),
@@ -76,6 +86,8 @@ export function useRemoteAudioController(): AudioPanelController | null {
   }, [bridge]);
   if (!bridge) return null;
   const s = state;
+  const input = s?.inputs?.find((d) => d.id && d.id === s.inputId);
+  const output = s?.outputs?.find((d) => d.id && d.id === s.outputId);
   return {
     inputs: s?.inputs ?? EMPTY_INPUTS,
     outputs: s?.outputs ?? EMPTY_OUTPUTS,
@@ -86,6 +98,9 @@ export function useRemoteAudioController(): AudioPanelController | null {
     engineOn: (s?.sampleRate ?? 0) > 0,
     contextState: s?.contextState ?? "unknown",
     sampleRate: s?.sampleRate ?? 0,
+    sourceKind: s?.sourceKind ?? "signal",
+    monitorVirtual: !!output && isVirtualDevice(output.label),
+    feedbackRisk: isFeedbackLoop(input, output),
     setInput: (id) => bridge.setInput(id),
     setOutput: (id) => bridge.setOutput(id),
     refresh: () => bridge.refresh(),
@@ -113,6 +128,12 @@ export function AudioDevicesPanel({
   const suspended = controller.contextState === "suspended";
   const noInputs = controller.inputs.filter((d) => d.id).length === 0;
   const noOutputs = controller.outputs.filter((d) => d.id).length === 0;
+  const program =
+    controller.sourceKind === "mic"
+      ? "Input device"
+      : controller.sourceKind === "file"
+        ? "File playback"
+        : "Test generator";
 
   return (
     <div className={cn(!compact && "panel rounded-2xl p-4 sm:p-5")}>
@@ -178,8 +199,9 @@ export function AudioDevicesPanel({
       </select>
       {noInputs && (
         <p className="mt-1.5 text-[11px] leading-5 text-meter-warn">
-          No input hardware found on this machine — typical on a VPS with no
-          sound card. Arm will fail until an input exists.
+          No selectable input yet. The OS hides device names until
+          microphone access is granted — arm the input once, then rescan. On a
+          machine with no sound card there is nothing to list at all.
         </p>
       )}
       <div className="mt-2 flex items-center gap-2">
@@ -234,13 +256,30 @@ export function AudioDevicesPanel({
       </select>
       {noOutputs && (
         <p className="mt-1.5 text-[11px] leading-5 text-meter-warn">
-          No output hardware found — monitoring stays silent, but the encoder
-          feed is unaffected.
+          No selectable output — plug in speakers or headphones and rescan.
+          Monitoring stays silent until then; the encoder feed is unaffected.
         </p>
       )}
       <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
         What you hear locally. The stream encoder always carries the full
         program chain regardless of this choice.
+      </p>
+      {controller.feedbackRisk && (
+        <p className="mt-2 rounded border border-meter-hot/40 bg-meter-hot/10 px-2 py-1.5 text-[11px] leading-5 text-meter-hot">
+          Input and monitor are two sides of the same endpoint — the chain is
+          feeding its own output back into its input. Pick the cable&apos;s
+          output as the input, or monitor on real speakers instead.
+        </p>
+      )}
+      {controller.monitorVirtual && !controller.feedbackRisk && (
+        <p className="mt-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+          The monitor is routed into a virtual cable, so nothing will be heard
+          on this machine — that is normal when you are sending the chain to
+          another application. The encoder still carries it.
+        </p>
+      )}
+      <p className="mt-2 text-[10px] text-panel-mut">
+        Program source: <span className="text-panel-fg">{program}</span>
       </p>
     </div>
   );
