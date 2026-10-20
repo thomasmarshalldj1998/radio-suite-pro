@@ -124,15 +124,15 @@ class LameEncoder:
             "lame_set_VBR_q",
             "lame_set_error_protection",
             "lame_init_params",
-            "lame_encode_buffer_interleaved_float",
+            "lame_encode_buffer_interleaved_ieee_float",
             "lame_encode_flush",
             "lame_close",
         ):
             if not hasattr(lib, fn):
                 raise CodecUnavailable(f"libmp3lame is missing {fn}")
         lib.lame_init.restype = ctypes.c_void_p
-        lib.lame_encode_buffer_interleaved_float.restype = ctypes.c_int
-        lib.lame_encode_buffer_interleaved_float.argtypes = [
+        lib.lame_encode_buffer_interleaved_ieee_float.restype = ctypes.c_int
+        lib.lame_encode_buffer_interleaved_ieee_float.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_float),
             ctypes.c_int,
@@ -198,7 +198,7 @@ class LameEncoder:
             return b""
         buf = (ctypes.c_float * len(pcm))(*[float(x) for x in pcm])
         out = (ctypes.c_ubyte * (frames * 2 + 7200))()
-        written = self._lib.lame_encode_buffer_interleaved_float(
+        written = self._lib.lame_encode_buffer_interleaved_ieee_float(
             self._handle, buf, frames, out, len(out)
         )
         if written < 0:

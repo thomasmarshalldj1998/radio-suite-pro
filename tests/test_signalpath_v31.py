@@ -230,7 +230,14 @@ def test_lame() -> None:
     encoder = LameEncoder(cfg)
     check("lame: reservoir is nine frames", encoder.reservoir_frames == 9)
     check("lame: latency reported", 20 < encoder.latency_ms < 30)
-    if find_library() is None:
+    if encoder.available:
+        sine = tone(1000, 48_000, 0.024, 0.3)
+        interleaved = [s for pair in zip(sine, sine) for s in pair]
+        mp3 = encoder.encode_frame(interleaved)
+        check("lame: native encode produces a frame", len(mp3) > 100, f"{len(mp3)} bytes")
+        check("lame: MPEG frame sync", mp3[:2] == b"\xff\xfb" or mp3[:2] == b"\xff\xf3")
+        encoder.close()
+    else:
         check("lame: missing library is reported, not hidden", not encoder.available)
         try:
             encoder.encode_frame([0.0] * 64)
@@ -242,7 +249,7 @@ def test_lame() -> None:
 def test_aac() -> None:
     cfg = AACConfig(profile="he-aacv2", bitrate_kbps=64)
     check("aac: HE-AACv2 64 kbps accepted", cfg.validate().aot == 29)
-    check("aac: HE-AACv2 48 ms", cfg.latency_ms == 48.0)
+    check("aac: HE-AACv2 measured delay", cfg.latency_ms == 148.0)
     try:
         AACConfig(profile="he-aacv2", bitrate_kbps=160).validate()
         check("aac: HE-AACv2 rejects 160 kbps", False)
@@ -266,7 +273,18 @@ def test_aac() -> None:
     check("aac: ADTS CRC is nine bytes", len(protected) == 9 and protected[1] & 1 == 0)
     encoder = FdkAACEncoder(cfg)
     check("aac: backend status exposed", "available" in encoder.status())
-    if not encoder.available:
+    if encoder.available:
+        sine = tone(1000, 48_000, 0.1, 0.3)
+        interleaved = [s for pair in zip(sine, sine) for s in pair]
+        aac = encoder.encode_pcm(interleaved)
+        check("aac: native encode produces bytes", len(aac) > 200, f"{len(aac)} bytes")
+        check("aac: ADTS sync", aac[0] == 0xFF and (aac[1] & 0xF0) == 0xF0, aac[:2].hex())
+        low_delay = FdkAACEncoder(
+            AACConfig(profile="aac-ld", bitrate_kbps=128, sample_rate=48_000)
+        )
+        loud = low_delay.encode_pcm(interleaved)
+        check("aac: AAC-LD LOAS sync", loud[:1] == b"\x56", loud[:2].hex())
+    else:
         try:
             encoder.encode_pcm([0.0] * 2048)
             check("aac: encode raises without backend", False)

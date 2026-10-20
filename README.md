@@ -207,30 +207,57 @@ bun scripts/verify-delivery.ts  # limiter kernel + running worklet, mount routin
 
 ### Encoder backend (Python, v3.1)
 
-The encoder-side work lives in a dependency-free Python package at the repo
-root. It covers the 90 kHz PTS/DTS clock, the nine-frame MP3 reservoir and
-per-frame CRC, LAME and libfdk backends, the v3.1 processors (short-term
-ceiling, pre-duck, density anchors, dual-band attack/sustain, two-pass clip),
-the artefact score, the continuity CSV, 3-way simulcast, crossfade failover,
-the SRC drift lock and the health report. Everything is stdlib-only, so an
-encoder host needs nothing but Python 3.11.
+The encoder-side work lives in a Python package at the repo root. It covers
+the 90 kHz PTS/DTS clock, the nine-frame MP3 reservoir and per-frame CRC,
+native LAME and libfdk backends, the v3.1 processors (short-term ceiling,
+pre-duck, density anchors, dual-band attack/sustain, two-pass clip), the
+artefact score, the continuity CSV, 3-way simulcast, crossfade failover, the
+SRC drift lock and the health report. The codec/DSP modules are stdlib-only;
+the optional HTTP bridge needs FastAPI and uvicorn (`python3-fastapi`,
+`python3-uvicorn` on Debian).
 
-Native codecs are optional: `libmp3lame`/`fdkaac` are used when present and
-reported as unavailable otherwise, never as a crash. All new processors are
-bypassed by default; `signalpath_v3.1_presets.cfg` records each preset's
-state, and `Reference-Flat` bypasses every stage for alignment.
+Native codecs are probed at startup: `libmp3lame` and `libfdk-aac` give the
+low-latency native path, command line encoders are reported as `fallback`, and
+anything missing is `unavailable` — never a crash. `fdkaac` is not in Debian
+bookworm; the installed `libfdk-aac2` is used directly through ctypes.
+HE-AAC v2 reports **148 ms** of codec delay on FDK 2.0.2 (SBR/PS filterbank
+included), not the older 48 ms estimate; AAC-LD measures **10.7 ms**.
+
+All new processors are bypassed by default; `signalpath_v3.1_presets.cfg`
+records each preset's state, and `Reference-Flat` bypasses every stage for
+alignment.
 
 These are reference implementations in pure Python, so their throughput is
 bounded by CPython rather than by the algorithms: at 48 kHz the ceiling,
 pre-duck, density and dual-band stages run 10–30× faster than realtime, while
 the 16× true-peak clipper and the 512-tap SRC need about 1.7 s and 1.3 s of
-CPU per second of audio. The live on-air path remains the console's Web
-Audio/WASM engine;
-use this package for offline encoding, verification and hosts with headroom.
+CPU per second of audio. The live on-air DSP remains the console's Web
+Audio/WASM engine; use this package for native encoding, verification and
+hosts with headroom.
 
 ```bash
-python3 tests/test_signalpath_v31.py   # 199 checks across every module
+python3 tests/test_signalpath_v31.py   # 201 checks across every DSP module
+python3 tests/test_integration.py      # 43 checks: native codecs + FastAPI
+bun scripts/verify-backend.ts          # 18 checks: console bridge client
 ```
+
+#### Encoder bridge and console panel
+
+```bash
+python3 -m uvicorn api_bridge:app --host 127.0.0.1 --port 8000
+```
+
+`api_bridge.py` exposes `/api/health`, `/api/status/codecs`,
+`/api/status/live`, `/api/control/start-stream`, `/api/control/stop-stream`
+and `/api/control/feed` (interleaved s16le stereo). Set
+`SIGNALPATH_API_TOKEN` to require a bearer token; CORS defaults to `*` for the
+local console and can be narrowed with `SIGNALPATH_CORS`. The **Telemetry**
+tab's *Encoder backend* card probes the codecs, starts/stops an AAC session,
+mirrors the console's processed PCM into it while live, and shows the measured
+uplink/latency/LUFS. The client base URL is `VITE_ENCODER_API` (default
+`http://localhost:8000/api`). When the bridge is offline the card says so and
+the console keeps using its WASM/MediaRecorder path. The bridge encodes and
+meters; the console's existing TX transport remains the broadcaster.
 
 ## Desktop App (Windows, macOS, Linux)
 

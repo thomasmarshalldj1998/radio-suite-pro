@@ -1,3 +1,4 @@
+import { BackendPanel } from "@/components/console/BackendPanel";
 import { CompliancePanel } from "@/components/console/CompliancePanel";
 import { LogPanel } from "@/components/console/LogPanel";
 import { EngineChain } from "@/components/console/EngineChain";
@@ -369,6 +370,9 @@ export function TelemetryTab({
       >
         <EngineChain />
       </ModuleCard>
+
+      {/* ── native codec bridge (Python, optional) ── */}
+      <BackendPanel />
 
       {/* ── compliance monitoring ── */}
       <ModuleCard

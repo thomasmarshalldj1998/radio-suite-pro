@@ -2,9 +2,11 @@
 
 Two profiles, as specified:
 
-``he-aacv2``  24–128 kbps, SBR/PS automatic, 48 ms pipeline delay, ADTS + CRC
-``aac-ld``    64–192 kbps, low-delay AOT 23, < 15 ms end-to-end, raw/LATM for
-              live links (ADTS cannot signal AAC-LD)
+``he-aacv2``  24–128 kbps, SBR/PS automatic, ADTS + CRC. FDK 2.0.2 reports
+              148 ms of codec/filterbank delay at 48 kHz — measured from
+              AACENC_InfoStruct.nDelay, not the older 48 ms estimate.
+``aac-ld``    64–192 kbps, AOT 23, ~10.7 ms measured, LOAS/LATM for live links
+              (ADTS cannot signal AAC-LD).
 
 Backend discovery is explicit: the `fdkaac` command line encoder is used for
 offline encodes (it writes a real ADTS stream), and a `libfdk-aac` shared
@@ -16,11 +18,13 @@ loses its codec should still be able to open its console and alarm.
 
 from __future__ import annotations
 
+import array
 import ctypes.util
 import os
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -30,8 +34,8 @@ from stream_encoder_core import EncoderCore
 
 PROFILES = {
     # bitrate range, AOT, ADTS profile bits, latency, container
-    "he-aacv2": {"min": 24, "max": 128, "aot": 29, "adts": 1, "latency_ms": 48.0},
-    "aac-ld": {"min": 64, "max": 192, "aot": 23, "adts": None, "latency_ms": 12.0},
+    "he-aacv2": {"min": 24, "max": 128, "aot": 29, "adts": 1, "latency_ms": 148.0},
+    "aac-ld": {"min": 64, "max": 192, "aot": 23, "adts": None, "latency_ms": 10.7},
 }
 ADTS_RATES = [
     96000,
@@ -194,13 +198,48 @@ class FdkAACEncoder:
             )
         if not self.backend.startswith("cli:"):
             raise CodecUnavailable(
-                "a libfdk-aac shared library was found but this build has no "
-                "ABI binding for it; install the `fdkaac` command line encoder."
+                "native libfdk encoding failed and the fdkaac command is not "
+                "installed; install `fdkaac` for the fallback path."
             )
         return self.backend.split(":", 1)[1]
 
+    def _encode_native(self, pcm: Sequence[float]) -> bytes | None:
+        """Use the direct libfdk binding when it is present."""
+        try:
+            from aac_streaming_encoder import StreamingAACEncoder
+        except ImportError:
+            return None
+        cfg = self.config
+        try:
+            encoder = StreamingAACEncoder(
+                bitrate=cfg.bitrate_kbps * 1000,
+                sample_rate=cfg.sample_rate,
+                profile=cfg.profile,
+                channels=cfg.channels,
+                crc=cfg.crc,
+            )
+            if not encoder.start() or encoder.mode != "native":
+                return None
+            samples = array.array(
+                "h",
+                [
+                    int(max(-1.0, min(1.0, float(v))) * 32767.0)
+                    for v in pcm
+                ],
+            )
+            if sys.byteorder == "big":
+                samples.byteswap()
+            out = encoder.encode(samples.tobytes())
+            out += encoder.stop()
+            return out
+        except Exception:
+            return None
+
     def encode_pcm(self, pcm: Sequence[float]) -> bytes:
-        """Encode interleaved float PCM to one ADTS access unit stream."""
+        """Encode interleaved float PCM to an ADTS/LOAS byte stream."""
+        native = self._encode_native(pcm)
+        if native:
+            return native
         cli = self._require()
         cfg = self.config
         with tempfile.TemporaryDirectory(prefix="signalpath-aac-") as tmp:
