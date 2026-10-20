@@ -1560,6 +1560,43 @@ export function ProcessingTab({
                 8× resolves the crests a lossy encoder rebuilds
               </span>
             </CtrlRow>
+            <CtrlRow label="Engine">
+              <Seg
+                ariaLabel="Peak limiter engine"
+                value={params.limiter.engine === "native" ? "native" : "worklet"}
+                options={[
+                  { value: "worklet", label: "Worklet" },
+                  { value: "native", label: "Native" },
+                ]}
+                onChange={(v) =>
+                  setParams((p) => ({
+                    ...p,
+                    limiter: {
+                      ...p.limiter,
+                      engine: v === "native" ? "native" : "worklet",
+                    },
+                  }))
+                }
+              />
+              <span className="text-[10px] text-muted-foreground">
+                {params.limiter.engine === "native"
+                  ? "Browser compressor · no added latency"
+                  : snap?.powered && snap.limiterEngine === "native"
+                    ? "Worklet unavailable · running native"
+                    : "Lookahead brickwall · audio thread"}
+              </span>
+              <span
+                className={cn(
+                  "led size-1.5",
+                  snap?.powered
+                    ? snap.limiterEngine === "worklet"
+                      ? "led-on"
+                      : "led-warn"
+                    : undefined,
+                )}
+                aria-hidden
+              />
+            </CtrlRow>
             <CtrlRow label="True pk">
               <Val className={cn(peakOver && "text-meter-hot")}>
                 {snap?.powered

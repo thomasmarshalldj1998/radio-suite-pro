@@ -18,7 +18,13 @@
  * reconnect itself while the operator is looking at something else. Audio
  * produced while offline is dropped, never queued: a stream that catches up
  * is worse than a stream with a gap.
+ *
+ * A configured backup mount turns repeated failures into a mount switch
+ * (see mount-failover.ts): the primary is tried first, the backup takes over
+ * after two dead attempts, and a healthy backup hands the primary another
+ * chance on a later reconnect.
  */
+import { DualMountFailover } from "./mount-failover";
 
 export type StreamStatus = "idle" | "connecting" | "live" | "retrying" | "offline";
 
@@ -38,6 +44,16 @@ export interface StreamClientState {
   error: string | null;
   /** Epoch ms the current live connection started (0 when not live). */
   since: number;
+  /** Mount the current (or next) source session is using. */
+  mount: string;
+  /** Primary mount as configured. */
+  primaryMount: string;
+  /** Backup mount, null when the station runs a single mount. */
+  backupMount: string | null;
+  /** True while the backup mount has taken over from the primary. */
+  mountSwitched: boolean;
+  /** Automatic mount transitions this session. */
+  mountSwitches: number;
 }
 
 export const IDLE_TX: StreamClientState = {
@@ -49,6 +65,11 @@ export const IDLE_TX: StreamClientState = {
   nextRetryMs: null,
   error: null,
   since: 0,
+  mount: "",
+  primaryMount: "",
+  backupMount: null,
+  mountSwitched: false,
+  mountSwitches: 0,
 };
 
 export interface SourceConfig {
@@ -56,6 +77,8 @@ export interface SourceConfig {
   server: string;
   port: number;
   mount: string;
+  /** Optional second mount on the same server used when the primary fails. */
+  backupMount?: string;
   username: string;
   password: string;
   /** Container MIME type of the encoded chunks. */
@@ -219,6 +242,8 @@ export class StreamClient {
   private unsubBridge: (() => void) | null = null;
   private retryTimer: number | null = null;
   private countdownTimer: number | null = null;
+  /** Dual-mount policy for this session (null before start). */
+  private router: DualMountFailover | null = null;
   /** Identifies the current open attempt, so stale failures are ignored. */
   private attemptId = 0;
   /** Latest ICY title; replayed to a fresh source session after a drop. */
@@ -233,6 +258,11 @@ export class StreamClient {
     nextRetryMs: null,
     error: null,
     since: 0,
+    mount: "",
+    primaryMount: "",
+    backupMount: null,
+    mountSwitched: false,
+    mountSwitches: 0,
   };
 
   getState(): StreamClientState {
@@ -248,12 +278,19 @@ export class StreamClient {
     await this.stop(true);
     this.cfg = cfg;
     this.stopped = false;
+    const router = new DualMountFailover(cfg.mount, cfg.backupMount);
+    this.router = router;
     this.update({
       status: "connecting",
       transport: streamTransport(),
       error: null,
       attempt: 0,
       since: 0,
+      mount: router.active,
+      primaryMount: router.primary,
+      backupMount: router.backup,
+      mountSwitched: false,
+      mountSwitches: 0,
     });
     await this.open();
   }
@@ -264,13 +301,24 @@ export class StreamClient {
     this.clearTimers();
     const transport = streamTransport();
     const attemptId = ++this.attemptId;
-    this.update({ status: "connecting", transport, nextRetryMs: null });
+    // The router decides which mount this attempt uses; everything below
+    // talks to that mount only.
+    const mount = this.router?.choose() ?? cfg.mount;
+    const target = mount === cfg.mount ? cfg : { ...cfg, mount };
+    this.update({
+      status: "connecting",
+      transport,
+      nextRetryMs: null,
+      mount,
+      mountSwitched: this.router?.switched ?? false,
+      mountSwitches: this.router?.state.switches ?? 0,
+    });
     try {
       const writer =
         transport === "desktop"
-          ? await openDesktop(cfg)
+          ? await openDesktop(target)
           : transport === "browser"
-            ? await openBrowser(cfg, (message) => {
+            ? await openBrowser(target, (message) => {
                 void this.fail(message, attemptId);
               })
             : (() => {
@@ -287,12 +335,16 @@ export class StreamClient {
       // A reconnect opens a new source session on the server, so the current
       // title has to be announced again or listeners see an empty field.
       if (this.metadata) window.signalpath?.stream?.metadata(this.metadata);
+      this.router?.recordLive(Date.now(), mount);
       this.update({
         status: "live",
         attempt: 0,
         error: null,
         since: Date.now(),
         nextRetryMs: null,
+        mount,
+        mountSwitched: this.router?.switched ?? false,
+        mountSwitches: this.router?.state.switches ?? 0,
       });
     } catch (err) {
       await this.fail(err instanceof Error ? err.message : String(err), attemptId);
@@ -324,6 +376,7 @@ export class StreamClient {
     this.unsubBridge = null;
     this.writer = null;
     if (this.stopped) return;
+    this.router?.recordFailure();
     this.state.attempt += 1;
     const delay = retryDelayMs(this.state.attempt);
     this.retryAt = Date.now() + delay;
@@ -333,6 +386,9 @@ export class StreamClient {
       attempt: this.state.attempt,
       nextRetryMs: delay,
       since: 0,
+      mount: this.router?.active ?? this.state.mount,
+      mountSwitched: this.router?.switched ?? this.state.mountSwitched,
+      mountSwitches: this.router?.state.switches ?? this.state.mountSwitches,
     });
     this.countdownTimer = window.setInterval(() => {
       const left = Math.max(0, this.retryAt - Date.now());
@@ -369,6 +425,8 @@ export class StreamClient {
     this.stopped = true;
     this.attemptId += 1;
     this.clearTimers();
+    this.router?.reset();
+    this.router = null;
     this.unsubBridge?.();
     this.unsubBridge = null;
     const writer = this.writer;

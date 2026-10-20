@@ -199,6 +199,20 @@ export const DEFAULT_LIMITER_PROGRAM: LimiterProgramParams = {
   releaseMs: 320,
 };
 
+/** Peak-stage implementation chosen for the final limiter. */
+export type LimiterEngine = "native" | "worklet";
+
+/**
+ * Resolve the peak stage. Old saves and presets predate the worklet, so they
+ * take the lookahead path; the engine falls back to native when the platform
+ * cannot register the module.
+ */
+export function limiterEngine(
+  limiter: ProcessorParams["limiter"] | undefined,
+): LimiterEngine {
+  return limiter?.engine === "native" ? "native" : "worklet";
+}
+
 /** Program-limiter settings for a limiter block (old saves → bypassed). */
 export function limiterProgram(
   limiter: ProcessorParams["limiter"],
@@ -384,6 +398,12 @@ export interface ProcessorParams {
      * rebuild — at a higher metering cost.
      */
     truePeakX?: 2 | 4 | 8;
+    /**
+     * Peak-stage implementation. "worklet" runs the lookahead brickwall on
+     * the audio thread; "native" keeps the browser compressor. Absent on old
+     * saves → worklet, with an automatic fallback where it cannot load.
+     */
+    engine?: LimiterEngine;
   };
   /**
    * M/S stereo image: width 1 = neutral, >1 widens the side channel;
@@ -530,6 +550,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     adaptive: false,
     holdMs: 0,
     truePeakX: 4,
+    engine: "worklet",
   },
   stereo: { width: 1, lowMonoHz: 120 },
   loudness: { standard: "spotify", customLufs: LUFS_TARGET, customTpDb: TRUE_PEAK_TARGET },

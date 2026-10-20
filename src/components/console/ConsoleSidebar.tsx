@@ -10,6 +10,7 @@ const GROUP_OF: Record<TabId, "Console" | "Station"> = {
   compact: "Console",
   dsp: "Console",
   presets: "Console",
+  batch: "Console",
   stations: "Station",
   telemetry: "Station",
 };

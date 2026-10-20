@@ -374,9 +374,71 @@ check(
   "a single channel can be polarity-flipped for the check",
 );
 
-/* ── 8 · old saves ─────────────────────────────────────────────────────── */
+/* ── 8 · worklet limiter path ──────────────────────────────────────────── */
 
-console.log("\n8 · old saves gain the new stages bypassed");
+console.log("\n8 · worklet limiter");
+
+class FakeWorkletNode {
+  port = {
+    onmessage: null as null | ((e: { data: { gr?: number } }) => void),
+    postMessage() {
+      /* host → node params */
+    },
+  };
+  connect() {
+    /* wired */
+  }
+  disconnect() {
+    /* unwired */
+  }
+}
+
+(globalThis as unknown as { AudioWorkletNode: unknown }).AudioWorkletNode =
+  FakeWorkletNode;
+
+interface WorkletInternals {
+  ctx: unknown;
+  buildGraph: (ctx: unknown) => void;
+  apply: (p: ProcessorParams) => void;
+  workletReady: boolean;
+  workletLimiter: FakeWorkletNode | null;
+  workletGr: number;
+  limWorklet: FakeNode;
+  limNative: FakeNode;
+}
+
+{
+  const wCtx = { ...fakeCtx, audioWorklet: {} };
+  const w = new AudioEngine() as unknown as WorkletInternals;
+  w.ctx = wCtx;
+  w.workletReady = true;
+  w.buildGraph(wCtx);
+  w.apply(DEFAULT_PARAMS);
+
+  check(w.workletLimiter !== null, "the graph builds the lookahead worklet node");
+  check(
+    w.limWorklet.gain.value === 1 && w.limNative.gain.value === 0,
+    "the worklet is the peak stage by default",
+    `worklet ${w.limWorklet.gain.value} · native ${w.limNative.gain.value}`,
+  );
+
+  w.workletLimiter?.port.onmessage?.({ data: { gr: 7.5 } });
+  check(w.workletGr === 7.5, "gain reduction is read back from the audio thread");
+
+  w.apply({
+    ...DEFAULT_PARAMS,
+    limiter: { ...DEFAULT_PARAMS.limiter, engine: "native" },
+  });
+  check(
+    w.limWorklet.gain.value === 0 && w.limNative.gain.value === 1,
+    "selecting native crossfades the peak stage back",
+    `worklet ${w.limWorklet.gain.value} · native ${w.limNative.gain.value}`,
+  );
+}
+
+/* ── 9 · old saves ─────────────────────────────────────────────────────── */
+
+console.log("\n9 · old saves gain the new stages bypassed");
 {
   const legacy = {
     ...DEFAULT_PARAMS,
@@ -393,6 +455,7 @@ console.log("\n8 · old saves gain the new stages bypassed");
   check(merged.limiter.adaptive === false && merged.limiter.holdMs === 0, "adaptive/hold stay off");
   check(merged.limiter.truePeakX === 4, "true-peak metering defaults to 4×");
   check(merged.psy.msTrim.on === false && merged.psy.bassSynth.on === false, "M/S trim and bass stay bypassed");
+  check(merged.limiter.engine === "worklet", "a pre-worklet save takes the lookahead stage");
 }
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);

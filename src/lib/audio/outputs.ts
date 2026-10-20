@@ -9,6 +9,8 @@ export interface MountForm {
   server: string;
   port: number;
   mount: string;
+  /** Second mount on the same server the source rotates to on failure. */
+  backupMount?: string;
   username: string;
   password: string;
   codec: string;
@@ -25,6 +27,7 @@ export const EMPTY_SLOT: MountForm = {
   server: "",
   port: 0,
   mount: "",
+  backupMount: "",
   username: "",
   password: "",
   codec: "opus",

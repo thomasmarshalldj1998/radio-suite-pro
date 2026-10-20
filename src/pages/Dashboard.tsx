@@ -10,6 +10,7 @@ import {
 } from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { CompactView } from "@/components/console/CompactView";
+import { BatchPanel } from "@/components/console/BatchPanel";
 import { Button } from "@/components/ui/button";
 import {
   useAlarms,
@@ -52,6 +53,7 @@ import { APP_NAME, APP_VERSION } from "@/lib/version";
 import {
   Activity,
   Gauge,
+  Layers,
   LayoutDashboard,
   Power,
   Radio,
@@ -80,6 +82,7 @@ export type TabId =
   | "compact"
   | "dsp"
   | "presets"
+  | "batch"
   | "stations"
   | "telemetry";
 
@@ -97,6 +100,12 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     hint: "Preamp → AGC → MB → Limit · TX",
   },
   { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
+  {
+    id: "batch",
+    label: "Batch",
+    icon: Layers,
+    hint: "Offline normalise · limit · WAV",
+  },
   {
     id: "stations",
     label: "Network",
@@ -1102,6 +1111,7 @@ export default function Dashboard() {
                 <ScheduleCard params={params} activeName={activePreset} />
               </div>
             )}
+            {tab === "batch" && <BatchPanel params={params} />}
             {tab === "compact" && (
               <CompactView
                 params={params}

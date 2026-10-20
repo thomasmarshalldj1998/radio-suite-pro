@@ -326,6 +326,8 @@ interface EngineInternals {
   limDrive: FakeNode;
   limWetPre: FakeNode;
   limComp: FakeNode;
+  limSum: FakeNode;
+  limNative: FakeNode;
   mbComps: FakeNode[];
   agcHold: FakeNode;
   agcWetOut: FakeNode;
@@ -539,15 +541,17 @@ check(
   "the density drive sits between the de-esser and the limiter",
 );
 // the soft clipper is inserted at that same point: drive → (dry ∥ clipped) →
-// limiter, so the peak stage sees shaved transients instead of driving itself
-// into a harder knee.
+// summed peak stage, so both limiter paths see shaved transients instead of
+// driving themselves into a harder knee.
 check(
   edge(internals.limDrive, internals.clipShaper) &&
     edge(internals.clipShaper, internals.clipWet) &&
-    edge(internals.clipWet, internals.limComp) &&
     edge(internals.limDrive, internals.clipDry) &&
-    edge(internals.clipDry, internals.limComp),
-  "the soft clipper sits between the drive and the limiter",
+    edge(internals.clipWet, internals.limSum) &&
+    edge(internals.clipDry, internals.limSum) &&
+    edge(internals.limSum, internals.limComp) &&
+    edge(internals.limComp, internals.limNative),
+  "the soft clipper sums into the peak stage",
 );
 // the dual-window AGC is a chain: fast peak → slow leveller → makeup
 {

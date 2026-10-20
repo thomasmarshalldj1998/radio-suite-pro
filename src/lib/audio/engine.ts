@@ -47,8 +47,13 @@ import {
   eqBandOn,
   hpfSectionQs,
   limiterClipper,
+  limiterEngine,
   limiterProgram,
 } from "./params";
+import {
+  LIMITER_WORKLET_NAME,
+  limiterWorkletSource,
+} from "./limiter";
 import {
   WindowGate,
   clampDeessFreq,
@@ -160,6 +165,8 @@ export interface MeterSnapshot {
   speechFast: boolean;
   /** True while the standby source is feeding the chain (failover active). */
   backupActive: boolean;
+  /** Peak limiter actually in circuit — the worklet when it loaded, else native. */
+  limiterEngine: "native" | "worklet";
 }
 
 export const SILENT_SNAPSHOT: MeterSnapshot = {
@@ -202,6 +209,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   srcLevelDb: -120,
   speechFast: false,
   backupActive: false,
+  limiterEngine: "native",
 };
 
 /** One heavy measurement pass every N ms (true peak, loudness, blocks). */
@@ -407,6 +415,18 @@ export class AudioEngine {
   private limWetPre!: GainNode;
   private limComp!: DynamicsCompressorNode;
   private limDry!: GainNode;
+  /**
+   * Peak-stage split: the summed clipper output feeds both limiter paths, and
+   * the operator's engine choice crossfades between them (never a hard cut).
+   */
+  private limSum!: GainNode;
+  private limNative!: GainNode;
+  private limWorklet!: GainNode;
+  /** Lookahead worklet — null when the platform has no AudioWorklet. */
+  private workletLimiter: AudioWorkletNode | null = null;
+  private workletReady = false;
+  private workletGr = 0;
+  private workletConfig = "";
   /** Slow second limiter stage (program limiter). */
   private progComp!: DynamicsCompressorNode;
   private outputGain!: GainNode;
@@ -540,6 +560,9 @@ export class AudioEngine {
       }
       const ctx = new AudioContext({ latencyHint: "interactive" });
       this.ctx = ctx;
+      // The limiter module must be registered before buildGraph can create the
+      // node. Failure is not fatal: the native compressor path stays in place.
+      await this.loadLimiterWorklet(ctx);
       this.buildGraph(ctx);
     }
     const ctx = this.ctx;
@@ -633,7 +656,32 @@ export class AudioEngine {
       this.ctx = null;
     }
     this.written.clear();
+    this.workletLimiter = null;
     this.clearGraphRefs();
+  }
+
+  /**
+   * Register the lookahead limiter on the audio thread. The module is a Blob
+   * URL built from the kernel's own source, so it ships without a build-time
+   * asset and cannot drift from the verified implementation. Any failure
+   * leaves the native compressor in circuit — never a silent chain.
+   */
+  private async loadLimiterWorklet(ctx: AudioContext): Promise<void> {
+    this.workletReady = false;
+    this.workletLimiter = null;
+    if (!ctx.audioWorklet) return;
+    let url = "";
+    try {
+      url = URL.createObjectURL(
+        new Blob([limiterWorkletSource()], { type: "text/javascript" }),
+      );
+      await ctx.audioWorklet.addModule(url);
+      this.workletReady = true;
+    } catch {
+      this.workletReady = false;
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
   }
 
   /**
@@ -1048,10 +1096,43 @@ export class AudioEngine {
     this.clipShaper.oversample = "4x";
     this.rebuildClipCurve(DEFAULT_CLIPPER.thresholdDb);
     this.limDrive.connect(this.clipDry);
-    this.clipDry.connect(this.limComp);
     this.limDrive.connect(this.clipShaper);
     this.clipShaper.connect(this.clipWet);
-    this.clipWet.connect(this.limComp);
+    // Both clipper legs sum into one peak-stage input, so the native and
+    // worklet limiters hear exactly the same signal.
+    this.limSum = g(1);
+    this.clipDry.connect(this.limSum);
+    this.clipWet.connect(this.limSum);
+    this.limNative = g(1);
+    this.limWorklet = g(0);
+    this.limSum.connect(this.limComp);
+    this.limComp.connect(this.limNative);
+    this.limNative.connect(limOut);
+    if (this.workletReady) {
+      try {
+        const node = new AudioWorkletNode(ctx, LIMITER_WORKLET_NAME, {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          channelCount: 2,
+          channelCountMode: "explicit",
+          channelInterpretation: "speakers",
+        });
+        node.port.onmessage = (e: MessageEvent) => {
+          const data = e.data as { gr?: number };
+          if (typeof data?.gr === "number" && Number.isFinite(data.gr)) {
+            this.workletGr = Math.max(0, Math.min(60, data.gr));
+          }
+        };
+        this.limSum.connect(node);
+        node.connect(this.limWorklet);
+        this.limWorklet.connect(limOut);
+        this.workletLimiter = node;
+      } catch {
+        // construction refused: the native path is already wired at unity
+        this.workletLimiter = null;
+      }
+    }
     // ── program limiter: the slow second stage ──
     // It rides the short-term level under its own ceiling, so the fast peak
     // stage only ever sees transients. Ratio 1 = unity until engaged, which
@@ -1460,6 +1541,27 @@ export class AudioEngine {
     set("lim.t", this.limComp.threshold, params.limiter.ceilingDb);
     set("lim.a", this.limComp.attack, Math.max(params.limiter.attackMs, 0.1) / 1000);
     this.crossfade("lim", this.limWetPre, this.limDry, params.limiter.on);
+
+    // peak stage: the lookahead worklet when the platform gave us one and the
+    // operator chose it, otherwise the native compressor. Both paths stay
+    // wired and only their gains move, so switching is a crossfade, not a
+    // graph rebuild.
+    const useWorklet = limiterEngine(params.limiter) === "worklet" && !!this.workletLimiter;
+    this.crossfade("lim.engine", this.limWorklet, this.limNative, useWorklet);
+    if (this.workletLimiter) {
+      const lookaheadMs = Math.min(10, Math.max(0.5, params.limiter.attackMs));
+      const holdMs = Math.min(200, Math.max(0, params.limiter.holdMs ?? 0));
+      const key = `${params.limiter.ceilingDb}|${params.limiter.releaseMs}|${holdMs}|${lookaheadMs}`;
+      if (key !== this.workletConfig) {
+        this.workletConfig = key;
+        this.workletLimiter.port.postMessage({
+          ceilingDb: params.limiter.ceilingDb,
+          releaseMs: params.limiter.releaseMs,
+          holdMs,
+          lookaheadMs,
+        });
+      }
+    }
 
     // program limiter: slow second stage with its own ceiling and release
     const prog = limiterProgram(params.limiter);
@@ -2523,7 +2625,10 @@ export class AudioEngine {
         // apart on the meters.
         agc: agcOn ? grOf(this.agcComp) + grOf(this.agcFastComp) : 0,
         agcFast: agcOn ? grOf(this.agcFastComp) : 0,
-        limiter: grOf(this.limComp) + grOf(this.progComp),
+        limiter:
+          this.workletLimiter && limiterEngine(this.params?.limiter) === "worklet"
+            ? this.workletGr + grOf(this.progComp)
+            : grOf(this.limComp) + grOf(this.progComp),
       },
       agcWindow: { frozen: this.agcFrozen, spreadDb: this.agcSpreadDb },
       deessCut: this.deessCutDb,
@@ -2548,6 +2653,10 @@ export class AudioEngine {
       speechFast: this.speechFast,
       srcLevelDb: this.srcLevelDb,
       backupActive: this.backupActiveFlag,
+      limiterEngine:
+        this.workletLimiter && limiterEngine(this.params?.limiter) === "worklet"
+          ? "worklet"
+          : "native",
     };
 
     const cost = performance.now() - t0;

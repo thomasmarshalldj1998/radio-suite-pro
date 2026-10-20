@@ -226,6 +226,7 @@ function startSourceUplink({
     server: form.server,
     port: form.port,
     mount: form.mount,
+    backupMount: form.backupMount || undefined,
     username: form.username || "source",
     password: form.password,
     contentType: mime,
@@ -363,6 +364,7 @@ export function EncoderPanel({
         server: mountDoc.server,
         port: mountDoc.port,
         mount: mountDoc.mount,
+        backupMount: mountDoc.backupMount ?? "",
         username: mountDoc.username,
         password: mountDoc.password,
         codec: mountDoc.codec,
@@ -1165,6 +1167,17 @@ export function EncoderPanel({
               placeholder="/live"
             />
           </Field>
+          <Field label="Backup mount" className="col-span-2 sm:col-span-1">
+            <Input
+              value={form.backupMount ?? ""}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, backupMount: e.target.value }))
+              }
+              className="h-9 font-mono text-xs"
+              placeholder="/backup"
+              aria-label="Backup mount point for automatic failover"
+            />
+          </Field>
           <Field label="Source user">
             <Input
               value={form.username}
@@ -1213,6 +1226,42 @@ export function EncoderPanel({
               <span className="text-foreground/80">{form.targetFormat}</span>
             </p>
           )}
+          <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+            <span
+              className={cn(
+                "led size-1.5",
+                !tx.backupMount
+                  ? undefined
+                  : tx.mountSwitched
+                    ? "led-warn"
+                    : "led-on",
+              )}
+              aria-hidden
+            />
+            {tx.backupMount ? (
+              <>
+                Dual-mount failover{" "}
+                <span className="text-readout text-foreground/80">
+                  {tx.primaryMount || form.mount || "primary"} →{" "}
+                  {tx.backupMount}
+                </span>
+                {rt.onAir && (
+                  <span>
+                    · on {tx.mount || form.mount}
+                    {tx.mountSwitched ? " (backup)" : " (primary)"}
+                    {tx.mountSwitches > 0
+                      ? ` · ${tx.mountSwitches} switch${tx.mountSwitches === 1 ? "" : "es"}`
+                      : ""}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span>
+                Add a backup mount to survive a primary that refuses the source
+                — the console switches after two failed attempts.
+              </span>
+            )}
+          </p>
           {supported.length > 0 && (
             <p className="mt-2 text-[10px] text-muted-foreground">
               MediaRecorder fallbacks:{" "}

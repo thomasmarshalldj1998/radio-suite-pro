@@ -8,6 +8,7 @@ const mountArgs = {
   server: v.string(),
   port: v.number(),
   mount: v.string(),
+  backupMount: v.optional(v.string()),
   username: v.string(),
   password: v.string(),
   codec: v.string(),

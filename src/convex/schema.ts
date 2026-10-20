@@ -26,6 +26,9 @@ export const mountValidator = {
   server: v.string(),
   port: v.number(),
   mount: v.string(),
+  // optional second mount on the same server, used when the primary keeps
+  // refusing the source (dual-mount failover)
+  backupMount: v.optional(v.string()),
   username: v.string(),
   password: v.string(),
   codec: v.string(), // "opus" | "aac" | ...

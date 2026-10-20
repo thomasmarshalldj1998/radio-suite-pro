@@ -179,6 +179,32 @@ bun scripts/verify-processing-extras.ts  # loudness standards/CSV, limiter envel
   the compliance verdict; Telemetry exports the session log as a CSV report
   with the station, preset, target, deviation and true peak per second.
 
+### Peak stage, mount failover and batch delivery
+
+- **Worklet limiter** — `limiter.engine` (Limiter → Engine). `worklet` runs a
+  sample-accurate lookahead brickwall on the audio thread: the gain target for
+  every sample is the minimum over the coming lookahead window, so the gain is
+  already down when a transient arrives and no sample leaves above the
+  ceiling. The native compressor path stays wired; switching is a crossfade,
+  and a platform without AudioWorklet falls back to it automatically (the
+  panel reads `Worklet unavailable · running native`). The kernel in
+  `src/lib/audio/limiter.ts` is stringified into the worklet module, so the
+  audio thread runs the same code the suite tests.
+- **Dual-mount failover** — an optional **Backup mount** on the mount
+  configuration. After two failed source attempts the client rotates to the
+  backup mount and keeps retrying with backoff; once the backup has been live
+  for five minutes the next reconnect tries the primary again, dropping
+  straight back if it is still refusing sources. The mount panel shows which
+  mount is in use and how many automatic switches have happened.
+- **Batch delivery** — the **Batch** page normalises a queue of local files
+  offline: BS.1770 K-weighted loudness to a published target, the same
+  lookahead limiter at the target's true-peak ceiling, and 16-bit WAV output.
+  Nothing is uploaded and live metering is untouched.
+
+```bash
+bun scripts/verify-delivery.ts  # limiter kernel + running worklet, mount routing, batch loudness/WAV
+```
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with
