@@ -205,6 +205,33 @@ bun scripts/verify-processing-extras.ts  # loudness standards/CSV, limiter envel
 bun scripts/verify-delivery.ts  # limiter kernel + running worklet, mount routing, batch loudness/WAV
 ```
 
+### Encoder backend (Python, v3.1)
+
+The encoder-side work lives in a dependency-free Python package at the repo
+root. It covers the 90 kHz PTS/DTS clock, the nine-frame MP3 reservoir and
+per-frame CRC, LAME and libfdk backends, the v3.1 processors (short-term
+ceiling, pre-duck, density anchors, dual-band attack/sustain, two-pass clip),
+the artefact score, the continuity CSV, 3-way simulcast, crossfade failover,
+the SRC drift lock and the health report. Everything is stdlib-only, so an
+encoder host needs nothing but Python 3.11.
+
+Native codecs are optional: `libmp3lame`/`fdkaac` are used when present and
+reported as unavailable otherwise, never as a crash. All new processors are
+bypassed by default; `signalpath_v3.1_presets.cfg` records each preset's
+state, and `Reference-Flat` bypasses every stage for alignment.
+
+These are reference implementations in pure Python, so their throughput is
+bounded by CPython rather than by the algorithms: at 48 kHz the ceiling,
+pre-duck, density and dual-band stages run 10–30× faster than realtime, while
+the 16× true-peak clipper and the 512-tap SRC need about 1.7 s and 1.3 s of
+CPU per second of audio. The live on-air path remains the console's Web
+Audio/WASM engine;
+use this package for offline encoding, verification and hosts with headroom.
+
+```bash
+python3 tests/test_signalpath_v31.py   # 199 checks across every module
+```
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with

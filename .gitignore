@@ -4,5 +4,7 @@ dist
 dist-desktop
 release
 build
+__pycache__/
+*.pyc
 # Convex's generated types ARE versioned: CI typechecks and bundles from a
 # fresh checkout, where `convex dev` never ran (they are never hand-edited).
