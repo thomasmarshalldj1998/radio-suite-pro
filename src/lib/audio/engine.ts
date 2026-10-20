@@ -1224,7 +1224,9 @@ export class AudioEngine {
       curve[i] =
         u <= knee
           ? x
-          : Math.sign(x) * t * (knee + Math.tanh((u - knee) / (1 - knee)));
+          : Math.sign(x) *
+            t *
+            (knee + (1 - knee) * Math.tanh((u - knee) / (1 - knee)));
     }
     this.clipShaper.curve = curve;
     this.clipThresholdDb = thresholdDb;

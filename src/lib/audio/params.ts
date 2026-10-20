@@ -3587,18 +3587,13 @@ function stageResponseDb(
   const sw = Math.sin(w0);
   const w = (2 * Math.PI * f) / fs;
   if (type === "highpass" || type === "lowpass") {
+    // RBJ: HP b0 = (1 + cos)/2, LP b0 = (1 − cos)/2. `sign` folds one
+    // expression onto both.
     const alpha = sw / (2 * q);
     const a0 = 1 + alpha;
     const sign = type === "highpass" ? 1 : -1;
-    return biquadMagnitudeDb(
-      (1 - sign * cw) / 2,
-      sign * (1 - sign * cw),
-      (1 - sign * cw) / 2,
-      a0,
-      -2 * cw,
-      1 - alpha,
-      w,
-    );
+    const b0 = (1 + sign * cw) / 2;
+    return biquadMagnitudeDb(b0, -sign * 2 * b0, b0, a0, -2 * cw, 1 - alpha, w);
   }
   if (type === "notch") {
     const alpha = sw / (2 * q);

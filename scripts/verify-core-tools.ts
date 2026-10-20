@@ -14,7 +14,16 @@
  * numbers below are the values the live graph would receive.
  */
 import { AudioEngine } from "../src/lib/audio/engine";
-import { BUILTIN_PRESETS, DEFAULT_PARAMS, coerceParams, dbToGain } from "../src/lib/audio/params";
+import {
+  BUILTIN_PRESETS,
+  DEFAULT_PARAMS,
+  chainResponseDb,
+  coerceParams,
+  dbToGain,
+  eqBandOn,
+  hpfSectionQs,
+  limiterClipper,
+} from "../src/lib/audio/params";
 import {
   DEESS_MAX_HZ,
   DEESS_MIN_HZ,
@@ -151,6 +160,43 @@ console.log("\n5 · parameters");
       typeof p.params.deess?.freqHz !== "number",
   );
   check(missing.length === 0, "every built-in preset carries the new controls", `${BUILTIN_PRESETS.length - missing.length}/${BUILTIN_PRESETS.length}`);
+
+  // HPF steepness: one section per 12 dB/oct, more sections = steeper
+  check(DEFAULT_PARAMS.hpf.slope === 24, "the HPF ships at 24 dB/oct", `${DEFAULT_PARAMS.hpf.slope} dB/oct`);
+  const slopes = ([12, 24, 36, 48] as const).map((s) => hpfSectionQs(s).length);
+  check(
+    slopes.join("/") === "1/2/3/4",
+    "steepness maps to 1–4 cascade sections",
+    slopes.join("/"),
+  );
+  check(
+    hpfSectionQs(48).every((q) => q > 0.5 && q < 3),
+    "Butterworth sections use sane pole Qs",
+    hpfSectionQs(48).map((q) => q.toFixed(2)).join("/"),
+  );
+  // 30 Hz rolloff should be far deeper at 48 dB/oct than at 12
+  const shallow = chainResponseDb({ ...DEFAULT_PARAMS, eq: { ...DEFAULT_PARAMS.eq, on: false }, hpf: { on: true, freqHz: 80, slope: 12 } }, 20);
+  const steep = chainResponseDb({ ...DEFAULT_PARAMS, eq: { ...DEFAULT_PARAMS.eq, on: false }, hpf: { on: true, freqHz: 80, slope: 48 } }, 20);
+  check(steep < shallow - 12, "48 dB/oct cuts far deeper below the corner", `${shallow.toFixed(1)} → ${steep.toFixed(1)} dB @ 20 Hz`);
+
+  // EQ per-band bypass + extended shapes
+  const legacyBand = { freq: 120, gainDb: 3, q: 1, type: "peaking" as const };
+  check(eqBandOn(legacyBand), "a band saved without a bypass flag reads as on");
+  check(!eqBandOn({ ...legacyBand, on: false }), "an explicit off keeps the band out of the chain");
+  const notch = chainResponseDb(
+    { ...DEFAULT_PARAMS, hpf: { ...DEFAULT_PARAMS.hpf, on: false }, eq: { on: true, bands: [{ freq: 1000, gainDb: 0, q: 4, type: "notch", on: true }] } },
+    1000,
+  );
+  const notchBypassed = chainResponseDb(
+    { ...DEFAULT_PARAMS, hpf: { ...DEFAULT_PARAMS.hpf, on: false }, eq: { on: true, bands: [{ freq: 1000, gainDb: 0, q: 4, type: "notch", on: false }] } },
+    1000,
+  );
+  check(notch < -20 && near(notchBypassed, 0, 1e-9), "a notch cuts and per-band bypass removes it", `${notch.toFixed(1)} dB / ${notchBypassed.toFixed(1)} dB`);
+
+  // clipper defaults on old limiter blocks
+  const legacyLimiter = { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 100 };
+  check(limiterClipper(legacyLimiter).on === false, "the clipper ships bypassed on legacy saves");
+  check(limiterClipper({ ...legacyLimiter, clipper: { on: true, thresholdDb: -2, mix: 40 } }).mix === 40, "a saved clipper setting survives coercion");
 }
 
 /* ── 6 · graph wiring ─────────────────────────────────────────────────── */
@@ -244,6 +290,11 @@ const fakeCtx = {
 
 interface EngineInternals {
   buildGraph: (ctx: unknown) => void;
+  hpfStages: FakeNode[];
+  eqFilters: FakeNode[];
+  clipShaper: FakeNode;
+  clipWet: FakeNode;
+  clipDry: FakeNode;
   phaseStages: FakeNode[];
   phaseWet: FakeNode;
   phaseDry: FakeNode;
@@ -294,6 +345,68 @@ check(
 engine.apply({ ...DEFAULT_PARAMS, phase: { ...DEFAULT_PARAMS.phase, on: false } });
 check(internals.phaseWet.gain.value === 0 && internals.phaseDry.gain.value === 1, "bypass drops the whole cascade");
 
+// HPF cascade: sections follow the selected steepness, bypass makes them neutral
+check(internals.hpfStages.length === 4, "the graph holds four HPF sections", `${internals.hpfStages.length}`);
+engine.apply({ ...DEFAULT_PARAMS, hpf: { on: true, freqHz: 60, slope: 48 } });
+check(
+  internals.hpfStages.every((s) => s.type === "highpass") && near(internals.hpfStages[0].frequency.value, 60),
+  "48 dB/oct engages all four sections at the set corner",
+  internals.hpfStages.map((s) => s.type.slice(0, 2)).join("/"),
+);
+engine.apply({ ...DEFAULT_PARAMS, hpf: { on: true, freqHz: 60, slope: 12 } });
+check(
+  internals.hpfStages[0].type === "highpass" && internals.hpfStages.slice(1).every((s) => s.type === "allpass"),
+  "12 dB/oct leaves one section and neutralises the rest",
+);
+engine.apply({ ...DEFAULT_PARAMS, hpf: { on: false, freqHz: 60, slope: 48 } });
+check(internals.hpfStages.every((s) => s.type === "allpass"), "HPF bypass keeps the topology but removes the cut");
+
+// EQ: shape and per-band bypass reach the real filters
+engine.apply({
+  ...DEFAULT_PARAMS,
+  eq: {
+    on: true,
+    bands: DEFAULT_PARAMS.eq.bands.map((b, i) =>
+      i === 3 ? { ...b, type: "notch" as const } : i === 4 ? { ...b, on: false } : b,
+    ),
+  },
+});
+check(internals.eqFilters[3].type === "notch", "a band's shape is applied to its filter", internals.eqFilters[3].type);
+check(internals.eqFilters[4].type === "allpass", "a bypassed band goes magnitude-neutral", internals.eqFilters[4].type);
+
+// clipper: bypassed by default, blended when engaged, curve bounded
+engine.apply(DEFAULT_PARAMS);
+check(
+  internals.clipWet.gain.value === 0 && internals.clipDry.gain.value === 1,
+  "the clipper is bypassed in the default chain",
+);
+engine.apply({
+  ...DEFAULT_PARAMS,
+  limiter: { ...DEFAULT_PARAMS.limiter, clipper: { on: true, thresholdDb: -3, mix: 60 } },
+});
+check(
+  near(internals.clipWet.gain.value, 0.6) && near(internals.clipDry.gain.value, 0.4),
+  "the mix control blends clipped and dry program",
+  `${internals.clipWet.gain.value.toFixed(2)} / ${internals.clipDry.gain.value.toFixed(2)}`,
+);
+const clipCurve = internals.clipShaper.curve as Float32Array | null;
+const clipT = dbToGain(-3);
+check(
+  !!clipCurve && clipCurve.length > 1000 && Math.max(...Array.from(clipCurve, Math.abs)) <= clipT + 1e-6,
+  "the clipper curve never exceeds its threshold",
+  `${clipT.toFixed(3)}`, 
+);
+{
+  const n = clipCurve?.length ?? 0;
+  const i = Math.floor(n / 2) + 20;
+  const x = n ? -1 + (2 * i) / (n - 1) : 0;
+  check(
+    !!clipCurve && near(clipCurve[i], x, 1e-6),
+    "quiet program passes the clipper untouched",
+    `${clipCurve?.[i].toFixed(4)} vs ${x.toFixed(4)}`,
+  );
+}
+
 engine.apply({ ...DEFAULT_PARAMS, deess: { ...DEFAULT_PARAMS.deess, freqHz: 9000 } });
 check(internals.deessBpAudio.frequency.value === 9000 && internals.deessBpDet.frequency.value === 9000, "retuning moves audio and detector together", "9 kHz");
 engine.apply({ ...DEFAULT_PARAMS, deess: { ...DEFAULT_PARAMS.deess, on: false } });
@@ -305,8 +418,19 @@ const edge = (a: FakeNode, b: FakeNode) =>
 check(edge(internals.deessOut, internals.limWetPre), "the de-esser feeds the limiter input");
 check(!edge(internals.deessOut, internals.limComp), "it never feeds the limiter directly");
 check(
-  edge(internals.limWetPre, internals.limDrive) && edge(internals.limDrive, internals.limComp),
+  edge(internals.limWetPre, internals.limDrive),
   "the density drive sits between the de-esser and the limiter",
+);
+// the soft clipper is inserted at that same point: drive → (dry ∥ clipped) →
+// limiter, so the peak stage sees shaved transients instead of driving itself
+// into a harder knee.
+check(
+  edge(internals.limDrive, internals.clipShaper) &&
+    edge(internals.clipShaper, internals.clipWet) &&
+    edge(internals.clipWet, internals.limComp) &&
+    edge(internals.limDrive, internals.clipDry) &&
+    edge(internals.clipDry, internals.limComp),
+  "the soft clipper sits between the drive and the limiter",
 );
 // the phase cascade is a chain, not parallel stages
 check(
