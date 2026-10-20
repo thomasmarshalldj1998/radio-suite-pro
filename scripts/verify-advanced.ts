@@ -259,6 +259,10 @@ console.log("\n5 · v3.1 factory presets");
     "Nightmode-Consistent-Soft",
     "Reference-Mastering-Off",
     "Source-Through-Reference",
+    "Warm-Open",
+    "Punchy-Compact",
+    "Clean-Voice",
+    "Broadcast-Glue",
   ];
   for (const name of extended) {
     check(Boolean(BUILTIN_PRESETS.find((p) => p.name === name)), `${name} exists`);
@@ -269,6 +273,36 @@ console.log("\n5 · v3.1 factory presets");
   check(
     ref?.params.limiter.on === false && ref?.params.agc.on === false && ref?.params.eq.on === false,
     "Source-Through-Reference bypasses every dynamics stage",
+  );
+
+  const warm = BUILTIN_PRESETS.find((p) => p.name === "Warm-Open")?.params.advanced;
+  check(
+    warm?.restoration.harmonics.on === true &&
+      warm?.eq.air.on === true &&
+      warm?.spatial.diffusion.on === true,
+    "Warm-Open engages harmonics, air and diffusion",
+  );
+  const punchy = BUILTIN_PRESETS.find((p) => p.name === "Punchy-Compact")?.params.advanced;
+  check(
+    punchy?.leveling.transient.on === true &&
+      punchy?.leveling.crest.on === true &&
+      punchy?.leveling.peakRms.on === true,
+    "Punchy-Compact engages transient, crest and peak/RMS control",
+  );
+  const clean = BUILTIN_PRESETS.find((p) => p.name === "Clean-Voice")?.params.advanced;
+  check(
+    clean?.eq.presence.on === true &&
+      clean?.eq.mudGate.on === true &&
+      clean?.eq.deess.on === true,
+    "Clean-Voice engages presence, mud gate and de-essing",
+  );
+  const glue = BUILTIN_PRESETS.find((p) => p.name === "Broadcast-Glue")?.params.advanced;
+  check(
+    glue?.leveling.agcProfile.on === true &&
+      glue?.compliance.truePeak.on === true &&
+      glue.compliance.truePeak.factor === 16 &&
+      glue.compliance.truePeak.ceilingDb === -0.5,
+    "Broadcast-Glue sets the 16× −0.5 dBTP pre-guard",
   );
 }
 

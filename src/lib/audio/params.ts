@@ -3931,6 +3931,106 @@ export const BUILTIN_PRESETS: BuiltinPreset[] = [
     }),
   },
   {
+    id: "warm-open",
+    name: "Warm-Open",
+    description:
+      "Warm top end and a wide image: subtle even harmonics, a gentle air shelf, 55 % diffusion and a −1 dBTP ceiling. Everything else stays neutral.",
+    tags: ["v3.1", "Warm", "Wide"],
+    family: "Signalpath v3.1",
+    params: merge({
+      limiter: { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 120 },
+      advanced: {
+        restoration: {
+          harmonics: { on: true, even: 20, odd: 0, band: "mid", drive: 40, mix: 8 },
+        },
+        eq: { air: { on: true, corner: 16, slope: 6, sparkle: 35, noSibilance: true } },
+        spatial: {
+          diffusion: { on: true, width: 55, decorrelation: 50, freqHz: 700, monoSafe: true },
+          msEq: {
+            on: true,
+            bands: MS_BANDS.map((freq) => ({
+              freq,
+              midDb: 0,
+              sideDb: freq >= 8000 ? 2 : freq <= 63 ? -2 : 0,
+              q: 1,
+            })),
+          },
+        },
+      },
+    }),
+  },
+  {
+    id: "punchy-compact",
+    name: "Punchy-Compact",
+    description:
+      "Front-foot transients with controlled density: +35 attack transient shaping, a 9 dB crest target, linked peak/RMS and −1 dBTP.",
+    tags: ["v3.1", "Punch", "Dense"],
+    family: "Signalpath v3.1",
+    params: merge({
+      density: 7,
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 70 },
+      advanced: {
+        leveling: {
+          transient: { on: true, band: "all", attack: 35, sustain: -10, rangeMs: 4 },
+          crest: { on: true, targetDb: 9, response: "fast" },
+          peakRms: { on: true, link: 60 },
+        },
+      },
+    }),
+  },
+  {
+    id: "clean-voice",
+    name: "Clean-Voice",
+    description:
+      "Speech clarity: 100 Hz HPF, separate 2–5 kHz presence lift, a 300 Hz mud gate, band de-essing and gentle harshness control at −16 LUFS.",
+    tags: ["v3.1", "Voice", "Clean"],
+    family: "Signalpath v3.1",
+    params: merge({
+      hpf: { on: true, freqHz: 100 },
+      loudness: { standard: "apple", customLufs: -16, customTpDb: -1 },
+      limiter: { on: true, ceilingDb: -1, attackMs: 0.8, releaseMs: 80 },
+      advanced: {
+        eq: {
+          presence: {
+            on: true,
+            presenceGainDb: 2.5,
+            presenceWidth: 1.2,
+            presenceMode: "natural",
+            brillianceGainDb: 1,
+            airType: "smooth",
+          },
+          mudGate: { on: true, freqHz: 300, density: 40, release: "fast", keepWarmth: 60 },
+          deess: { on: true },
+        },
+        psycho: { harshness: { on: true, suppress: 45 } },
+      },
+    }),
+  },
+  {
+    id: "broadcast-glue",
+    name: "Broadcast-Glue",
+    description:
+      "24/7 house chain: profile levelling, gate, a 6 LU range target, 16× true-peak pre-guard at −0.5 dBTP and −18 LUFS.",
+    tags: ["v3.1", "Broadcast", "Glue"],
+    family: "Signalpath v3.1",
+    params: merge({
+      density: 6,
+      loudness: { standard: "custom", customLufs: -18, customTpDb: -1 },
+      rider: { on: true, targetLufs: -18, maxRideDb: 8, gateDb: -50, speed: "slow" },
+      limiter: { on: true, ceilingDb: -1, attackMs: 1, releaseMs: 100 },
+      advanced: {
+        leveling: {
+          agcProfile: { on: true, profile: "auto" },
+          gate: { on: true, openDb: -42, closeDb: -48 },
+        },
+        compliance: {
+          lra: { on: true, targetLu: 6 },
+          truePeak: { on: true, factor: 16, ceilingDb: -0.5, holdS: 2 },
+        },
+      },
+    }),
+  },
+  {
     id: "reference-mastering-off",
     name: "Reference-Mastering-Off",
     description:
