@@ -330,16 +330,32 @@ if (!app.requestSingleInstanceLock()) {
 
     // The console mics the input path and streams audio — grant the media
     // and full-screen permissions the studio UI asks for, nothing else.
+    // speaker-selection is what lets the renderer list and route to a real
+    // output device; without it enumerateDevices() hands back an empty
+    // deviceId for every sink and the output picker stays on "default".
+    const grantedPermissions = [
+      "media",
+      "audio-capture",
+      "speaker-selection",
+      "fullscreen",
+      "pointerLock",
+      "clipboard-sanitized-write",
+    ];
     session.defaultSession.setPermissionRequestHandler(
       (_wc, permission, callback) => {
-        const granted = [
-          "media",
-          "audio-capture",
-          "fullscreen",
-          "pointerLock",
-          "clipboard-sanitized-write",
-        ].includes(permission);
-        callback(granted);
+        callback(grantedPermissions.includes(permission));
+      },
+    );
+    // The console also *checks* permissions (navigator.permissions.query)
+    // before re-arming the saved mic on boot; answer for our own pages only.
+    session.defaultSession.setPermissionCheckHandler(
+      (_wc, permission, requestingOrigin) => {
+        // app:// only ever serves dist-desktop; DEV_URL is the dev server.
+        const origin = typeof requestingOrigin === "string" ? requestingOrigin : "";
+        const ours =
+          origin.startsWith("app://") ||
+          (Boolean(DEV_URL) && origin.startsWith(DEV_URL));
+        return ours && grantedPermissions.includes(permission);
       },
     );
 

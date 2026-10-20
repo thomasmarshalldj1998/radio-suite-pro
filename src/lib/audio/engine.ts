@@ -1545,18 +1545,41 @@ export class AudioEngine {
       setSinkId?: (sinkId: string) => Promise<void>;
     }) | null;
     if (!ctx || typeof ctx.setSinkId !== "function") return;
+    const wanted = this.outputDeviceId;
     try {
-      await ctx.setSinkId(this.outputDeviceId);
+      await ctx.setSinkId(wanted);
     } catch {
-      /* unknown device (unplugged?) — stays on the current sink */
+      // The device vanished between enumeration and the switch. Drop back to
+      // the OS default and say so, rather than leaving the panel claiming a
+      // sink nothing is routed to. A closed context is not a dead device.
+      if (!wanted || ctx.state === "closed") return;
+      if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
+      this.outputDeviceId = "";
+      this.saveDevicePrefs();
+      try {
+        await ctx.setSinkId("");
+      } catch {
+        /* context cannot re-open the default sink — nothing left to try */
+      }
+      this.notify();
     }
   }
 
   async armMic(): Promise<void> {
-    if (!this.ctx) return;
     if (this.micStatus === "on" || this.micStatus === "arming") return;
+    // Claim the arm before booting: powerOn() re-enters here through
+    // autoInitInput/setSource, and a second concurrent arm would open two
+    // streams on two devices.
     this.micStatus = "arming";
     this.notify();
+    // Arming is a user gesture — boot the graph for it instead of leaving the
+    // Arm button dead on a console that was never powered on.
+    if (!this.ctx) await this.powerOn();
+    if (!this.ctx) {
+      this.micStatus = "error";
+      this.notify();
+      return;
+    }
     const base = {
       echoCancellation: false,
       noiseSuppression: false,
@@ -1564,6 +1587,8 @@ export class AudioEngine {
       channelCount: 2,
     };
     const wanted = this.inputDeviceId;
+    // The device the stream actually opened on — the default after a fallback.
+    let openedWith = wanted;
     try {
       let stream: MediaStream;
       try {
@@ -1572,8 +1597,11 @@ export class AudioEngine {
         });
       } catch {
         // Chosen device gone (unplugged?) — fall back to the OS default
-        // rather than leaving the operator with a dead input.
+        // rather than leaving the operator with a dead input. Forget the
+        // dead pick too, so the next boot does not restore it.
         this.inputDeviceId = "";
+        openedWith = "";
+        this.saveDevicePrefs();
         stream = await navigator.mediaDevices.getUserMedia({ audio: base });
       }
       this.micStream = stream;
@@ -1584,6 +1612,15 @@ export class AudioEngine {
       this.micStatus = "on";
       // Permission granted → real device labels are visible now.
       void this.refreshDevices();
+      // The operator may have picked another input while getUserMedia was
+      // still resolving (the selection re-arm skips an arm already in
+      // flight). The winning device is always the latest pick.
+      if (this.inputDeviceId !== openedWith) {
+        this.disarmMic();
+        this.notify();
+        void this.armMic();
+        return;
+      }
     } catch {
       this.micStatus = "error";
     }
