@@ -10,6 +10,7 @@ import {
 } from "@/components/console/ProcessingTab";
 import { TelemetryTab } from "@/components/console/TelemetryTab";
 import { CompactView } from "@/components/console/CompactView";
+import { FullChainTab } from "@/components/console/FullChainTab";
 import { BatchPanel } from "@/components/console/BatchPanel";
 import { PresetSystemSuite } from "@/components/console/AdvancedPanels";
 import { Button } from "@/components/ui/button";
@@ -53,6 +54,7 @@ import { cn } from "@/lib/utils";
 import { APP_NAME, APP_VERSION } from "@/lib/version";
 import {
   Activity,
+  Cpu,
   Gauge,
   Layers,
   LayoutDashboard,
@@ -82,6 +84,7 @@ export type TabId =
   | "overview"
   | "compact"
   | "dsp"
+  | "fullchain"
   | "presets"
   | "batch"
   | "stations"
@@ -99,8 +102,15 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
     label: "DSP",
     icon: SlidersHorizontal,
     hint: "Preamp → AGC → MB → Limit · TX",
+  },  {
+    id: "fullchain",
+    label: "Full DSP Chain",
+    icon: Cpu,
+    hint: "43 modules · presets · performance",
   },
-  { id: "presets", label: "Presets", icon: Sparkles, hint: "Station presets · library" },
+  {
+    id: "presets",
+    label: "Presets", icon: Sparkles, hint: "Station presets · library" },
   {
     id: "batch",
     label: "Batch",
@@ -1088,6 +1098,7 @@ export default function Dashboard() {
             {tab === "overview" && (
               <InputTab params={params} setParams={setParams} />
             )}
+            {tab === "fullchain" && <FullChainTab />}
             {tab === "dsp" && (
               <ProcessingTab
                 params={params}

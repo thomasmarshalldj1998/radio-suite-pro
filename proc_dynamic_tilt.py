@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, Envelope, clamp, copy_stereo, level_db
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["DynamicTilt"]
 
@@ -54,12 +60,32 @@ class DynamicTilt:
         l, r = copy_stereo(left, right)
         if not self.enabled or (self.tilt_db == 0.0 and self.dynamic_db == 0.0):
             return l, r
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        if _np is not None and len(l) >= 64:
+            base_l, base_r = _np.asarray(low_l), _np.asarray(low_r)
+            env_state = self._env
+            last = self.tilt_db
+            tilts = _np.empty(len(l))
+            for i in range(len(l)):
+                env = env_state.process(max(abs(l[i]), abs(r[i])))
+                extra = self.dynamic_db * clamp(
+                    (level_db(env) - self.threshold_db) / 12.0, 0.0, 1.0
+                )
+                last = self.tilt_db + extra
+                tilts[i] = last
+            gl = _np.power(10.0, tilts / 40.0)
+            gh = _np.power(10.0, -tilts / 40.0)
+            out_l = base_l * gl + (_np.asarray(l) - base_l) * gh
+            out_r = base_r * gl + (_np.asarray(r) - base_r) * gh
+            self.applied_tilt_db = last
+            return out_l.tolist(), out_r.tolist()
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         last = self.tilt_db
         for i, (xl, xr) in enumerate(zip(l, r)):
-            low = self._low_l.process(xl)
-            low2 = self._low_r.process(xr)
+            low = low_l[i]
+            low2 = low_r[i]
             env = self._env.process(max(abs(xl), abs(xr)))
             extra = self.dynamic_db * clamp(
                 (level_db(env) - self.threshold_db) / 12.0, 0.0, 1.0

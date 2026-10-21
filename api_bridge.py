@@ -17,6 +17,7 @@ it to localhost.
 from __future__ import annotations
 
 import array
+import json
 import math
 import os
 import sys
@@ -25,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from aac_streaming_encoder import AACEncoderError, StreamingAACEncoder
 from codec_backend_guard import CodecStatus, codec_backend
+from dsp_chain_state import PUBLIC_PRESETS, dsp_state
 
 VERSION = "3.1.0"
 SUPPORTED = {"aac", "he-aacv2", "aac-ld", "aac-lc"}
@@ -49,6 +51,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+class DspValueRequest(BaseModel):
+    module: str
+    param: str
+    value: Any
+
+
+class LoadPresetRequest(BaseModel):
+    name: str
+    morph_time: float = 2.0
+
+
+class BlockSizeRequest(BaseModel):
+    block_size: int = Field(default=1024, ge=256, le=8192)
 
 
 class StartRequest(BaseModel):
@@ -347,6 +364,73 @@ def _require_token(authorization: str | None) -> None:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "version": VERSION, "service": "signalpath-encoder"}
+
+
+# ── full DSP chain control plane ──────────────────────────────────────
+
+
+@app.get("/api/dsp/modules")
+def dsp_modules(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_token(authorization)
+    return {"modules": dsp_state.modules(), "presets": list(PUBLIC_PRESETS)}
+
+
+@app.post("/api/dsp/set-value")
+def dsp_set_value(
+    req: DspValueRequest | None = Body(default=None),
+    module: str | None = Query(default=None),
+    param: str | None = Query(default=None),
+    value: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Accept JSON (console) or query parameters (simple scripts)."""
+    _require_token(authorization)
+    if req is None:
+        if module is None or param is None or value is None:
+            raise HTTPException(status_code=422, detail="module, param and value are required")
+        try:
+            parsed: Any = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = value
+        req = DspValueRequest(module=module, param=param, value=parsed)
+    try:
+        return dsp_state.set_value(req.module, req.param, req.value)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown DSP parameter {exc}") from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/dsp/load-preset")
+def dsp_load_preset(
+    req: LoadPresetRequest | None = Body(default=None),
+    name: str | None = Query(default=None),
+    morph_time: float = Query(default=2.0, ge=1.0, le=5.0),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_token(authorization)
+    if req is None:
+        if name is None:
+            raise HTTPException(status_code=422, detail="name is required")
+        req = LoadPresetRequest(name=name, morph_time=morph_time)
+    try:
+        return dsp_state.load_preset(req.name, req.morph_time)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown preset {exc}") from exc
+
+
+@app.post("/api/dsp/config")
+def dsp_config(req: BlockSizeRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_token(authorization)
+    dsp_state.block_size = int(req.block_size)
+    dsp_state._perf_at = 0.0
+    return {"ok": True, "block_size": dsp_state.block_size}
+
+
+@app.get("/api/status/performance")
+def dsp_performance(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_token(authorization)
+    return dsp_state.performance()
 
 
 @app.get("/api/status/codecs")

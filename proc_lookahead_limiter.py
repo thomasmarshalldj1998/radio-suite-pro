@@ -70,28 +70,44 @@ class LookaheadLimiter:
             return l, r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
-        worst = 0.0
         peak = 0.0
+        gain = self._gain
+        hold_left = self._hold_left
+        hold = self._hold
+        release = self._release
+        ceiling = self.ceiling
+        buf_l, buf_r = self._buf_l, self._buf_r
+        pos = self._pos
+        delay = self._delay
+        lowest = gain
         for i, (xl, xr) in enumerate(zip(l, r)):
-            detector = max(abs(xl), abs(xr))
-            peak = max(peak, detector)
-            target = 1.0 if detector <= self.ceiling else self.ceiling / detector
-            if target < self._gain:
-                self._gain = target
-                self._hold_left = self._hold
-            elif self._hold_left > 0:
-                self._hold_left -= 1
+            detector = abs(xl)
+            other = abs(xr)
+            if other > detector:
+                detector = other
+            if detector > peak:
+                peak = detector
+            target = 1.0 if detector <= ceiling else ceiling / detector
+            if target < gain:
+                gain = target
+                hold_left = hold
+            elif hold_left > 0:
+                hold_left -= 1
             else:
-                self._gain += (1.0 - self._gain) * self._release
-            dl = self._buf_l[self._pos]
-            dr = self._buf_r[self._pos]
-            self._buf_l[self._pos] = xl
-            self._buf_r[self._pos] = xr
-            self._pos = (self._pos + 1) % self._delay
-            out_l[i] = clamp(dl * self._gain, -self.ceiling, self.ceiling)
-            out_r[i] = clamp(dr * self._gain, -self.ceiling, self.ceiling)
-            worst = max(worst, -20.0 * math.log10(max(self._gain, 1e-9)))
-        self.max_reduction_db = worst
+                gain += (1.0 - gain) * release
+            dl = buf_l[pos]
+            dr = buf_r[pos]
+            buf_l[pos] = xl
+            buf_r[pos] = xr
+            pos = (pos + 1) % delay
+            out_l[i] = min(ceiling, max(-ceiling, dl * gain))
+            out_r[i] = min(ceiling, max(-ceiling, dr * gain))
+            if gain < lowest:
+                lowest = gain
+        self._gain = gain
+        self._hold_left = hold_left
+        self._pos = pos
+        self.max_reduction_db = -20.0 * math.log10(max(lowest, 1e-9))
         self.peak_db = level_db(peak)
         return out_l, out_r
 

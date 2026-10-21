@@ -48,6 +48,34 @@ export interface LiveMetrics {
   source: "python";
 }
 
+export interface DspParam {
+  value: number | string | boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  options?: string[];
+}
+
+export interface DspModule {
+  id: string;
+  name: string;
+  category: string;
+  bypassed: boolean;
+  params: Record<string, DspParam>;
+}
+
+export interface PerfMetrics {
+  realtime_factor: number;
+  cpu_dsp_pct: number;
+  block_size: number;
+  latency_ms: number;
+  dropped_blocks: number;
+  state: "live" | "lagging" | "offline";
+  modules: number;
+  measured_at: number;
+}
+
 export interface StartOptions {
   mount: string;
   codec?: string;
@@ -172,6 +200,97 @@ export class SignalPathBackend {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Full DSP chain control plane. These calls are additive: an offline
+   * bridge returns null/false and the console keeps its WASM path.
+   */
+  async getModules(): Promise<{
+    modules: DspModule[];
+    presets: string[];
+  } | null> {
+    try {
+      return await this.request<{ modules: DspModule[]; presets: string[] }>(
+        "/dsp/modules",
+        undefined,
+        3000,
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  async setValue(
+    module: string,
+    param: string,
+    value: number | string | boolean,
+  ): Promise<boolean> {
+    try {
+      await this.request("/dsp/set-value", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ module, param, value }),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async loadPreset(name: string, morphTime = 2): Promise<boolean> {
+    try {
+      await this.request("/dsp/load-preset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, morph_time: morphTime }),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getPerfStatus(): Promise<PerfMetrics | null> {
+    try {
+      return await this.request<PerfMetrics>("/status/performance", undefined, 5000);
+    } catch {
+      return null;
+    }
+  }
+
+  async setBlockSize(blockSize: 1024 | 2048): Promise<boolean> {
+    try {
+      await this.request("/dsp/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ block_size: blockSize }),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Chained 1 s perf poll — no request stacking on a slow bridge. */
+  subscribePerf(
+    cb: (metrics: PerfMetrics | null) => void,
+    intervalMs = 1000,
+  ): () => void {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      if (stopped) return;
+      const metrics = await this.getPerfStatus();
+      if (stopped) return;
+      cb(metrics);
+      timer = setTimeout(tick, intervalMs);
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }
 
   async startStream(options: StartOptions | string): Promise<LiveMetrics> {

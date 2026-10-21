@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo, rms
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["BassPhaseLock"]
 
@@ -51,13 +57,30 @@ class BassPhaseLock:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.amount <= 0.0:
             return l, r
-        n = len(l)
-        low_l, low_r = [0.0] * n, [0.0] * n
-        high_l, high_r = [0.0] * n, [0.0] * n
         mix = self.amount / 100.0
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        base_l, base_r = low_l, low_r
+        if _np is not None and len(l) >= 64:
+            base_l, base_r = _np.asarray(low_l), _np.asarray(low_r)
+            mono = 0.5 * (base_l + base_r)
+            low_l = (base_l + (mono - base_l) * mix).tolist()
+            low_r = (base_r + (mono - base_r) * mix).tolist()
+            diff = _np.asarray(low_l) - _np.asarray(low_r)
+            self.bass_width = float(_np.sqrt(_np.mean(diff * diff))) / max(
+                float(_np.sqrt(_np.mean(_np.square(low_l)))), 1e-9
+            )
+            return (
+                (_np.asarray(low_l) + (_np.asarray(l) - base_l)).tolist(),
+                (_np.asarray(low_r) + (_np.asarray(r) - base_r)).tolist(),
+            )
+        low_l = [0.0] * len(l)
+        low_r = [0.0] * len(r)
+        high_l = [0.0] * len(l)
+        high_r = [0.0] * len(r)
         for i, (xl, xr) in enumerate(zip(l, r)):
-            low = self._low_l.process(xl)
-            low2 = self._low_r.process(xr)
+            low = base_l[i]
+            low2 = base_r[i]
             mono = 0.5 * (low + low2)
             low_l[i] = low + (mono - low) * mix
             low_r[i] = low2 + (mono - low2) * mix

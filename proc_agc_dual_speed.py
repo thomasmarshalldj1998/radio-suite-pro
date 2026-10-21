@@ -79,16 +79,41 @@ class AgcDualSpeed:
         out_r = [0.0] * len(r)
         slow_env = self._slow.value
         fast_env = self._fast.value
+        slow_a, slow_r = self._slow.attack, self._slow.release
+        fast_a, fast_r = self._fast.attack, self._fast.release
+        attack = self._attack
+        release = self._release
+        gain = self._gain
+        target_db = self.target_db
+        max_boost = self.max_boost_db
+        max_cut = self.max_cut_db
+        fast_ceiling = self.fast_ceiling_db
+        slow_gain_db = self.slow_gain_db
+        fast_gain_db = self.fast_gain_db
         for i, (xl, xr) in enumerate(zip(l, r)):
-            linked = max(abs(xl), abs(xr))
-            slow_env = self._slow.process(linked)
-            fast_env = self._fast.process(linked)
-            target = self._target_gain(level_db(slow_env), level_db(fast_env))
-            coef = self._attack if target < self._gain else self._release
-            self._gain += (target - self._gain) * coef
-            out_l[i] = xl * self._gain
-            out_r[i] = xr * self._gain
-        self.output_gain_db = 20.0 * math.log10(max(self._gain, 1e-9))
+            linked = abs(xl)
+            other = abs(xr)
+            if other > linked:
+                linked = other
+            coef = slow_a if linked > slow_env else slow_r
+            slow_env += (linked - slow_env) * coef
+            coef = fast_a if linked > fast_env else fast_r
+            fast_env += (linked - fast_env) * coef
+            slow_db = level_db(slow_env)
+            fast_db = level_db(fast_env)
+            slow_gain_db = clamp(target_db - slow_db, -max_cut, max_boost)
+            fast_gain_db = min(0.0, fast_ceiling - fast_db)
+            target = 10.0 ** ((slow_gain_db + fast_gain_db) / 20.0)
+            coef = attack if target < gain else release
+            gain += (target - gain) * coef
+            out_l[i] = xl * gain
+            out_r[i] = xr * gain
+        self._slow.value = slow_env
+        self._fast.value = fast_env
+        self._gain = gain
+        self.slow_gain_db = slow_gain_db
+        self.fast_gain_db = fast_gain_db
+        self.output_gain_db = 20.0 * math.log10(max(gain, 1e-9))
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

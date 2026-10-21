@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, copy_stereo
 
 __all__ = ["PreEmphasisFilter"]
@@ -53,10 +54,7 @@ class PreEmphasisFilter:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
-        return (
-            [self._shelf_l.process(x) for x in l],
-            [self._shelf_r.process(x) for x in r],
-        )
+        return filter_block(self._shelf_l, l), filter_block(self._shelf_r, r)
 
     def state(self) -> dict[str, float | bool | str]:
         return {

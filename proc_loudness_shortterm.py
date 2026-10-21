@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from stream_encoder_core import k_weighting, lufs_from_mean_square
 
 WINDOWS = (1.0, 3.0)
@@ -94,23 +95,27 @@ class ShortTermCeiling:
         n = min(len(left), len(right))
         if not self.enabled:
             # Bypass must be exact: no K-weighting, no delay, no state.
-            return [float(x) for x in left[:n]], [float(x) for x in right[:n]]
+            return list(map(float, left[:n])), list(map(float, right[:n]))
 
         out_l = [0.0] * n
         out_r = [0.0] * n
         size = self.window_samples
+        # K-weighting is two static biquads per channel: run the chain in C
+        # and keep the sample loop for the sliding window and gain.
+        kl = filter_block(self._hpf_l, filter_block(self._shelf_l, left[:n]))
+        kr = filter_block(self._hpf_r, filter_block(self._shelf_r, right[:n]))
         for i in range(n):
             xl = float(left[i])
             xr = float(right[i])
-            kl = self._hpf_l.process(self._shelf_l.process(xl))
-            kr = self._hpf_r.process(self._shelf_r.process(xr))
+            kl_i = kl[i]
+            kr_i = kr[i]
 
             self._sum_l -= self._sq_l[self._pos]
             self._sum_r -= self._sq_r[self._pos]
-            self._sq_l[self._pos] = kl * kl
-            self._sq_r[self._pos] = kr * kr
-            self._sum_l += kl * kl
-            self._sum_r += kr * kr
+            self._sq_l[self._pos] = kl_i * kl_i
+            self._sq_r[self._pos] = kr_i * kr_i
+            self._sum_l += kl_i * kl_i
+            self._sum_r += kr_i * kr_i
             self._pos = (self._pos + 1) % size
             if self._filled < size:
                 self._filled += 1

@@ -14,7 +14,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["SecondOrderSaturation", "Saturation2ndOrder"]
 
@@ -55,19 +61,35 @@ class SecondOrderSaturation:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0 or self.drive_db == 0.0:
             return l, r
+        drive = self._drive
+        amount = self.amount
+        trim = self._trim
+        mix = self.mix
+        drive_l = [x * drive for x in l]
+        drive_r = [x * drive for x in r]
+        even_l = filter_block(self._dc_l, [x * x for x in drive_l])
+        even_r = filter_block(self._dc_r, [x * x for x in drive_r])
+        if _np is not None and len(l) >= 64:
+            xl, xr = _np.asarray(l), _np.asarray(r)
+            el = _np.asarray(even_l) * amount
+            er = _np.asarray(even_r) * amount
+            wet_l = (_np.asarray(drive_l) + el) * trim
+            wet_r = (_np.asarray(drive_r) + er) * trim
+            out_l = (xl + (wet_l - xl) * mix).tolist()
+            out_r = (xr + (wet_r - xr) * mix).tolist()
+            self.harmonic_level = float(max(_np.max(_np.abs(el)), _np.max(_np.abs(er))))
+            return out_l, out_r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         worst = 0.0
         for i, (xl, xr) in enumerate(zip(l, r)):
-            dl = xl * self._drive
-            dr = xr * self._drive
-            even_l = self._dc_l.process(dl * dl) * self.amount
-            even_r = self._dc_r.process(dr * dr) * self.amount
-            wet_l = (dl + even_l) * self._trim
-            wet_r = (dr + even_r) * self._trim
-            out_l[i] = xl + (wet_l - xl) * self.mix
-            out_r[i] = xr + (wet_r - xr) * self.mix
-            worst = max(worst, abs(even_l), abs(even_r))
+            el = even_l[i] * amount
+            er = even_r[i] * amount
+            wet_l = (drive_l[i] + el) * trim
+            wet_r = (drive_r[i] + er) * trim
+            out_l[i] = xl + (wet_l - xl) * mix
+            out_r[i] = xr + (wet_r - xr) * mix
+            worst = max(worst, abs(el), abs(er))
         self.harmonic_level = worst
         return out_l, out_r
 

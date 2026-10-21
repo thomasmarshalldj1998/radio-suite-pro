@@ -9,9 +9,16 @@ Bypass is exact and the default is bypassed.
 
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo, soft_clip
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["AirBrilliance"]
 
@@ -54,23 +61,34 @@ class AirBrilliance:
         l, r = copy_stereo(left, right)
         if not self.enabled or (self.air_db == 0.0 and self.drive == 0.0):
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
         drive = 1.0 + self.drive
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            sl = self._shelf_l.process(xl)
-            sr = self._shelf_r.process(xr)
-            hl = self._hp_l.process(sl)
-            hr = self._hp_r.process(sr)
-            sat_l = soft_clip(hl, drive)
-            sat_r = soft_clip(hr, drive)
-            out_l[i] = sl + (sat_l - hl) * self.mix
-            out_r[i] = sr + (sat_r - hr) * self.mix
+        sl = filter_block(self._shelf_l, l)
+        sr = filter_block(self._shelf_r, r)
+        hl = filter_block(self._hp_l, sl)
+        hr = filter_block(self._hp_r, sr)
+        if _np is not None and len(hl) >= 64:
+            denom = max(math.tanh(drive), 1e-9)
+            sat_l = _np.clip(_np.tanh(_np.asarray(hl) * drive) / denom, -1.0, 1.0)
+            sat_r = _np.clip(_np.tanh(_np.asarray(hr) * drive) / denom, -1.0, 1.0)
+            out_l = (_np.asarray(sl) + (sat_l - _np.asarray(hl)) * self.mix).tolist()
+            out_r = (_np.asarray(sr) + (sat_r - _np.asarray(hr)) * self.mix).tolist()
             self.harmonic_amount = max(
                 self.harmonic_amount,
-                abs(sat_l - hl),
-                abs(sat_r - hr),
+                float(_np.max(_np.abs(sat_l - _np.asarray(hl)))),
+                float(_np.max(_np.abs(sat_r - _np.asarray(hr)))),
             )
+        else:
+            out_l, out_r = [], []
+            for a, b, aa, bb in zip(sl, hl, sr, hr):
+                sat_l = soft_clip(b, drive)
+                sat_r = soft_clip(bb, drive)
+                out_l.append(a + (sat_l - b) * self.mix)
+                out_r.append(aa + (sat_r - bb) * self.mix)
+                self.harmonic_amount = max(
+                    self.harmonic_amount,
+                    abs(sat_l - b),
+                    abs(sat_r - bb),
+                )
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

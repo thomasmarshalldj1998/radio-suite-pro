@@ -41,7 +41,9 @@ __all__ = [
 def copy_stereo(left: Sequence[float], right: Sequence[float]) -> tuple[list[float], list[float]]:
     """Float copies, truncated to the shared length (bypass-safe)."""
     n = min(len(left), len(right))
-    return [float(x) for x in left[:n]], [float(x) for x in right[:n]]
+    # map(float, …) is roughly twice as fast as a comprehension here, and this
+    # runs once per module per block in the 43-stage chain.
+    return list(map(float, left[:n])), list(map(float, right[:n]))
 
 
 def peak(values: Sequence[float]) -> float:

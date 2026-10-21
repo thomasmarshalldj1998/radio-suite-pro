@@ -15,6 +15,11 @@ from typing import Sequence
 
 from proc_dsp import clamp, copy_stereo, soft_clip
 
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
 __all__ = ["SoftKneeClipper"]
 
 
@@ -53,6 +58,18 @@ class SoftKneeClipper:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0:
             return l, r
+        if _np is not None and len(l) >= 64:
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            denom = max(math.tanh(self.drive), 1e-9)
+            wet_l = _np.clip(_np.tanh(left * self.drive) / denom, -self.ceiling, self.ceiling)
+            wet_r = _np.clip(_np.tanh(right * self.drive) / denom, -self.ceiling, self.ceiling)
+            out_l = (left + (wet_l - left) * self.mix).tolist()
+            out_r = (right + (wet_r - right) * self.mix).tolist()
+            clipped = int(_np.count_nonzero(_np.abs(left) > self.ceiling))
+            clipped += int(_np.count_nonzero(_np.abs(right) > self.ceiling))
+            self.clipped_pct = 100.0 * clipped / max(1, 2 * len(l))
+            return out_l, out_r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         clipped = 0

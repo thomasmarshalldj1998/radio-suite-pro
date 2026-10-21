@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, Envelope, clamp, copy_stereo, level_db
 
 __all__ = ["PsychoDeEsser", "DeEsserPsycho"]
@@ -71,26 +72,49 @@ class PsychoDeEsser:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0:
             return l, r
+        det_l = filter_block(self._det_l, l)
+        det_r = filter_block(self._det_r, r)
+        high_l = filter_block(self._hp_l, l)
+        high_r = filter_block(self._hp_r, r)
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
+        env_state = self._env
+        attack_env = env_state.attack
+        release_env = env_state.release
+        env = env_state.value
+        attack = self._attack
+        release = self._release
+        gain = self._gain
+        mix = self.mix
+        threshold = self.threshold_db
+        threshold_lin = 10.0 ** (threshold / 20.0)
+        slope = 1.0 - 1.0 / self.ratio
+        max_reduction = self.range_db
         for i, (xl, xr) in enumerate(zip(l, r)):
-            detect = max(
-                abs(self._det_l.process(xl)),
-                abs(self._det_r.process(xr)),
-            )
-            env = self._env.process(detect)
-            level = level_db(env)
-            over = max(0.0, level - self.threshold_db)
-            reduction = min(self.range_db, over * (1.0 - 1.0 / self.ratio))
-            target = 10.0 ** (-reduction / 20.0)
-            coef = self._attack if target < self._gain else self._release
-            self._gain += (target - self._gain) * coef
-            high_l = self._hp_l.process(xl)
-            high_r = self._hp_r.process(xr)
-            out_l[i] = xl + high_l * (self._gain - 1.0) * self.mix
-            out_r[i] = xr + high_r * (self._gain - 1.0) * self.mix
-            self.reduction_db = -20.0 * math.log10(max(self._gain, 1e-9))
-            self.sibilance_db = level
+            detector = abs(det_l[i])
+            other = abs(det_r[i])
+            if other > detector:
+                detector = other
+            coef_env = attack_env if detector > env else release_env
+            env += (detector - env) * coef_env
+            if env <= threshold_lin:
+                target = 1.0
+            else:
+                level = 20.0 * math.log10(env)
+                reduction = (level - threshold) * slope
+                if reduction < 0.0:
+                    reduction = 0.0
+                elif reduction > max_reduction:
+                    reduction = max_reduction
+                target = 10.0 ** (-reduction / 20.0)
+            coef = attack if target < gain else release
+            gain += (target - gain) * coef
+            out_l[i] = xl + high_l[i] * (gain - 1.0) * mix
+            out_r[i] = xr + high_r[i] * (gain - 1.0) * mix
+        env_state.value = env
+        self._gain = gain
+        self.reduction_db = -20.0 * math.log10(max(gain, 1e-9))
+        self.sibilance_db = level_db(env)
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

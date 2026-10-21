@@ -16,6 +16,11 @@ from typing import Sequence
 
 from proc_dsp import clamp, copy_stereo, soft_clip
 
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
 __all__ = ["ThirdHarmonicEdge", "HarmonicEdge3rd"]
 
 
@@ -57,6 +62,20 @@ class ThirdHarmonicEdge:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0 or self.drive_db == 0.0:
             return l, r
+        if _np is not None and len(l) >= 64:
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            def shape(values):
+                driven = values * self._drive
+                edge = driven * driven * driven - driven
+                shaped = (driven + edge * self.amount) * self._trim
+                return _np.clip(_np.tanh(shaped) / math.tanh(1.0), -4.0, 4.0)
+            wet_l = shape(left)
+            wet_r = shape(right)
+            out_l = (left + (wet_l - left) * self.mix).tolist()
+            out_r = (right + (wet_r - right) * self.mix).tolist()
+            self.harmonic_level = float(max(_np.max(_np.abs(wet_l - left)), _np.max(_np.abs(wet_r - right))))
+            return out_l, out_r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         worst = 0.0

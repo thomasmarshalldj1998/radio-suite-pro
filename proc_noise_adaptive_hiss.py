@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, Envelope, clamp, copy_stereo, level_db
 
 __all__ = ["AdaptiveHissReducer", "NoiseAdaptiveHiss"]
@@ -68,25 +69,36 @@ class AdaptiveHissReducer:
         l, r = copy_stereo(left, right)
         if not self.enabled or self._depth <= 0.0:
             return l, r
+        high_l = filter_block(self._hp_l, l)
+        high_r = filter_block(self._hp_r, r)
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
+        env_state = self._env
+        floor = self._floor
+        fall = self._floor_fall
+        rise = self._floor_rise
+        gain = self._gain
+        smooth = self._gain_smooth
+        depth = self._depth
         for i, (xl, xr) in enumerate(zip(l, r)):
-            hl = self._hp_l.process(xl)
-            hr = self._hp_r.process(xr)
-            env = self._env.process(max(abs(hl), abs(hr)))
-            if self._floor <= 0.0:
-                self._floor = env
-            elif env < self._floor:
-                self._floor += (env - self._floor) * self._floor_fall
+            hl = high_l[i]
+            hr = high_r[i]
+            env = env_state.process(max(abs(hl), abs(hr)))
+            if floor <= 0.0:
+                floor = env
+            elif env < floor:
+                floor += (env - floor) * fall
             else:
-                self._floor += (env - self._floor) * self._floor_rise
-            ratio = 1.0 if env <= 1e-12 else clamp(self._floor / env, 0.0, 1.0)
-            target = 1.0 - self._depth * ratio
-            self._gain += (target - self._gain) * self._gain_smooth
-            out_l[i] = xl + hl * (self._gain - 1.0)
-            out_r[i] = xr + hr * (self._gain - 1.0)
-        self.floor_db = level_db(self._floor)
-        self.gain_reduction_db = -20.0 * math.log10(max(self._gain, 1e-9))
+                floor += (env - floor) * rise
+            ratio = 1.0 if env <= 1e-12 else clamp(floor / env, 0.0, 1.0)
+            target = 1.0 - depth * ratio
+            gain += (target - gain) * smooth
+            out_l[i] = xl + hl * (gain - 1.0)
+            out_r[i] = xr + hr * (gain - 1.0)
+        self._floor = floor
+        self._gain = gain
+        self.floor_db = level_db(floor)
+        self.gain_reduction_db = -20.0 * math.log10(max(gain, 1e-9))
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

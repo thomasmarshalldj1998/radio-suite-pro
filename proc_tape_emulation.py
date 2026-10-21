@@ -14,7 +14,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo, low_shelf, soft_clip
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["TapeEmulation"]
 
@@ -58,9 +64,22 @@ class TapeEmulation:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0:
             return l, r
+        drive_norm = max(math.tanh(self.drive), 1e-9)
+        if _np is not None and len(l) >= 64:
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            sl = _np.clip(_np.tanh(left * self.drive) / drive_norm, -1.0, 1.0)
+            sr = _np.clip(_np.tanh(right * self.drive) / drive_norm, -1.0, 1.0)
+            bl = filter_block(self._bump_l, sl.tolist())
+            br = filter_block(self._bump_r, sr.tolist())
+            yl = _np.asarray(filter_block(self._hf_l, bl)) * drive_norm
+            yr = _np.asarray(filter_block(self._hf_r, br)) * drive_norm
+            out_l = (left + (yl - left) * self.mix).tolist()
+            out_r = (right + (yr - right) * self.mix).tolist()
+            self.harmonic_level = float(max(_np.max(_np.abs(yl - left)), _np.max(_np.abs(yr - right))))
+            return out_l, out_r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
-        drive_norm = max(math.tanh(self.drive), 1e-9)
         worst = 0.0
         for i, (xl, xr) in enumerate(zip(l, r)):
             sl = soft_clip(xl, self.drive)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, copy_stereo
 
 __all__ = ["InputDcPhase"]
@@ -67,24 +68,31 @@ class InputDcPhase:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            self._dc_avg_l += (xl - self._dc_avg_l) * self._dc_coef
-            self._dc_avg_r += (xr - self._dc_avg_r) * self._dc_coef
-            yl = self._hp_l.process(xl) * self.polarity
-            yr = self._hp_r.process(xr) * self.polarity
-            if self._delay:
-                delayed = self._buffer[self._pos]
-                self._buffer[self._pos] = yr
-                self._pos = (self._pos + 1) % self._delay
-                yr = delayed
-            out_l[i] = yl
-            out_r[i] = yr
-        self._last_l = out_l[-1] if out_l else 0.0
+        yl = [x * self.polarity for x in filter_block(self._hp_l, l)]
+        yr = [x * self.polarity for x in filter_block(self._hp_r, r)]
+        if self._delay:
+            d = self._delay
+            pos = self._pos
+            buf = self._buffer
+            out_r = [0.0] * len(yr)
+            for i, x in enumerate(yr):
+                out_r[i] = buf[pos]
+                buf[pos] = x
+                pos = (pos + 1) % d
+            self._pos = pos
+        else:
+            out_r = yr
+        dc_l = self._dc_avg_l
+        dc_r = self._dc_avg_r
+        coef = self._dc_coef
+        for xl, xr in zip(l, r):
+            dc_l += (xl - dc_l) * coef
+            dc_r += (xr - dc_r) * coef
+        self._dc_avg_l, self._dc_avg_r = dc_l, dc_r
+        self.dc_offset = 0.5 * (dc_l + dc_r)
+        self._last_l = yl[-1] if yl else 0.0
         self._last_r = out_r[-1] if out_r else 0.0
-        self.dc_offset = 0.5 * (self._dc_avg_l + self._dc_avg_r)
-        return out_l, out_r
+        return yl, out_r
 
     def state(self) -> dict[str, float | int | bool]:
         return {

@@ -12,8 +12,14 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, copy_stereo
 from proc_downward_compressor import DownwardCompressor
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["MultibandCompressor"]
 
@@ -71,20 +77,34 @@ class MultibandCompressor:
         if not self.enabled:
             return l, r
         n = len(l)
-        low_l, low_r = [0.0] * n, [0.0] * n
-        mid_l, mid_r = [0.0] * n, [0.0] * n
-        high_l, high_r = [0.0] * n, [0.0] * n
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            low = self._low_l.process(xl)
-            low2 = self._low_r.process(xr)
-            mid = self._mid_l.process(xl) - low
-            mid2 = self._mid_r.process(xr) - low2
-            low_l[i], low_r[i] = low, low2
-            mid_l[i], mid_r[i] = mid, mid2
-            high_l[i], high_r[i] = xl - low - mid, xr - low2 - mid2
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        mid_lp_l = filter_block(self._mid_l, l)
+        mid_lp_r = filter_block(self._mid_r, r)
+        if _np is not None and n >= 64:
+            ll, lr = _np.asarray(low_l), _np.asarray(low_r)
+            ml, mr = _np.asarray(mid_lp_l) - ll, _np.asarray(mid_lp_r) - lr
+            hl = _np.asarray(l) - ll - ml
+            hr = _np.asarray(r) - lr - mr
+            low_l, low_r = ll.tolist(), lr.tolist()
+            mid_l, mid_r = ml.tolist(), mr.tolist()
+            high_l, high_r = hl.tolist(), hr.tolist()
+        else:
+            mid_l, mid_r = [0.0] * n, [0.0] * n
+            high_l, high_r = [0.0] * n, [0.0] * n
+            for i, (xl, xr) in enumerate(zip(l, r)):
+                mid = mid_lp_l[i] - low_l[i]
+                mid2 = mid_lp_r[i] - low_r[i]
+                mid_l[i], mid_r[i] = mid, mid2
+                high_l[i], high_r[i] = xl - low_l[i] - mid, xr - low_r[i] - mid2
         low_l, low_r = self._bands[0].process_stereo(low_l, low_r)
         mid_l, mid_r = self._bands[1].process_stereo(mid_l, mid_r)
         high_l, high_r = self._bands[2].process_stereo(high_l, high_r)
+        if _np is not None and n >= 64:
+            return (
+                (_np.asarray(low_l) + _np.asarray(mid_l) + _np.asarray(high_l)).tolist(),
+                (_np.asarray(low_r) + _np.asarray(mid_r) + _np.asarray(high_r)).tolist(),
+            )
         return (
             [a + b + c for a, b, c in zip(low_l, mid_l, high_l)],
             [a + b + c for a, b, c in zip(low_r, mid_r, high_r)],

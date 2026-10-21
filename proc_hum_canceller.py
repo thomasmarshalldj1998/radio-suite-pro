@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block, filter_chain
 from proc_dsp import Biquad, Envelope, copy_stereo, level_db, peaking
 
 __all__ = ["HumCanceller"]
@@ -69,16 +70,24 @@ class HumCanceller:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            self._env.process(max(abs(self._hum_bp_l.process(xl)), abs(self._hum_bp_r.process(xr))))
-            yl, yr = xl, xr
-            for fl, fr in zip(self._filters_l, self._filters_r):
-                yl = fl.process(yl)
-                yr = fr.process(yr)
-            out_l[i], out_r[i] = yl, yr
-        self.hum_db = level_db(self._env.value)
+        # Detector and notch chains are static; run the biquads in C when
+        # SciPy is available and keep the per-sample path as the fallback.
+        detector_l = filter_block(self._hum_bp_l, l)
+        detector_r = filter_block(self._hum_bp_r, r)
+        env = self._env
+        value = env.value
+        attack, release = env.attack, env.release
+        for dl, dr in zip(detector_l, detector_r):
+            level = abs(dl)
+            other = abs(dr)
+            if other > level:
+                level = other
+            coef = attack if level > value else release
+            value += (level - value) * coef
+        env.value = value
+        out_l = filter_chain(self._filters_l, l)
+        out_r = filter_chain(self._filters_r, r)
+        self.hum_db = level_db(value)
         return out_l, out_r
 
     def state(self) -> dict[str, float | int | bool | list[float]]:

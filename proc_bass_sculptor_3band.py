@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["BassSculptor3Band"]
 
@@ -54,11 +60,24 @@ class BassSculptor3Band:
             self.sub_db == 0.0 and self.punch_db == 0.0 and self.warmth_db == 0.0
         ):
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
         gs = 10.0 ** (self.sub_db / 20.0)
         gp = 10.0 ** (self.punch_db / 20.0)
         gw = 10.0 ** (self.warmth_db / 20.0)
+        if _np is not None and len(l) >= 64:
+            xl, xr = _np.asarray(l), _np.asarray(r)
+            sub_l = _np.asarray(filter_block(self._lp60_l, l))
+            sub_r = _np.asarray(filter_block(self._lp60_r, r))
+            low150_l = _np.asarray(filter_block(self._lp150_l, l))
+            low150_r = _np.asarray(filter_block(self._lp150_r, r))
+            low400_l = _np.asarray(filter_block(self._lp400_l, l))
+            low400_r = _np.asarray(filter_block(self._lp400_r, r))
+            punch_l, punch_r = low150_l - sub_l, low150_r - sub_r
+            warm_l, warm_r = low400_l - low150_l, low400_r - low150_r
+            out_l = xl + sub_l * (gs - 1.0) + punch_l * (gp - 1.0) + warm_l * (gw - 1.0)
+            out_r = xr + sub_r * (gs - 1.0) + punch_r * (gp - 1.0) + warm_r * (gw - 1.0)
+            return out_l.tolist(), out_r.tolist()
+        out_l = [0.0] * len(l)
+        out_r = [0.0] * len(r)
         for i, (xl, xr) in enumerate(zip(l, r)):
             sub = self._lp60_l.process(xl)
             sub2 = self._lp60_r.process(xr)

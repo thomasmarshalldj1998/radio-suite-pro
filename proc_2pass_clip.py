@@ -20,6 +20,11 @@ from typing import Sequence
 
 from stream_encoder_core import Biquad, clamp
 
+try:  # optional acceleration; the stdlib path remains the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised on hosts without numpy
+    _np = None
+
 OVERSAMPLE = 16
 CEILINGS = (-0.1, -0.5, -1.0)
 MODES = ("clean", "warm", "bold")
@@ -81,31 +86,36 @@ _COEFFS = _build_table()
 def true_peak(samples: Sequence[float], phases: int = _PHASES) -> float:
     """Maximum |x| over the reconstructed waveform, using the whole block."""
     xs = [float(x) for x in samples]
-    n = len(xs)
-    if n == 0:
+    if not xs:
         return 0.0
-    peak = max(abs(x) for x in xs)
-    for i in range(n):
-        for p in range(1, phases):
-            coeffs = _COEFFS[p]
-            acc = 0.0
-            for k, c in enumerate(coeffs):
-                idx = i - k
-                if idx >= 0:
-                    acc += xs[idx] * c
-            if abs(acc) > peak:
-                peak = abs(acc)
-    return peak
+    return max(_peak_curve(xs, phases))
 
 
-def _peak_curve(samples: Sequence[float]) -> list[float]:
-    """Per-sample true-peak magnitude (same kernel as `true_peak`)."""
+def _peak_curve(samples: Sequence[float], phases: int = _PHASES) -> list[float]:
+    """Per-sample true-peak magnitude (same kernel as `true_peak`).
+
+    The reference implementation is a sample × phase × tap loop. For blocks
+    of meaningful size it is equivalent to 15 causal FIR convolutions, so the
+    optional NumPy path runs those in C and keeps the Python path as the
+    fallback on hosts without NumPy. Kernels and alignment are unchanged.
+    """
     xs = [float(x) for x in samples]
     n = len(xs)
+    if n == 0:
+        return []
+    if _np is not None and n >= 64:
+        values = _np.asarray(xs, dtype=_np.float64)
+        curve = _np.abs(values)
+        for p in range(1, min(phases, _PHASES)):
+            # np.convolve(x, c)[i] = Σ x[i-k]·c[k], exactly the causal
+            # interpolation kernel used by the reference loop.
+            phase = _np.convolve(values, _np.asarray(_COEFFS[p], dtype=_np.float64), mode="full")[:n]
+            _np.maximum(curve, _np.abs(phase), out=curve)
+        return curve.tolist()
     curve = [0.0] * n
     for i in range(n):
         peak = abs(xs[i])
-        for p in range(1, _PHASES):
+        for p in range(1, phases):
             coeffs = _COEFFS[p]
             acc = 0.0
             for k, c in enumerate(coeffs):
@@ -153,41 +163,65 @@ class _PeakLimiter:
         # first would destroy the waveform the oversampler is reconstructing.
         curve_l = _peak_curve(source_l)
         curve_r = _peak_curve(source_r)
-        combined = [max(a, b) for a, b in zip(curve_l, curve_r)]
-        # `_peak_curve` reconstructs around input[i - taps], so shift it back
-        # onto the sample the peak actually belongs to before taking gain from
-        # it; otherwise the reduction lands 12 samples early and the peak
-        # itself is released back to unity.
-        tail = combined[-1] if combined else 0.0
-        aligned = combined[_TAPS:] + [tail] * _TAPS
         radius = self.radius
-        # Widen to the interpolation kernel: every sample the oversampler can
-        # see around i must carry the gain demanded by the largest peak there,
-        # otherwise the reconstructed peak slips between reduced samples.
-        curve = [
-            max(aligned[max(0, i - radius) : i + radius + 1]) for i in range(n)
-        ]
+        if _np is not None and n >= 64:
+            combined = _np.maximum(_np.asarray(curve_l), _np.asarray(curve_r))
+            # `_peak_curve` reconstructs around input[i - taps], so shift it
+            # back onto the sample the peak actually belongs to before taking
+            # gain from it; otherwise the reduction lands 12 samples early.
+            aligned = _np.concatenate(
+                (combined[_TAPS:], _np.full(_TAPS, combined[-1], dtype=_np.float64))
+            )
+            # Widen to the interpolation kernel: every sample the oversampler
+            # can see around i must carry the gain demanded by the largest peak
+            # there, otherwise the reconstructed peak slips between samples.
+            padded = _np.concatenate(
+                (
+                    _np.full(radius, -_np.inf, dtype=_np.float64),
+                    aligned,
+                    _np.full(radius, aligned[-1], dtype=_np.float64),
+                )
+            )
+            curve = _np.lib.stride_tricks.sliding_window_view(
+                padded, 2 * radius + 1
+            ).max(axis=1).tolist()
+        else:
+            combined = [max(a, b) for a, b in zip(curve_l, curve_r)]
+            tail = combined[-1] if combined else 0.0
+            aligned = combined[_TAPS:] + [tail] * _TAPS
+            curve = [
+                max(aligned[max(0, i - radius) : i + radius + 1]) for i in range(n)
+            ]
 
-        out_l: list[float] = []
-        out_r: list[float] = []
-        worst = 0.0
+        out_l: list[float] = [0.0] * n
+        out_r: list[float] = [0.0] * n
+        gain = self.gain
+        hold_left = self.hold_left
+        hold = self.hold
+        release = self.release
+        ceiling = self.ceiling
+        lowest = gain
         for i in range(n):
             # The gain is derived from the reconstructed peak at this sample
             # and held across one kernel, so every sample the oversampler sees
             # during the peak carries the same reduction.
-            target = 1.0 if curve[i] <= self.ceiling else self.ceiling / curve[i]
-            if target < self.gain:
-                self.gain = target
-                self.hold_left = self.hold
-            elif self.hold_left > 0:
-                self.hold_left -= 1
+            peak = curve[i]
+            target = 1.0 if peak <= ceiling else ceiling / peak
+            if target < gain:
+                gain = target
+                hold_left = hold
+            elif hold_left > 0:
+                hold_left -= 1
             else:
-                self.gain += (1.0 - self.gain) * self.release
-            out_l.append(source_l[i] * self.gain)
-            out_r.append(source_r[i] * self.gain)
-            worst = max(worst, -20.0 * math.log10(max(self.gain, 1e-9)))
+                gain += (1.0 - gain) * release
+            out_l[i] = source_l[i] * gain
+            out_r[i] = source_r[i] * gain
+            if gain < lowest:
+                lowest = gain
 
-        self.reduction_db = worst
+        self.gain = gain
+        self.hold_left = hold_left
+        self.reduction_db = max(0.0, -20.0 * math.log10(max(lowest, 1e-9)))
         return out_l, out_r
 
 

@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["StereoEnhancer3Band"]
 
@@ -49,27 +55,38 @@ class StereoEnhancer3Band:
         l, r = copy_stereo(left, right)
         if not self.enabled or all(w == 1.0 for w in self.widths):
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        high_l = filter_block(self._high_l, l)
+        high_r = filter_block(self._high_r, r)
         wl, wm, wh = self.widths
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            low = self._low_l.process(xl)
-            low2 = self._low_r.process(xr)
-            high = self._high_l.process(xl)
-            high2 = self._high_r.process(xr)
-            mid_l = xl - low - high
-            mid_r = xr - low2 - high2
-            out = []
-            for a, b, width in (
-                (low, low2, wl),
-                (mid_l, mid_r, wm),
-                (high, high2, wh),
-            ):
+        if _np is not None and len(l) >= 64:
+            ll, lr = _np.asarray(low_l), _np.asarray(low_r)
+            hl, hr = _np.asarray(high_l), _np.asarray(high_r)
+            ml, mr = _np.asarray(l) - ll - hl, _np.asarray(r) - lr - hr
+            out_l = _np.zeros(len(l), dtype=_np.float64)
+            out_r = _np.zeros(len(l), dtype=_np.float64)
+            for a, b, width in ((ll, lr, wl), (ml, mr, wm), (hl, hr, wh)):
                 mid = 0.5 * (a + b)
                 side = 0.5 * (a - b) * width
-                out.append((mid + side, mid - side))
-            out_l[i] = sum(band[0] for band in out)
-            out_r[i] = sum(band[1] for band in out)
+                out_l += mid + side
+                out_r += mid - side
+            return out_l.tolist(), out_r.tolist()
+        out_l = [0.0] * len(l)
+        out_r = [0.0] * len(r)
+        for i in range(len(l)):
+            mid_l = l[i] - low_l[i] - high_l[i]
+            mid_r = r[i] - low_r[i] - high_r[i]
+            out_l[i] = (
+                0.5 * (low_l[i] + low_r[i]) + 0.5 * (low_l[i] - low_r[i]) * wl
+                + 0.5 * (mid_l + mid_r) + 0.5 * (mid_l - mid_r) * wm
+                + 0.5 * (high_l[i] + high_r[i]) + 0.5 * (high_l[i] - high_r[i]) * wh
+            )
+            out_r[i] = (
+                0.5 * (low_l[i] + low_r[i]) - 0.5 * (low_l[i] - low_r[i]) * wl
+                + 0.5 * (mid_l + mid_r) - 0.5 * (mid_l - mid_r) * wm
+                + 0.5 * (high_l[i] + high_r[i]) - 0.5 * (high_l[i] - high_r[i]) * wh
+            )
         return out_l, out_r
 
     def state(self) -> dict[str, object]:

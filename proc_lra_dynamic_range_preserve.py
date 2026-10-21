@@ -65,22 +65,46 @@ class LraDynamicRangePreserve:
             return l, r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
+        env_state = self._env
+        attack_env = env_state.attack
+        release_env = env_state.release
+        env = env_state.value
+        attack = self._attack
+        release = self._release
+        gain = self._gain
+        min_db = self._min_db
+        max_db = self._max_db
+        target_db = self.target_db
+        max_reduction = self.max_reduction_db
+        loudness = self.loudness_db
         for i, (xl, xr) in enumerate(zip(l, r)):
-            env = self._env.process(max(abs(xl), abs(xr)))
-            self.loudness_db = level_db(env)
-            self._min_db = min(self._min_db, self.loudness_db)
-            self._max_db = max(self._max_db, self.loudness_db)
-            self.range_db = max(0.0, self._max_db - self._min_db)
-            gain_db = clamp(
-                self.target_db - self.loudness_db,
-                -self.max_reduction_db,
-                0.0,
-            )
+            linked = abs(xl)
+            other = abs(xr)
+            if other > linked:
+                linked = other
+            coef_env = attack_env if linked > env else release_env
+            env += (linked - env) * coef_env
+            loudness = -120.0 if env <= 0.0 else 20.0 * math.log10(env)
+            if loudness < min_db:
+                min_db = loudness
+            if loudness > max_db:
+                max_db = loudness
+            gain_db = target_db - loudness
+            if gain_db < -max_reduction:
+                gain_db = -max_reduction
+            elif gain_db > 0.0:
+                gain_db = 0.0
             target = 10.0 ** (gain_db / 20.0)
-            coef = self._attack if target < self._gain else self._release
-            self._gain += (target - self._gain) * coef
-            out_l[i] = xl * self._gain
-            out_r[i] = xr * self._gain
+            coef = attack if target < gain else release
+            gain += (target - gain) * coef
+            out_l[i] = xl * gain
+            out_r[i] = xr * gain
+        env_state.value = env
+        self._gain = gain
+        self.loudness_db = loudness
+        self._min_db = min_db
+        self._max_db = max_db
+        self.range_db = max(0.0, max_db - min_db)
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

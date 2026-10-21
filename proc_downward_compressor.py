@@ -75,18 +75,53 @@ class DownwardCompressor:
             return l, r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
-        env = 0.0
+        # Hot loop: keep every coefficient and state value in a local so the
+        # block costs one loop, not one attribute lookup per sample.
+        env_state = self._env
+        attack_env = env_state.attack
+        release_env = env_state.release
+        env = env_state.value
+        attack = self._attack
+        release = self._release
+        gain = self._gain
+        makeup = self._makeup
+        mix = self.mix
+        threshold = self.threshold_db
+        slope = 1.0 - 1.0 / self.ratio
+        knee_half = self.knee_db / 2.0
+        knee = max(self.knee_db, 1e-9)
+        log10 = math.log10
+        # Below this envelope the sample is outside the knee, so the target is
+        # exactly unity; skip both the log and the polar conversion.
+        quiet_limit = 10.0 ** ((threshold - knee_half) / 20.0)
         for i, (xl, xr) in enumerate(zip(l, r)):
-            env = self._env.process(max(abs(xl), abs(xr)))
-            target = self._target_gain(level_db(env))
-            coef = self._attack if target < self._gain else self._release
-            self._gain += (target - self._gain) * coef
-            wet_l = xl * self._gain * self._makeup
-            wet_r = xr * self._gain * self._makeup
-            out_l[i] = xl + (wet_l - xl) * self.mix
-            out_r[i] = xr + (wet_r - xr) * self.mix
-        self.input_db = level_db(env)
-        self.gain_reduction_db = -20.0 * math.log10(max(self._gain, 1e-9))
+            linked = abs(xl)
+            other = abs(xr)
+            if other > linked:
+                linked = other
+            coef_env = attack_env if linked > env else release_env
+            env += (linked - env) * coef_env
+            if env <= quiet_limit:
+                target = 1.0
+            else:
+                level = -120.0 if env <= 0.0 else 20.0 * log10(env)
+                over = level - threshold
+                if over >= knee_half:
+                    reduction = over * slope
+                else:
+                    x = over + knee_half
+                    reduction = slope * x * x / (2.0 * knee)
+                target = 10.0 ** (-max(0.0, reduction) / 20.0)
+            smooth = attack if target < gain else release
+            gain += (target - gain) * smooth
+            wet_l = xl * gain * makeup
+            wet_r = xr * gain * makeup
+            out_l[i] = xl + (wet_l - xl) * mix
+            out_r[i] = xr + (wet_r - xr) * mix
+        env_state.value = env
+        self._gain = gain
+        self.input_db = -120.0 if env <= 0.0 else 20.0 * log10(env)
+        self.gain_reduction_db = -20.0 * log10(max(gain, 1e-9))
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

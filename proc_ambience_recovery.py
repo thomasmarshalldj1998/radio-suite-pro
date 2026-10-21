@@ -15,7 +15,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, Envelope, clamp, copy_stereo, level_db
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["AmbienceRecovery"]
 
@@ -53,9 +59,20 @@ class AmbienceRecovery:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.amount <= 0.0:
             return l, r
+        gain = self.amount / 100.0
+        if _np is not None and len(l) >= 64:
+            xl, xr = _np.asarray(l), _np.asarray(r)
+            mid = 0.5 * (xl + xr)
+            side = 0.5 * (xl - xr)
+            amb = _np.asarray(filter_block(self._amb, side.tolist()))
+            side = side + amb * gain
+            env = self._env
+            for value in _np.abs(amb).tolist():
+                env.process(value)
+            self.ambience_db = level_db(env.value)
+            return (mid + side).tolist(), (mid - side).tolist()
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
-        gain = self.amount / 100.0
         for i, (xl, xr) in enumerate(zip(l, r)):
             mid = 0.5 * (xl + xr)
             side = 0.5 * (xl - xr)

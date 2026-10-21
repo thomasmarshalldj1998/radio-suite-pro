@@ -17,7 +17,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo, level_db, rms
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["SourceMatchEq", "TARGETS"]
 
@@ -77,17 +83,39 @@ class SourceMatchEq:
         if not self.enabled or self.amount <= 0.0:
             return l, r
         n = len(l)
-        low_l, low_r = [0.0] * n, [0.0] * n
-        high_l, high_r = [0.0] * n, [0.0] * n
-        mid_l, mid_r = [0.0] * n, [0.0] * n
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            ll = self._low_l.process(xl)
-            lr = self._low_r.process(xr)
-            hl = self._high_l.process(xl)
-            hr = self._high_r.process(xr)
-            low_l[i], low_r[i] = ll, lr
-            high_l[i], high_r[i] = hl, hr
-            mid_l[i], mid_r[i] = xl - ll - hl, xr - lr - hr
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        high_l = filter_block(self._high_l, l)
+        high_r = filter_block(self._high_r, r)
+        if _np is not None and n >= 64:
+            ll, lr = _np.asarray(low_l), _np.asarray(low_r)
+            hl, hr = _np.asarray(high_l), _np.asarray(high_r)
+            ml = _np.asarray(l) - ll - hl
+            mr = _np.asarray(r) - lr - hr
+            self.low_db = level_db(float(max(_np.sqrt(_np.mean(ll * ll)), _np.sqrt(_np.mean(lr * lr)))))
+            self.high_db = level_db(float(max(_np.sqrt(_np.mean(hl * hl)), _np.sqrt(_np.mean(hr * hr)))))
+            self.mid_db = level_db(float(max(_np.sqrt(_np.mean(ml * ml)), _np.sqrt(_np.mean(mr * mr)))))
+            target_low, target_high = TARGETS[self.profile]
+            desired_low = clamp(target_low - (self.low_db - self.mid_db), -self.max_gain_db, self.max_gain_db)
+            desired_high = clamp(target_high - (self.high_db - self.mid_db), -self.max_gain_db, self.max_gain_db)
+            desired_low *= self.amount / 100.0
+            desired_high *= self.amount / 100.0
+            # Constant-target one-pole smoothing has a closed form; evaluating
+            # it per block removes two gains and two polar conversions from
+            # the sample loop.
+            steps = _np.arange(1, n + 1, dtype=_np.float64)
+            decay = _np.power(1.0 - self._smooth, steps)
+            low_gain = desired_low + (self.low_gain_db - desired_low) * decay
+            high_gain = desired_high + (self.high_gain_db - desired_high) * decay
+            gl = _np.power(10.0, low_gain / 20.0)
+            gh = _np.power(10.0, high_gain / 20.0)
+            out_l = (ll * gl + ml + hl * gh).tolist()
+            out_r = (lr * gl + mr + hr * gh).tolist()
+            self.low_gain_db = float(low_gain[-1])
+            self.high_gain_db = float(high_gain[-1])
+            return out_l, out_r
+        mid_l = [a - b - c for a, b, c in zip(l, low_l, high_l)]
+        mid_r = [a - b - c for a, b, c in zip(r, low_r, high_r)]
         self.low_db = level_db(max(rms(low_l), rms(low_r)))
         self.high_db = level_db(max(rms(high_l), rms(high_r)))
         self.mid_db = level_db(max(rms(mid_l), rms(mid_r)))

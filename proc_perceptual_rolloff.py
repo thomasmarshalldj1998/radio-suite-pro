@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_chain
 from proc_dsp import Biquad, copy_stereo
 
 __all__ = ["PerceptualRolloff"]
@@ -46,15 +47,7 @@ class PerceptualRolloff:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
-        out_l = [0.0] * len(l)
-        out_r = [0.0] * len(r)
-        for i, (xl, xr) in enumerate(zip(l, r)):
-            yl, yr = xl, xr
-            for fl, fr in zip(self._filters_l, self._filters_r):
-                yl = fl.process(yl)
-                yr = fr.process(yr)
-            out_l[i], out_r[i] = yl, yr
-        return out_l, out_r
+        return filter_chain(self._filters_l, l), filter_chain(self._filters_r, r)
 
     def state(self) -> dict[str, float | int | bool]:
         return {

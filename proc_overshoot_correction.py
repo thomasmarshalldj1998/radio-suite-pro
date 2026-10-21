@@ -56,19 +56,29 @@ class OvershootCorrection:
             return l, r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
-        worst = 0.0
+        gain = self._gain
+        release = self._release
+        ceiling = self.ceiling
+        floor_gain = 10.0 ** (-self.max_reduction_db / 20.0)
+        lowest = gain
         for i, (xl, xr) in enumerate(zip(l, r)):
-            detector = max(abs(xl), abs(xr))
-            target = 1.0 if detector <= self.ceiling else self.ceiling / detector
-            target = max(target, 10.0 ** (-self.max_reduction_db / 20.0))
-            if target < self._gain:
-                self._gain = target
+            detector = abs(xl)
+            other = abs(xr)
+            if other > detector:
+                detector = other
+            target = 1.0 if detector <= ceiling else ceiling / detector
+            if target < floor_gain:
+                target = floor_gain
+            if target < gain:
+                gain = target
             else:
-                self._gain += (target - self._gain) * self._release
-            out_l[i] = clamp(xl * self._gain, -self.ceiling, self.ceiling)
-            out_r[i] = clamp(xr * self._gain, -self.ceiling, self.ceiling)
-            worst = max(worst, -20.0 * math.log10(max(self._gain, 1e-9)))
-        self.max_overshoot_db = worst
+                gain += (target - gain) * release
+            out_l[i] = min(ceiling, max(-ceiling, xl * gain))
+            out_r[i] = min(ceiling, max(-ceiling, xr * gain))
+            if gain < lowest:
+                lowest = gain
+        self._gain = gain
+        self.max_overshoot_db = max(0.0, -20.0 * math.log10(max(lowest, 1e-9)))
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:

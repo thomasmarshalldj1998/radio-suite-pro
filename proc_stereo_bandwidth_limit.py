@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from proc_accel import filter_block
 from proc_dsp import Biquad, clamp, copy_stereo
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["StereoBandwidthLimit"]
 
@@ -46,17 +52,24 @@ class StereoBandwidthLimit:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.width >= 1.0:
             return l, r
+        low_l = filter_block(self._low_l, l)
+        low_r = filter_block(self._low_r, r)
+        if _np is not None and len(l) >= 64:
+            ll, lr = _np.asarray(low_l), _np.asarray(low_r)
+            high_l = _np.asarray(l) - ll
+            high_r = _np.asarray(r) - lr
+            high_mid = 0.5 * (high_l + high_r)
+            high_side = 0.5 * (high_l - high_r) * self.width
+            return (ll + high_mid + high_side).tolist(), (lr + high_mid - high_side).tolist()
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         for i, (xl, xr) in enumerate(zip(l, r)):
-            low = self._low_l.process(xl)
-            low2 = self._low_r.process(xr)
-            high = xl - low
-            high2 = xr - low2
+            high = xl - low_l[i]
+            high2 = xr - low_r[i]
             high_mid = 0.5 * (high + high2)
             high_side = 0.5 * (high - high2) * self.width
-            out_l[i] = low + high_mid + high_side
-            out_r[i] = low2 + high_mid - high_side
+            out_l[i] = low_l[i] + high_mid + high_side
+            out_r[i] = low_r[i] + high_mid - high_side
         return out_l, out_r
 
     def state(self) -> dict[str, float | bool]:
