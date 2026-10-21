@@ -16,6 +16,13 @@
  *  5  an undrained buffer can never exceed its ceiling
  *  6  a returning consumer skips the missed composite instead of replaying it
  *  7  the desktop socket's receive buffer is bounded to about a second
+ *  8  a kernel that doubles the request (Linux) still ends up bounded
+ *
+ * Check 7 reads this host's real kernel. It is a smoke test, not a portable
+ * one: rmem_max decides what comes back, and ubuntu-latest grants twice what
+ * was asked for. Check 8 is the deterministic half — a fake socket that
+ * doubles every request, the way Linux does — so the correction in
+ * `UdpEndpoint.setReceiveBuffer` is proved on any host, CI included.
  */
 import { createRequire } from "node:module";
 import {
@@ -30,6 +37,10 @@ const { UdpEndpoint } = require("../electron/udp-link.cjs") as {
     open(args: { listenPort: number; host: string; port: number }): Promise<number>;
     close(): void;
     snapshot(): { bufferMs: number; open: boolean };
+    setReceiveBuffer(socket: {
+      setRecvBufferSize(bytes: number): void;
+      getRecvBufferSize(): number;
+    }): number;
   };
 };
 
@@ -246,6 +257,42 @@ try {
 } finally {
   endpoint.close();
 }
+
+/* ── 8: a doubling kernel is corrected, not trusted ────────────────────── */
+
+console.log("\n8 · doubling kernel");
+const CAP_BYTES = 512 * 1024;
+const doubled = new UdpEndpoint();
+let asks = 0;
+const lastAsk = { bytes: 0, granted: 0 };
+const fakeKernel = {
+  setRecvBufferSize(bytes: number) {
+    asks += 1;
+    lastAsk.bytes = bytes;
+    // Linux doubles SO_RCVBUF and then reports the doubled value.
+    lastAsk.granted = bytes * 2;
+  },
+  getRecvBufferSize() {
+    return lastAsk.granted;
+  },
+};
+const corrected = doubled.setReceiveBuffer(fakeKernel);
+const correctedMs = Math.round(((corrected * 8) / 3072000) * 1000);
+check(
+  corrected === CAP_BYTES,
+  "the granted size is corrected back to the 512 KiB cap",
+  `${Math.round(corrected / 1024)} KiB granted after ${asks} request${asks === 1 ? "" : "s"}`,
+);
+check(
+  correctedMs <= 2000,
+  "so a doubling kernel still holds under 2 s of composite",
+  `${correctedMs} ms, not ${Math.round(((CAP_BYTES * 2 * 8) / 3072000) * 1000)} ms`,
+);
+check(
+  asks <= 2,
+  "it converges in one correction, not a loop of them",
+  `${asks} requests`,
+);
 
 console.log(
   `\n${passed} checks passed, ${failed} failed.${failed === 0 ? "" : " Review the failures above."}`,

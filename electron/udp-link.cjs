@@ -14,6 +14,20 @@ const dgram = require("node:dgram");
 /** Largest payload a single UDP datagram can carry over IPv4. */
 const MAX_DATAGRAM = 65507;
 
+/**
+ * Receive buffer we aim the kernel at: 512 KiB, about 1.3 s of composite at
+ * 3.07 Mbit/s — enough to ride out a scheduling hiccup, far too little to
+ * queue up a latency tail.
+ */
+const RECV_BUFFER_BYTES = 512 * 1024;
+
+/**
+ * Floor for the correction loop below. Below ~170 ms of composite the buffer
+ * stops absorbing hiccups at all, and asking for an even smaller one can only
+ * trade latency for dropouts.
+ */
+const MIN_RECV_BUFFER_BYTES = 64 * 1024;
+
 function parsePort(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 0 || port > 65535) return null;
@@ -39,10 +53,9 @@ class UdpEndpoint {
   constructor(options = {}) {
     this.onData = options.onData || null;
     this.onError = options.onError || null;
-    // 512 KiB is about 1.3 s of composite at 3.07 Mbit/s — enough to ride out
-    // a scheduling hiccup, small enough that the kernel cannot queue up a
-    // latency tail. A live link has no use for ten seconds of backlog.
-    this.recvBufferBytes = options.recvBufferBytes || 512 * 1024;
+    // The TARGET, not the granted size — `open()` replaces it with whatever
+    // the kernel actually hands over (see setReceiveBuffer).
+    this.recvBufferBytes = options.recvBufferBytes || RECV_BUFFER_BYTES;
     /** @type {import("node:dgram").Socket | null} */
     this.socket = null;
     this.boundPort = 0;
@@ -105,18 +118,7 @@ class UdpEndpoint {
           this.lastError = `${err.code || "EIO"}: ${err.message}`;
           this.onError?.(this.lastError);
         });
-        try {
-          socket.setRecvBufferSize(this.recvBufferBytes);
-        } catch {
-          // some platforms cap the receive buffer — not fatal, but report it
-        }
-        // Read back what the kernel actually granted: the cap is often far
-        // below what was asked for, and that cap is the burst ceiling.
-        try {
-          this.recvBufferBytes = socket.getRecvBufferSize();
-        } catch {
-          // unknown — leave the requested value
-        }
+        this.recvBufferBytes = this.setReceiveBuffer(socket);
         this.socket = socket;
         this.boundPort = socket.address().port;
         this.listenHost = listenHost;
@@ -125,6 +127,51 @@ class UdpEndpoint {
         resolve(this.boundPort);
       });
     });
+  }
+
+  /**
+   * Set the receive buffer and return what the kernel actually granted.
+   *
+   * The granted size is the one that matters, and it is not the requested one:
+   * Linux silently doubles every SO_RCVBUF request and then reports the
+   * doubled value, so asking for 512 KiB there yields 1 MiB — 2.7 s of
+   * composite sitting in the kernel, exactly the latency tail this cap exists
+   * to prevent (it is what failed the release workflow's verify step on
+   * ubuntu-latest, where rmem_max is large enough to honour the doubling).
+   *
+   * So: ask, read back, and scale the request by the overshoot until the
+   * granted size lands on the target. Linux settles in two passes, macOS and
+   * Windows in one, and a platform that refuses to shrink is left at its last
+   * granted size so the console and the verify suite report the truth instead
+   * of a cap that was never applied.
+   *
+   * @param {{ setRecvBufferSize(bytes: number): void, getRecvBufferSize(): number }} socket
+   * @returns {number} bytes the kernel actually holds for this socket
+   */
+  setReceiveBuffer(socket) {
+    const target = this.recvBufferBytes || RECV_BUFFER_BYTES;
+    let requested = target;
+    let granted = target;
+    for (let pass = 0; pass < 3; pass++) {
+      try {
+        socket.setRecvBufferSize(requested);
+        granted = socket.getRecvBufferSize();
+      } catch {
+        // platform capped it or will not report — keep the last known size
+        break;
+      }
+      if (!(granted > 0)) break;
+      if (granted <= target) return granted;
+      if (requested <= MIN_RECV_BUFFER_BYTES) break;
+      // Proportional correction: exact where the kernel doubles the request,
+      // converging anyway where it merely rounds it up.
+      const scaled = Math.floor((requested * target) / granted);
+      requested = Math.max(
+        MIN_RECV_BUFFER_BYTES,
+        Math.min(requested - 1, scaled),
+      );
+    }
+    return granted;
   }
 
   /** @param {string} host @param {number} port */

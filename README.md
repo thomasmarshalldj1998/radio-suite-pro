@@ -385,8 +385,11 @@ Link B  destination 192.0.2.11:9220   listen 9212
 A datagram is 2076 bytes, so a path with a standard 1500-byte MTU will
 fragment it — set the interface MTU to 2300 (or jumbo frames) end to end.
 The kernel's receive buffer is the burst ceiling: the endpoint reports what it
-was actually granted, and a default Linux buffer holds roughly 1.3 s of
-composite.
+was actually granted, and aims that at 512 KiB — roughly 1.3 s of composite.
+Linux doubles every `SO_RCVBUF` request and reports the doubled value, so the
+endpoint asks, reads back, and corrects proportionally until the granted size
+lands on the cap (see `UdpEndpoint.setReceiveBuffer`); on `ubuntu-latest` that
+is the difference between 1.3 s and a 2.7 s tail.
 
 Transport faults reach the durable alarm history through
 `src/lib/audio/linkwatch.ts`: a path switch, both paths quiet long enough for
@@ -402,7 +405,7 @@ oldest frames are skipped and counted as *Skipped*, not as loss — and a
 consumer that went away for a moment is caught up to the live edge rather than
 replaying the backlog it missed. The receiver is drained on its own 100 ms
 timer, so closing the panel cannot let packets pile up, and the kernel receive
-buffer is requested at 512 KiB (about 1.3 s of composite) rather than a
+buffer is corrected down to 512 KiB (about 1.3 s of composite) rather than a
 multi-second tail that would only ever add latency.
 
 ```bash
