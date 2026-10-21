@@ -17,8 +17,12 @@
  *  7  a rejected sink reverts to default instead of lying
  *  8  a runtime without setSinkId keeps the pick and throws nothing
  *  9  a stale saved device is dropped on refresh
- * 10  nothing is logged and no promise rejection escapes
+ * 10  boot never fades the monitor for a sink it already renders to
+ * 11  a sink call that never answers still gives the monitor back
+ * 12  the monitor mute is engine state every subscriber sees
+ * 13  nothing is logged and no promise rejection escapes
  */
+import { DEFAULT_PARAMS } from "../src/lib/audio/params";
 import { AudioEngine } from "../src/lib/audio/engine";
 
 let passed = 0;
@@ -60,6 +64,8 @@ let gumDelayMs = 0;
 const broken = new Set<string>();
 /** setSinkId rejects for these ids. */
 const badSinks = new Set<string>();
+/** setSinkId never settles for these ids (a prompt the frame will not show). */
+const hungSinks = new Set<string>();
 
 const fakeStream = (label: string) => {
   const track = {
@@ -120,6 +126,7 @@ function fakeContext(options: { sink: boolean } = { sink: true }) {
     setSinkId: options.sink
       ? async (id: string) => {
           sinkCalls.push(id);
+          if (hungSinks.has(id)) await new Promise(() => undefined);
           if (badSinks.has(id)) throw new Error(`NotFoundError: ${id}`);
         }
       : undefined,
@@ -286,9 +293,89 @@ check(
 check(prefs().output === "spk-b", "and does not overwrite the saved preference");
 badSinks.delete("spk-b");
 
-/* ── 11 · quiet ────────────────────────────────────────────────────────── */
+/* ── 11 · monitor across a sink switch ─────────────────────────────────── */
 
-console.log("\n11 · no noise");
+/** An AudioParam stand-in that records the value it was told to approach. */
+const fakeParam = (value = 1) => ({
+  value,
+  setTargetAtTime(v: number) {
+    this.value = v;
+  },
+  setValueAtTime(v: number) {
+    this.value = v;
+  },
+  cancelScheduledValues() {
+    /* no automation */
+  },
+});
+
+/** A powered engine with a monitor bus, without building the whole graph. */
+const poweredEngine = (ctx: ReturnType<typeof fakeContext>) => {
+  const e = new AudioEngine();
+  e.ctx = ctx as unknown as AudioContext;
+  const anyEngine = e as unknown as Record<string, unknown>;
+  anyEngine.powered = true;
+  anyEngine.graphReady = true;
+  anyEngine.params = DEFAULT_PARAMS;
+  anyEngine.appliedSink = "";
+  anyEngine.monitorGain = { gain: fakeParam(0.501) };
+  return e;
+};
+
+console.log("\n11 · the monitor across a sink switch");
+// A cold console with no saved sink: the one case where boot has nothing to
+// switch at all.
+store.set("signalpath.devices.v1", JSON.stringify({ input: "", output: "", source: "signal" }));
+sinkCalls = [];
+const bootCtx = fakeContext();
+const bootEngine = poweredEngine(bootCtx);
+await (bootEngine as unknown as { applyOutputDevice: () => Promise<void> }).applyOutputDevice();
+const bootMonitor = (bootEngine as unknown as { monitorGain: { gain: { value: number } } })
+  .monitorGain;
+check(sinkCalls.length === 0, "boot makes no sink call for the default it already renders to");
+check(
+  Math.abs(bootMonitor.gain.value - 0.501) < 1e-6,
+  "and leaves the monitor at its programmed level",
+  bootMonitor.gain.value.toFixed(3),
+);
+
+hungSinks.add("spk-hang");
+sinkCalls = [];
+const hungCtx = fakeContext();
+const hungEngine = poweredEngine(hungCtx);
+const hungMonitor = (hungEngine as unknown as { monitorGain: { gain: { value: number } } })
+  .monitorGain;
+hungEngine.setOutputDevice("spk-hang");
+await new Promise((r) => setTimeout(r, 1700));
+check(sinkCalls.includes("spk-hang"), "the sink call was made", sinkCalls.join(" → "));
+check(
+  hungMonitor.gain.value > 0.4,
+  "a sink call that never answers still gives the monitor back",
+  hungMonitor.gain.value.toFixed(3),
+);
+check(hungEngine.outputDeviceId === "spk-hang", "the pick is kept, not reverted on silence", hungEngine.outputDeviceId);
+hungSinks.delete("spk-hang");
+
+console.log("\n12 · monitor mute reaches every subscriber");
+let notifies = 0;
+const off = hungEngine.subscribe(() => {
+  notifies += 1;
+});
+hungEngine.setMonitorMuted(true);
+check(hungEngine.monitorMutedNow, "the engine holds the mute");
+check(notifies === 1, "a mute notifies subscribers", `${notifies} notification(s)`);
+check(hungMonitor.gain.value === 0, "and zeroes the monitor bus", hungMonitor.gain.value.toFixed(3));
+hungEngine.setMonitorMuted(false);
+check(
+  Math.abs(hungMonitor.gain.value - Math.pow(10, DEFAULT_PARAMS.monitorDb / 20)) < 1e-6,
+  "un-muting restores the programmed level",
+  hungMonitor.gain.value.toFixed(3),
+);
+off();
+
+/* ── 13 · quiet ────────────────────────────────────────────────────────── */
+
+console.log("\n13 · no noise");
 await settle();
 check(logs.length === 0, "nothing was logged to console.error/warn", logs.join(" | "));
 check(rejections.length === 0, "no promise rejection escaped", rejections.map(String).join(" | "));

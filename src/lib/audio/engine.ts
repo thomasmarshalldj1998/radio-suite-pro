@@ -251,6 +251,15 @@ const SOURCE_FADE_MS = 20;
  */
 const MONITOR_FADE_MS = 30;
 
+/**
+ * Bound on one sink switch. The monitor is faded for the length of the call,
+ * so a call that never settles (a permission prompt the frame will not show,
+ * an endpoint the OS is still waking) must not leave the console silent with
+ * its meters still live. Past this the switch is treated as unattempted and
+ * retried by the next device event.
+ */
+const SINK_SWITCH_TIMEOUT_MS = 1500;
+
 const stopStream = (stream: MediaStream) => {
   for (const track of stream.getTracks()) track.stop();
 };
@@ -2118,6 +2127,10 @@ export class AudioEngine {
   setMonitorMuted(muted: boolean) {
     this.monitorMuted = muted;
     this.applyMonitorGain();
+    // The mute lives on the engine, so every view that draws it has to hear
+    // about the change — a panel that keeps its own copy can silently show
+    // "Listen" while the monitor bus is at zero.
+    this.notify();
   }
 
   get monitorMutedNow(): boolean {
@@ -2730,6 +2743,10 @@ export class AudioEngine {
     }) | null;
     if (!ctx || typeof ctx.setSinkId !== "function") return;
     const wanted = this.outputDeviceId;
+    // Boot hands both of these an empty sink: the context already renders to
+    // the OS default, so there is nothing to switch and the monitor must not
+    // be taken down for it.
+    if (wanted === this.appliedSink && wanted === "") return;
     // A live setSinkId restarts the output stream. That restart is a click at
     // best and, on a device with a different hardware buffer, a burst of
     // uninitialised frames — so the monitor bus is faded out first. The
@@ -2741,9 +2758,18 @@ export class AudioEngine {
       await waitMs(MONITOR_FADE_MS);
     }
     try {
-      await ctx.setSinkId(wanted);
-      this.appliedSink = wanted;
-    } catch {
+      const switched = await this.switchSink(ctx, wanted);
+      if (switched === "ok") {
+        this.appliedSink = wanted;
+        return;
+      }
+      if (switched === "pending") {
+        // The call is still in flight. Everything the console knows is left
+        // as it was, so the next device event retries it — but the monitor
+        // is let back through now rather than waiting on a promise that may
+        // never answer.
+        return;
+      }
       // The device vanished between enumeration and the switch. Drop back to
       // the OS default and say so, rather than leaving the panel claiming a
       // sink nothing is routed to. A closed context is not a dead device, and
@@ -2754,17 +2780,37 @@ export class AudioEngine {
       if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
       this.outputDeviceId = "";
       this.saveDevicePrefs();
-      try {
-        await ctx.setSinkId("");
-        this.appliedSink = "";
-      } catch {
-        /* context cannot re-open the default sink — nothing left to try */
-      }
+      if ((await this.switchSink(ctx, "")) === "ok") this.appliedSink = "";
       this.notify();
     } finally {
       // Restore through the ramp cache, so the next parameter apply knows the
       // monitor is back at its programmed level.
       this.applyMonitorGain();
+    }
+  }
+
+  /**
+   * One sink switch, bounded.
+   *
+   * "ok" and "refused" are the promise's own answers; "pending" means the
+   * call outlived SINK_SWITCH_TIMEOUT_MS and was abandoned. A rejection that
+   * arrives after the timeout has already been consumed by the race, so no
+   * unhandled rejection escapes when the caller walks away.
+   */
+  private async switchSink(
+    ctx: AudioContext & { setSinkId?: (sinkId: string) => Promise<void> },
+    id: string,
+  ): Promise<"ok" | "refused" | "pending"> {
+    try {
+      return await Promise.race([
+        ctx.setSinkId!(id).then(
+          () => "ok" as const,
+          () => "refused" as const,
+        ),
+        waitMs(SINK_SWITCH_TIMEOUT_MS).then(() => "pending" as const),
+      ]);
+    } catch {
+      return "refused";
     }
   }
 

@@ -356,12 +356,16 @@ export function ProcessingTab({
 }) {
   const engine = getEngine();
   const snap = useMeterSnapshot();
-  const [monitorMuted, setMonitorMuted] = useState(false);
+  // The mute is engine state, not panel state: a tab switch used to remount
+  // this component with `false` and leave the bus muted with the button
+  // reading "Listen" — meters live, no sound, nothing on screen to explain it.
+  const [monitorMuted, setMonitorMuted] = useState(() => engine.monitorMutedNow);
   const [outputs, setOutputs] = useState(engine.outputDevices);
   const [outputId, setOutputId] = useState(engine.outputDeviceId);
   useEffect(
     () =>
       engine.subscribe(() => {
+        setMonitorMuted((p) => (p === engine.monitorMutedNow ? p : engine.monitorMutedNow));
         setOutputs((p) => (p === engine.outputDevices ? p : engine.outputDevices));
         setOutputId((p) => (p === engine.outputDeviceId ? p : engine.outputDeviceId));
       }),
@@ -1893,6 +1897,24 @@ export function ProcessingTab({
           <div className="mt-2 flex justify-center">
             <StereoLevelMeter kind="out" height={120} />
           </div>
+
+          {(monitorMuted || params.monitorDb <= -55 || engine.monitorIsVirtual) && (
+            <div className="mt-2 space-y-1">
+              {(monitorMuted || params.monitorDb <= -55) && (
+                <p className="rounded border border-meter-warn/40 bg-meter-warn/10 px-2 py-1.5 text-[10px] leading-4 text-meter-warn">
+                  {monitorMuted
+                    ? "Monitor muted — the programme is on the meters but not on the speakers."
+                    : `Monitor at ${formatDb(params.monitorDb)} — effectively silent. Raise it to hear the chain.`}
+                </p>
+              )}
+              {engine.monitorIsVirtual && (
+                <p className="rounded border border-meter-warn/40 bg-meter-warn/10 px-2 py-1.5 text-[10px] leading-4 text-meter-warn">
+                  This output is a virtual cable — nothing is heard locally. Pick
+                  your speakers or headphones to monitor.
+                </p>
+              )}
+            </div>
+          )}
         </ChainBlock>
           </>
         )}

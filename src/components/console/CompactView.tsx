@@ -594,11 +594,22 @@ export function CompactView({
               />
               <div className="flex items-center justify-between">
                 <Num>{formatDb(params.monitorDb)}</Num>
-                <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
-                  {params.stereo.width > 1.01
-                    ? `Wide ×${params.stereo.width.toFixed(2)}`
-                    : "Stereo"}
-                </span>
+                {engine.monitorMutedNow ? (
+                  <button
+                    type="button"
+                    onClick={() => engine.setMonitorMuted(false)}
+                    title="The monitor bus is muted — click to listen"
+                    className="cursor-pointer rounded border border-meter-warn/40 bg-meter-warn/10 px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.1em] text-meter-warn uppercase transition-colors hover:bg-meter-warn/20"
+                  >
+                    Muted
+                  </button>
+                ) : (
+                  <span className="text-[9px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
+                    {params.stereo.width > 1.01
+                      ? `Wide ×${params.stereo.width.toFixed(2)}`
+                      : "Stereo"}
+                  </span>
+                )}
               </div>
             </div>
           </div>
