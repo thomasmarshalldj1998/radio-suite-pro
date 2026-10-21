@@ -13,7 +13,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import instant_attack_gain_curve
 from proc_dsp import clamp, copy_stereo, level_db
+
+try:  # optional vectorised detector; scalar path is the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["OvershootCorrection"]
 
@@ -54,6 +60,29 @@ class OvershootCorrection:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
+        n = len(l)
+        if _np is not None and n >= 64:
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            detector = _np.maximum(_np.abs(left), _np.abs(right))
+            ceiling = self.ceiling
+            floor_gain = 10.0 ** (-self.max_reduction_db / 20.0)
+            targets = _np.clip(
+                _np.where(detector <= ceiling, 1.0, ceiling / _np.maximum(detector, 1e-300)),
+                floor_gain,
+                1.0,
+            )
+            gains = instant_attack_gain_curve(targets, self._gain, self._release)
+            if gains is not None:
+                gain_array = _np.asarray(gains, dtype=_np.float64)
+                self._gain = float(gain_array[-1])
+                self.max_overshoot_db = max(
+                    0.0, -20.0 * math.log10(max(float(gain_array.min()), 1e-9))
+                )
+                return (
+                    _np.clip(left * gain_array, -ceiling, ceiling).tolist(),
+                    _np.clip(right * gain_array, -ceiling, ceiling).tolist(),
+                )
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         gain = self._gain

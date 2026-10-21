@@ -18,6 +18,11 @@ from typing import Sequence
 
 from proc_dsp import Envelope, clamp, copy_stereo, level_db
 
+try:  # optional vectorised gain targets; scalar path is the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
 __all__ = ["UpwardCompressor"]
 
 
@@ -64,6 +69,44 @@ class UpwardCompressor:
         l, r = copy_stereo(left, right)
         if not self.enabled or self.mix <= 0.0:
             return l, r
+        n = len(l)
+        if _np is not None and n >= 64:
+            env_state = self._env
+            env = env_state.value
+            attack, release = env_state.attack, env_state.release
+            levels = _np.empty(n, dtype=_np.float64)
+            for i in range(n):
+                linked = abs(l[i])
+                other = abs(r[i])
+                if other > linked:
+                    linked = other
+                coef = attack if linked > env else release
+                env += (linked - env) * coef
+                levels[i] = env
+            env_state.value = env
+            level_db_values = 20.0 * _np.log10(_np.maximum(levels, 1e-12))
+            under = _np.maximum(0.0, self.threshold_db - level_db_values)
+            target_db = _np.minimum(self.range_db, under * (1.0 - 1.0 / self.ratio))
+            targets = _np.power(10.0, target_db / 20.0).tolist()
+            gains = [0.0] * n
+            gain = self._gain
+            attack_coef, release_coef = self._attack, self._release
+            for i in range(n):
+                target = targets[i]
+                coef = attack_coef if target > gain else release_coef
+                gain += (target - gain) * coef
+                gains[i] = gain
+            self._gain = gain
+            gain_array = _np.asarray(gains, dtype=_np.float64)
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            mix = self.mix
+            self.input_db = level_db(env)
+            self.gain_db = 20.0 * math.log10(max(gain, 1e-9))
+            return (
+                (left + (left * gain_array - left) * mix).tolist(),
+                (right + (right * gain_array - right) * mix).tolist(),
+            )
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         env = 0.0

@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from proc_accel import filter_block
+from proc_accel import filter_block, filter_block_array
 from proc_dsp import Biquad, clamp, copy_stereo, low_shelf, soft_clip
 
 try:
@@ -70,10 +70,29 @@ class TapeEmulation:
             right = _np.asarray(r, dtype=_np.float64)
             sl = _np.clip(_np.tanh(left * self.drive) / drive_norm, -1.0, 1.0)
             sr = _np.clip(_np.tanh(right * self.drive) / drive_norm, -1.0, 1.0)
-            bl = filter_block(self._bump_l, sl.tolist())
-            br = filter_block(self._bump_r, sr.tolist())
-            yl = _np.asarray(filter_block(self._hf_l, bl)) * drive_norm
-            yr = _np.asarray(filter_block(self._hf_r, br)) * drive_norm
+            bl = filter_block_array(self._bump_l, sl)
+            br = filter_block_array(self._bump_r, sr)
+            if bl is not None and br is not None:
+                yl = filter_block_array(self._hf_l, bl)
+                yr = filter_block_array(self._hf_r, br)
+                if yl is not None and yr is not None:
+                    yl = yl * drive_norm
+                    yr = yr * drive_norm
+                    out_l = (left + (yl - left) * self.mix).tolist()
+                    out_r = (right + (yr - right) * self.mix).tolist()
+                    self.harmonic_level = float(
+                        max(_np.max(_np.abs(yl - left)), _np.max(_np.abs(yr - right)))
+                    )
+                    return out_l, out_r
+                bl = filter_block(self._hf_l, bl)
+                br = filter_block(self._hf_r, br)
+            else:
+                bl = filter_block(self._bump_l, sl.tolist())
+                br = filter_block(self._bump_r, sr.tolist())
+                bl = filter_block(self._hf_l, bl)
+                br = filter_block(self._hf_r, br)
+            yl = _np.asarray(bl) * drive_norm
+            yr = _np.asarray(br) * drive_norm
             out_l = (left + (yl - left) * self.mix).tolist()
             out_r = (right + (yr - right) * self.mix).tolist()
             self.harmonic_level = float(max(_np.max(_np.abs(yl - left)), _np.max(_np.abs(yr - right))))

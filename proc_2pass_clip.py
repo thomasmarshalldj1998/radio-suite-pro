@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block_array
 from stream_encoder_core import Biquad, clamp
 
 try:  # optional acceleration; the stdlib path remains the reference
@@ -234,6 +235,16 @@ class _Saturation:
     def process(
         self, left: Sequence[float], right: Sequence[float]
     ) -> tuple[list[float], list[float]]:
+        if _np is not None and len(left) >= 64:
+            xl = _np.asarray(left, dtype=_np.float64)
+            xr = _np.asarray(right, dtype=_np.float64)
+            dl = filter_block_array(self.dc_l, xl * xl)
+            dr = filter_block_array(self.dc_r, xr * xr)
+            if dl is not None and dr is not None:
+                return (
+                    (xl + self.amount * dl).tolist(),
+                    (xr + self.amount * dr).tolist(),
+                )
         out_l, out_r = [], []
         for l, r in zip(left, right):
             xl, xr = float(l), float(r)

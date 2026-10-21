@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from proc_accel import filter_block
+from proc_accel import filter_block, filter_block_array
 from proc_dsp import Biquad, clamp, copy_stereo
 
 try:
@@ -55,23 +55,26 @@ class StereoEnhancer3Band:
         l, r = copy_stereo(left, right)
         if not self.enabled or all(w == 1.0 for w in self.widths):
             return l, r
+        wl, wm, wh = self.widths
+        if _np is not None and len(l) >= 64:
+            ll = filter_block_array(self._low_l, l)
+            lr = filter_block_array(self._low_r, r)
+            hl = filter_block_array(self._high_l, l)
+            hr = filter_block_array(self._high_r, r)
+            if ll is not None and lr is not None and hl is not None and hr is not None:
+                ml, mr = _np.asarray(l) - ll - hl, _np.asarray(r) - lr - hr
+                out_l = _np.zeros(len(l), dtype=_np.float64)
+                out_r = _np.zeros(len(l), dtype=_np.float64)
+                for a, b, width in ((ll, lr, wl), (ml, mr, wm), (hl, hr, wh)):
+                    mid = 0.5 * (a + b)
+                    side = 0.5 * (a - b) * width
+                    out_l += mid + side
+                    out_r += mid - side
+                return out_l.tolist(), out_r.tolist()
         low_l = filter_block(self._low_l, l)
         low_r = filter_block(self._low_r, r)
         high_l = filter_block(self._high_l, l)
         high_r = filter_block(self._high_r, r)
-        wl, wm, wh = self.widths
-        if _np is not None and len(l) >= 64:
-            ll, lr = _np.asarray(low_l), _np.asarray(low_r)
-            hl, hr = _np.asarray(high_l), _np.asarray(high_r)
-            ml, mr = _np.asarray(l) - ll - hl, _np.asarray(r) - lr - hr
-            out_l = _np.zeros(len(l), dtype=_np.float64)
-            out_r = _np.zeros(len(l), dtype=_np.float64)
-            for a, b, width in ((ll, lr, wl), (ml, mr, wm), (hl, hr, wh)):
-                mid = 0.5 * (a + b)
-                side = 0.5 * (a - b) * width
-                out_l += mid + side
-                out_r += mid - side
-            return out_l.tolist(), out_r.tolist()
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         for i in range(len(l)):

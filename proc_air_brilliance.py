@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from proc_accel import filter_block
+from proc_accel import filter_block, filter_block_array
 from proc_dsp import Biquad, clamp, copy_stereo, soft_clip
 
 try:
@@ -62,6 +62,25 @@ class AirBrilliance:
         if not self.enabled or (self.air_db == 0.0 and self.drive == 0.0):
             return l, r
         drive = 1.0 + self.drive
+        if _np is not None and len(l) >= 64:
+            sl_a = filter_block_array(self._shelf_l, l)
+            sr_a = filter_block_array(self._shelf_r, r)
+            if sl_a is not None and sr_a is not None:
+                hl_a = filter_block_array(self._hp_l, sl_a)
+                hr_a = filter_block_array(self._hp_r, sr_a)
+                if hl_a is not None and hr_a is not None:
+                    denom = max(math.tanh(drive), 1e-9)
+                    sat_l = _np.clip(_np.tanh(hl_a * drive) / denom, -1.0, 1.0)
+                    sat_r = _np.clip(_np.tanh(hr_a * drive) / denom, -1.0, 1.0)
+                    self.harmonic_amount = max(
+                        self.harmonic_amount,
+                        float(_np.max(_np.abs(sat_l - hl_a))),
+                        float(_np.max(_np.abs(sat_r - hr_a))),
+                    )
+                    return (
+                        (sl_a + (sat_l - hl_a) * self.mix).tolist(),
+                        (sr_a + (sat_r - hr_a) * self.mix).tolist(),
+                    )
         sl = filter_block(self._shelf_l, l)
         sr = filter_block(self._shelf_r, r)
         hl = filter_block(self._hp_l, sl)

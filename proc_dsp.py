@@ -39,10 +39,17 @@ __all__ = [
 
 
 def copy_stereo(left: Sequence[float], right: Sequence[float]) -> tuple[list[float], list[float]]:
-    """Float copies, truncated to the shared length (bypass-safe)."""
+    """Float copies, truncated to the shared length (bypass-safe).
+
+    Chain blocks are float lists already (every stage returns floats), and a
+    plain list copy is roughly ten times faster than mapping ``float`` over
+    every sample. Only mixed/typed inputs take the conversion path.
+    """
     n = min(len(left), len(right))
-    # map(float, …) is roughly twice as fast as a comprehension here, and this
-    # runs once per module per block in the 43-stage chain.
+    if n == 0:
+        return [], []
+    if type(left[0]) is float and type(right[0]) is float:
+        return list(left[:n]), list(right[:n])
     return list(map(float, left[:n])), list(map(float, right[:n]))
 
 

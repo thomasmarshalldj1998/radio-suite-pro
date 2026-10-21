@@ -127,6 +127,51 @@ class TruePeakGuard:
             curve = _np.maximum(_np.asarray(curve_l), _np.asarray(curve_r)).tolist()
         else:
             curve = [max(a, b) for a, b in zip(curve_l, curve_r)]
+        n = len(l)
+        if _np is not None and n >= 64:
+            gain_curve = _np.empty(n, dtype=_np.float64)
+            gain = self._gain
+            hold_left = self._hold_left
+            hold = self._hold
+            release = self._release
+            ceiling = self.ceiling
+            for i in range(n):
+                peak = curve[i]
+                target = 1.0 if peak <= ceiling else ceiling / peak
+                if target < gain:
+                    gain = target
+                    hold_left = hold
+                elif hold_left > 0:
+                    hold_left -= 1
+                else:
+                    gain += (1.0 - gain) * release
+                gain_curve[i] = gain
+            delay = self._delay
+            left = _np.asarray(l, dtype=_np.float64)
+            right = _np.asarray(r, dtype=_np.float64)
+            if delay:
+                buf_l = _np.asarray(self._buf_l, dtype=_np.float64)
+                buf_r = _np.asarray(self._buf_r, dtype=_np.float64)
+                pos = self._pos % delay
+                stream_l = _np.concatenate((buf_l[pos:], buf_l[:pos], left))
+                stream_r = _np.concatenate((buf_r[pos:], buf_r[:pos], right))
+                delayed_l = stream_l[:n]
+                delayed_r = stream_r[:n]
+                self._buf_l = stream_l[n : n + delay]
+                self._buf_r = stream_r[n : n + delay]
+                self._pos = 0
+            else:
+                delayed_l, delayed_r = left, right
+            self._gain = gain
+            self._hold_left = hold_left
+            self.max_reduction_db = max(
+                0.0, -20.0 * math.log10(max(float(gain_curve.min()), 1e-9))
+            )
+            self.true_peak_db = level_db(float(max(curve_l + curve_r)) if n else 0.0)
+            return (
+                _np.clip(delayed_l * gain_curve, -ceiling, ceiling).tolist(),
+                _np.clip(delayed_r * gain_curve, -ceiling, ceiling).tolist(),
+            )
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         latest_peak = 0.0

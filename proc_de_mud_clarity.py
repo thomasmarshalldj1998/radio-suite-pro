@@ -14,8 +14,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from proc_accel import filter_block
+from proc_accel import filter_block, filter_block_array
 from proc_dsp import Biquad, Envelope, clamp, copy_stereo, level_db
+
+try:  # optional vectorised shaping; scalar path is the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 __all__ = ["DeMudClarity"]
 
@@ -62,6 +67,45 @@ class DeMudClarity:
         l, r = copy_stereo(left, right)
         if not self.enabled or (self.mud_cut_db == 0.0 and self.clarity_db == 0.0):
             return l, r
+        n = len(l)
+        if _np is not None and n >= 64:
+            mud_l_a = filter_block_array(self._mud_l, l)
+            mud_r_a = filter_block_array(self._mud_r, r)
+            pres_l_a = filter_block_array(self._pres_l, l)
+            pres_r_a = filter_block_array(self._pres_r, r)
+            if (
+                mud_l_a is not None
+                and mud_r_a is not None
+                and pres_l_a is not None
+                and pres_r_a is not None
+            ):
+                mud = 0.5 * (mud_l_a + mud_r_a)
+                pres = 0.5 * (pres_l_a + pres_r_a)
+                env = self._env
+                value = env.value
+                attack, release = env.attack, env.release
+                levels = _np.empty(n, dtype=_np.float64)
+                for i in range(n):
+                    level = abs(float(mud[i]))
+                    coef = attack if level > value else release
+                    value += (level - value) * coef
+                    levels[i] = value
+                env.value = value
+                mud_base = self.mud_cut_db
+                if self.dynamic:
+                    activity = _np.clip((20.0 * _np.log10(_np.maximum(levels, 1e-12)) + 48.0) / 24.0, 0.15, 1.0)
+                    mud_gain = _np.power(10.0, mud_base * activity / 20.0)
+                else:
+                    mud_gain = 10.0 ** (mud_base / 20.0)
+                last_gain = float(mud_gain[-1]) if self.dynamic else float(mud_gain)
+                self.mud_gain_db = 20.0 * math.log10(max(last_gain, 1e-9))
+                self.clarity_gain_db = self.clarity_db
+                delta = mud_gain - 1.0
+                clarity_delta = 10.0 ** (self.clarity_db / 20.0) - 1.0
+                return (
+                    (_np.asarray(l) + mud * delta + pres * clarity_delta).tolist(),
+                    (_np.asarray(r) + mud * delta + pres * clarity_delta).tolist(),
+                )
         mud_l = filter_block(self._mud_l, l)
         mud_r = filter_block(self._mud_r, r)
         pres_l = filter_block(self._pres_l, l)

@@ -15,6 +15,11 @@ from typing import Sequence
 
 from proc_dsp import Envelope, clamp, copy_stereo, level_db
 
+try:  # optional vectorised gain targets; scalar path is the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
 __all__ = ["AgcDualSpeed", "AGCDualSpeed"]
 
 
@@ -75,6 +80,51 @@ class AgcDualSpeed:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
+        n = len(l)
+        if _np is not None and n >= 64:
+            slow_env = self._slow.value
+            fast_env = self._fast.value
+            slow_a, slow_r = self._slow.attack, self._slow.release
+            fast_a, fast_r = self._fast.attack, self._fast.release
+            slow_levels = _np.empty(n, dtype=_np.float64)
+            fast_levels = _np.empty(n, dtype=_np.float64)
+            for i in range(n):
+                linked = abs(l[i])
+                other = abs(r[i])
+                if other > linked:
+                    linked = other
+                coef = slow_a if linked > slow_env else slow_r
+                slow_env += (linked - slow_env) * coef
+                coef = fast_a if linked > fast_env else fast_r
+                fast_env += (linked - fast_env) * coef
+                slow_levels[i] = slow_env
+                fast_levels[i] = fast_env
+            self._slow.value = slow_env
+            self._fast.value = fast_env
+            slow_db = 20.0 * _np.log10(_np.maximum(slow_levels, 1e-12))
+            fast_db = 20.0 * _np.log10(_np.maximum(fast_levels, 1e-12))
+            slow_gain_db = _np.clip(
+                self.target_db - slow_db, -self.max_cut_db, self.max_boost_db
+            )
+            fast_gain_db = _np.minimum(0.0, self.fast_ceiling_db - fast_db)
+            targets = _np.power(10.0, (slow_gain_db + fast_gain_db) / 20.0).tolist()
+            gains = [0.0] * n
+            gain = self._gain
+            attack, release = self._attack, self._release
+            for i in range(n):
+                target = targets[i]
+                coef = attack if target < gain else release
+                gain += (target - gain) * coef
+                gains[i] = gain
+            self._gain = gain
+            self.slow_gain_db = float(slow_gain_db[-1])
+            self.fast_gain_db = float(fast_gain_db[-1])
+            self.output_gain_db = 20.0 * math.log10(max(gain, 1e-9))
+            gain_array = _np.asarray(gains, dtype=_np.float64)
+            return (
+                (_np.asarray(l) * gain_array).tolist(),
+                (_np.asarray(r) * gain_array).tolist(),
+            )
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         slow_env = self._slow.value
