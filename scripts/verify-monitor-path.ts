@@ -17,6 +17,7 @@
  *  5  the monitor level control really reaches the destination
  *  6  mono fold and channel invert keep audio on the monitor
  *  7  the encoder send is independent of the monitor
+ *  8  the header readout reports the bus as the node holds it
  */
 import { DEFAULT_PARAMS } from "../src/lib/audio/params";
 
@@ -375,6 +376,29 @@ check(
   "and the whole chain feeds it, not just the tail",
   bestGain(source, streamDest).toFixed(3),
 );
+
+/* ── 7 · the header readout ────────────────────────────────────────────── */
+
+console.log("\n7 · header readout");
+engine.setMonitorDb(-12);
+const route = engine.monitorState;
+check(close(route.gainDb, -12, 0.05), "the readout follows the bus, not the parameter", `${route.gainDb.toFixed(1)} dB`);
+check(!route.muted, "an open monitor is reported open");
+check(route.sink === "" && route.sinkLabel === "System default", "with no sink picked it names the OS default", route.sinkLabel);
+engine.outputDeviceId = "spk-unlisted";
+check(
+  engine.monitorState.sink === "spk-unlisted" &&
+    engine.monitorState.sinkLabel === "Chosen output",
+  "a pick the enumeration cannot label is still reported as one",
+  engine.monitorState.sinkLabel,
+);
+engine.outputDeviceId = "";
+engine.setMonitorMuted(true);
+const mutedRoute = engine.monitorState;
+check(mutedRoute.muted, "a muted bus is reported muted");
+check(mutedRoute.gainDb === -Infinity, "and reports no level rather than the parameter's", String(mutedRoute.gainDb));
+engine.setMonitorMuted(false);
+check(close(engine.monitorState.gainDb, -6, 0.05), "un-muting reports the restored level", `${engine.monitorState.gainDb.toFixed(1)} dB`);
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);
 process.exit(failed === 0 ? 0 : 1);

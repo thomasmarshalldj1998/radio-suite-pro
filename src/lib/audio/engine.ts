@@ -2138,6 +2138,38 @@ export class AudioEngine {
   }
 
   /**
+   * The monitor path as it actually stands, for surfaces outside the monitor
+   * panel.
+   *
+   * `gainDb` is read from the bus itself, so it includes the operator mute and
+   * any fade in flight — unlike `params.monitorDb`, which is only what the
+   * console was asked to do. A header that shows the parameter instead of the
+   * node can read "-6 dB" while the speakers are at zero, which is the whole
+   * failure this describes.
+   */
+  get monitorState(): {
+    muted: boolean;
+    gainDb: number;
+    sink: string;
+    sinkLabel: string;
+  } {
+    const gain = this.monitorGain?.gain.value;
+    return {
+      muted: this.monitorMuted,
+      gainDb:
+        typeof gain === "number" && gain > 0
+          ? 20 * Math.log10(Math.min(1e3, gain))
+          : -Infinity,
+      sink: this.outputDeviceId,
+      // A pick the current enumeration has not labelled yet is still a pick,
+      // not the OS default: say so instead of claiming the wrong endpoint.
+      sinkLabel:
+        this.selectedOutput?.label ??
+        (this.outputDeviceId ? "Chosen output" : "System default"),
+    };
+  }
+
+  /**
    * Reference-match trim on the monitor path (Source compare A/B).
    * Raises/lowers the bypassed source so it plays at the processed chain's
    * loudness — the ear compares tone, not level. Clamped to ±12 dB and

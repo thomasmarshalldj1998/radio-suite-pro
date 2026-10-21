@@ -3,6 +3,7 @@ import { LogoDropdown } from "@/components/LogoDropdown";
 import { ConsoleSidebar } from "@/components/console/ConsoleSidebar";
 import { InputTab } from "@/components/console/InputTab";
 import { MeterBridge } from "@/components/console/MeterBridge";
+import { MonitorReadout } from "@/components/console/MonitorReadout";
 import { PresetPanel } from "@/components/console/PresetPanel";
 import {
   ProcessingTab,
@@ -979,6 +980,9 @@ export default function Dashboard() {
             >
               <Activity className="size-4" />
             </Button>
+
+            {/* monitor bus: what the speakers are really being fed */}
+            <MonitorReadout />
 
             {/* CPU · uptime · system — one grouped cluster, values over labels */}
             <span className="hidden items-center gap-4 rounded-lg border border-rack-line bg-white/[0.02] px-3 py-1.5 lg:flex">
