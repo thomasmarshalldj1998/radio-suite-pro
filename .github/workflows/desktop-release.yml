@@ -5,7 +5,7 @@ name: desktop-release
 # Every run is labelled with the workflow revision, so the Actions list shows
 # at a glance whether a run used the current YAML or a stale re-run ("re-run
 # jobs" replays the ORIGINAL commit and can never pick up a later fix).
-run-name: desktop-release rev 7 · ${{ github.ref_name }}
+run-name: desktop-release rev 8 · ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -26,6 +26,16 @@ on:
           - linux
           - all
         default: linux
+      # A tag push always publishes (see the last step of `build`). A manual
+      # run publishes nothing unless a tag is named here - that is how a
+      # platform skipped by an earlier release is filled in later: dispatch
+      # `targets: all` + this tag, and its leg uploads onto that release. The
+      # UI's "Use workflow from" dropdown only lists branches, so this is also
+      # the only way to publish from a dispatch at all.
+      release_tag:
+        description: "Existing release tag to upload to (e.g. v.2.0.0); empty = build only"
+        required: false
+        default: ""
 
 jobs:
   # Builds the matrix JSON from the dispatch input so a cheap test run only
@@ -44,8 +54,19 @@ jobs:
             echo 'matrix={"include":[{"os":"ubuntu-latest","args":"--linux"},{"os":"windows-latest","args":"--win"},{"os":"macos-latest","args":"--mac --arm64 --x64"}]}' >> "$GITHUB_OUTPUT"
           fi
 
+  # Publish gate: each leg attaches its own installers to the tag's release
+  # the moment that leg is green (see the last step). There is deliberately
+  # no shared `release` job that needs every platform: a macOS runner can sit
+  # queued for 10+ minutes (or fail) long after Linux and Windows finished,
+  # and gating on it withheld the whole release - the /latest/download/ links
+  # for installers that already existed stayed 404. Publishing per leg means
+  # Linux + Windows go live immediately and macOS lands whenever it builds.
   build:
     needs: prepare
+    # The publish step writes the tag's release, so this job needs write
+    # access; the workflow default stays read-only for everything else.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       # macos-latest is Apple silicon; name both archs explicitly or only
@@ -71,7 +92,7 @@ jobs:
           bun_v="$(bun --version 2>/dev/null || echo unknown)"
           node_v="$(node --version 2>/dev/null || echo unknown)"
           {
-            echo "workflow revision : 7"
+            echo "workflow revision : 8"
             echo "commit            : ${{ github.sha }}"
             echo "ref               : ${{ github.ref }}"
             echo "event             : ${{ github.event_name }} (run $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT)"
@@ -105,7 +126,7 @@ jobs:
         id: verify
         shell: bash
         run: |
-          echo "desktop-release workflow rev 7 (self-healing types, verify-all-files, cost-aware matrix, run diagnostics)"
+          echo "desktop-release workflow rev 8 (publish-per-platform, self-healing types, verify-all-files, cost-aware matrix, run diagnostics)"
           echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
           echo "checked-in _generated contents:"
           ls -la src/convex/_generated/ 2>/dev/null || echo "  (directory absent)"
@@ -230,40 +251,56 @@ jobs:
             release/*.zip
           if-no-files-found: error
 
-  # Publish every platform's installers on one GitHub Release per v* tag, so
-  # the site can link to stable /releases/latest/download/… URLs.
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release
-          merge-multiple: true
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Signalpath ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          files: |
-            release/*.AppImage
-            release/*.deb
-            release/*.exe
-            release/*.dmg
-            release/*.zip
-          body: |
-            Signalpath ${{ github.ref_name }} — broadcast audio processor and stream encoder.
-
-            | Platform | Installer |
-            |---|---|
-            | Windows | `Signalpath-Setup-x64.exe` (NSIS) |
-            | macOS (Apple silicon) | `Signalpath-arm64-mac.dmg` |
-            | macOS (Intel) | `Signalpath-x64-mac.dmg` |
-            | Linux (universal) | `Signalpath-x86_64.AppImage` |
-            | Linux (Debian/Ubuntu) | `signalpath-amd64.deb` |
+      # Attach THIS leg's installers to the tag's release immediately, so the
+      # landing page's /releases/latest/download/… links resolve per platform
+      # instead of all-or-nothing. gh ships on every runner; `create` is
+      # guarded by a `view` probe and `upload --clobber` makes a re-run replace
+      # its own files rather than fail on "already exists". Two legs may race
+      # to create the release: the loser falls back to the winner's release and
+      # still uploads, which is why the upload is not part of that `||`.
+      - name: Publish installers for this platform
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          [ -n "$tag" ] || tag="${{ github.ref_name }}"
+          echo "release target: $tag"
+          shopt -s nullglob
+          files=(release/*.AppImage release/*.deb release/*.exe release/*.dmg release/*.zip)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo '::error::the packaging step left no installers in release/ - nothing to publish'
+            exit 1
+          fi
+          echo "publishing to $tag from ${{ matrix.os }}: ${files[*]}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            # The body is written once, by whichever platform finishes first,
+            # so it names every installer the tag will eventually carry. The
+            # macOS rows are honest about the gate: those files appear when
+            # that leg completes, and the links 404 until they do.
+            notes="$(printf '%s\n' \
+              "Signalpath $tag — broadcast audio processor and stream encoder." \
+              "" \
+              "Installers are attached as each platform's build finishes, so a" \
+              "download link below can briefly 404 while its build is still" \
+              "running or queued (macOS runners are the slow ones)." \
+              "" \
+              "| Platform | Installer |" \
+              "|---|---|" \
+              "| Windows | \`Signalpath-Setup-x64.exe\` (NSIS) |" \
+              "| macOS (Apple silicon) | \`Signalpath-arm64-mac.dmg\` |" \
+              "| macOS (Intel) | \`Signalpath-x64-mac.dmg\` |" \
+              "| Linux (universal) | \`Signalpath-x86_64.AppImage\` |" \
+              "| Linux (Debian/Ubuntu) | \`signalpath-amd64.deb\` |")"
+            gh release create "$tag" \
+              --title "Signalpath $tag" \
+              --notes "$notes" \
+              || gh release view "$tag" > /dev/null
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          {
+            echo "### Published ${{ matrix.os }} → $tag"
+            printf -- '- `%s`\n' "${files[@]##*/}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -504,14 +504,30 @@ go stale between versions.
 ### CI
 
 `.github/workflows/desktop-release.yml` builds all three platforms natively
-(Ubuntu/Windows/macOS runners) on every `v*` tag, then publishes them all on
-one GitHub Release (the `release` job). That is what the landing page's
-download links resolve against. The same installers are also kept as workflow
-artifacts for non-tag builds.
+(Ubuntu/Windows/macOS runners) on every `v*` tag. There is no shared publish
+job: **each build leg attaches its own installers to the tag's GitHub Release
+as soon as it is green**, so one platform never holds back another. Linux and
+Windows usually go live in ~3 minutes; the macOS DMGs are added to the same
+release whenever their runner finishes (GitHub's macOS pool can sit queued for
+10+ minutes, and a leg that is still queued at the run's timeout is
+cancelled). The landing page's download links resolve against that release, so
+a macOS link 404s until the macOS leg completes — that is the intended gate,
+not a broken build. The same installers are also kept as workflow artifacts for
+non-tag builds.
+
+Because publishing happens inside each leg, a platform that fails stays
+missing from the release instead of hiding the platforms that passed. To fill
+it in later without re-tagging, dispatch the workflow with `targets: all` and
+`release_tag` set to the release tag (`v.2.0.0`, …): a manual run publishes
+only when that input is filled in, and its upload uses `--clobber`, so it
+replaces its own files and leaves the other platforms' assets untouched.
+(Re-running a *job* from the old run cannot do this — it replays the workflow
+and commit it was started with.)
 
 To test the build without cutting a release: **Actions → desktop-release →
 Run workflow → `targets: linux`** (one cheap runner; `all` builds
-Windows + macOS too).
+Windows + macOS too). Leave `release_tag` empty for that — a filled-in tag is
+what publishes.
 
 **Never diagnose a red run with "Re-run jobs".** A re-run replays the *original
 commit* of that run, so it can never pick up a later fix — it just goes red the
