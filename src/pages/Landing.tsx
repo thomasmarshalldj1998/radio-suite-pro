@@ -2,24 +2,19 @@ import { Brand } from "@/components/Brand";
 import { SpectrumCanvas } from "@/components/console/Spectrum";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { APP_VERSION, DESKTOP_DOWNLOADS, RELEASES_URL } from "@/lib/version";
 import { motion } from "framer-motion";
 import {
   Activity,
-  Apple,
   ArrowRight,
   AudioLines,
   BookOpenText,
-  Download,
   Gauge,
   Headphones,
   Mic2,
-  Monitor,
   RadioTower,
   Server,
   SlidersHorizontal,
   Sparkles,
-  Terminal,
   Waves,
   Zap,
 } from "lucide-react";
@@ -31,29 +26,6 @@ const fadeUp = {
   viewport: { once: true, margin: "-60px" },
   transition: { duration: 0.5, ease: "easeOut" as const },
 };
-
-/** Desktop installers — same air chain, running on your own machine. */
-const DOWNLOADS = [
-  {
-    icon: Monitor,
-    os: "Windows",
-    hint: "NSIS installer · Windows 10 / 11",
-    href: DESKTOP_DOWNLOADS.windows,
-  },
-  {
-    icon: Apple,
-    os: "macOS",
-    hint: "DMG · Apple silicon (Intel below)",
-    // Apple-silicon DMG is the default; the Intel DMG is linked in the note.
-    href: DESKTOP_DOWNLOADS.macArm,
-  },
-  {
-    icon: Terminal,
-    os: "Linux",
-    hint: "AppImage · any distro · also .deb",
-    href: DESKTOP_DOWNLOADS.linux,
-  },
-];
 
 /* ── static console visual pieces (marketing only) ──────────────────────── */
 
@@ -226,9 +198,6 @@ export default function Landing() {
             <a href="#encoder" className="transition-colors hover:text-foreground">
               Encoder
             </a>
-            <a href="#download" className="transition-colors hover:text-foreground">
-              Download
-            </a>
             <Link to="/studio" className="transition-colors hover:text-foreground">
               Studio
             </Link>
@@ -286,32 +255,6 @@ export default function Landing() {
               <Button size="lg" variant="outline" asChild>
                 <Link to="/auth?returnTo=/dashboard">Sign in to your station</Link>
               </Button>
-            </div>
-            {/* The installers belong on the first screen: a visitor who came
-                for the desktop app should not have to scroll to find it. These
-                are the same version-free URLs the #download section uses, so
-                they never drift from the release. */}
-            <div className="mt-6 flex flex-wrap items-center gap-2">
-              <span className="mr-1 text-[10px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
-                Get the app
-              </span>
-              {DOWNLOADS.map((d) => (
-                <a
-                  key={d.os}
-                  href={d.href}
-                  className="group inline-flex items-center gap-2 rounded-lg border border-border/70 bg-card/80 px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:border-signal/50 hover:text-signal"
-                >
-                  <d.icon className="size-3.5 text-signal" />
-                  {d.os}
-                  <Download className="size-3 text-muted-foreground transition-colors group-hover:text-signal" />
-                </a>
-              ))}
-              <a
-                href="#download"
-                className="text-xs text-muted-foreground underline decoration-border underline-offset-4 transition-colors hover:text-foreground"
-              >
-                all installers · v{APP_VERSION}
-              </a>
             </div>
             <dl className="mt-10 grid max-w-lg grid-cols-3 gap-4 border-t border-border/60 pt-6">
               {[
@@ -680,84 +623,6 @@ export default function Landing() {
         </motion.figure>
       </section>
 
-      {/* ── desktop downloads ── */}
-      <section id="download" className="mx-auto max-w-6xl scroll-mt-24 px-5 py-20">
-        <motion.div {...fadeUp} className="mx-auto max-w-2xl text-center">
-          <p className="text-[10px] font-semibold tracking-[0.2em] text-signal uppercase">
-            Desktop app · v{APP_VERSION}
-          </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
-            Install the air chain on your machine
-          </h2>
-          <p className="mt-4 text-sm leading-6 text-muted-foreground">
-            The full processor — multiband dynamics, loudness metering, the FM
-            composite generator and the stream encoder — as a standalone app
-            for Windows, macOS and Linux. Runs entirely on-device: presets, log
-            and mount configuration never leave your studio.
-          </p>
-        </motion.div>
-
-        <motion.div
-          {...fadeUp}
-          className="mx-auto mt-10 grid max-w-4xl gap-4 sm:grid-cols-3"
-        >
-          {DOWNLOADS.map((d) => (
-            <a
-              key={d.os}
-              href={d.href}
-              className="card-layer group flex flex-col items-start gap-3 rounded-xl border border-border/70 bg-card p-5 transition-colors hover:border-signal/50"
-            >
-              <span className="flex size-10 items-center justify-center rounded-lg border border-border/60 bg-muted/50 text-signal">
-                <d.icon className="size-5" />
-              </span>
-              <div>
-                <p className="flex items-center gap-2 text-base font-semibold text-foreground">
-                  {d.os}
-                  <Download className="size-3.5 text-muted-foreground transition-colors group-hover:text-signal" />
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{d.hint}</p>
-              </div>
-            </a>
-          ))}
-        </motion.div>
-
-        <motion.p
-          {...fadeUp}
-          className="mt-6 text-center text-xs text-muted-foreground"
-        >            Every installer is published on{" "}
-          <a
-            href={RELEASES_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline transition-colors hover:text-foreground"
-          >
-            GitHub Releases
-          </a>{" "}
-          — grab the{" "}
-          <a
-            href={DESKTOP_DOWNLOADS.macIntel}
-            className="underline transition-colors hover:text-foreground"
-          >
-            Intel macOS build
-          </a>,{" "}
-          the{" "}
-          <a
-            href={DESKTOP_DOWNLOADS.deb}
-            className="underline transition-colors hover:text-foreground"
-          >
-            .deb package
-          </a>{" "}
-          or a specific version there. Prefer the browser?{" "}
-          <Link
-            to="/auth?returnTo=/dashboard"
-            className="underline transition-colors hover:text-foreground"
-          >
-            Open the web console
-          </Link>
-          .
-        </motion.p>
-      </section>
-
       {/* ── CTA ── */}
       <section className="mx-auto max-w-6xl px-5 py-20">
         <motion.div
@@ -810,9 +675,6 @@ export default function Landing() {
             </a>
             <a href="#encoder" className="transition-colors hover:text-foreground">
               Encoder
-            </a>
-            <a href="#download" className="transition-colors hover:text-foreground">
-              Download
             </a>
             <Link to="/auth?returnTo=/dashboard" className="transition-colors hover:text-foreground">
               Sign in

@@ -486,10 +486,14 @@ bun scripts/verify-glitch.ts        # hold time, no chatter, recovery
 
 ### Download links
 
-The landing page (`src/pages/Landing.tsx`) has a **Download** section with a
-per-platform installer link plus a link to all releases. Every URL derives
-from one constant — `RELEASES_URL` in `src/lib/version.ts`. Point it at your
-repository's releases page before publishing:
+The desktop installers are **not linked from the site** while no release
+exists: the landing page deliberately has no Download section or installer
+buttons, because every link there would 404 until a release is published.
+The URLs are still defined in one place — `DESKTOP_DOWNLOADS`, derived from
+`RELEASES_URL` in `src/lib/version.ts` — and `scripts/verify-version.ts` keeps
+them valid, so re-surfacing a Download section only needs to point at those
+constants. Point `RELEASES_URL` at your repository's releases page before
+publishing:
 
 ```ts
 // src/lib/version.ts
