@@ -83,28 +83,54 @@ class AdaptiveNoiseGate:
             return l, r
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
+        # Comparing levels in the linear domain removes two log10s per sample:
+        # level > floor + margin ± hysteresis is env > floor × ratio.
+        open_ratio = 10.0 ** ((self.margin_db + self.hysteresis_db) / 20.0)
+        close_ratio = 10.0 ** ((self.margin_db - self.hysteresis_db) / 20.0)
+        closed_gain = 10.0 ** (-self.range_db / 20.0)
+        env_state = self._env
+        attack_env = env_state.attack
+        release_env = env_state.release
+        env = env_state.value
+        floor = self._floor
+        floor_down = self._floor_down
+        floor_up = self._floor_up
+        gain = self._gain
+        attack = self._attack
+        release = self._release
+        is_open = self.open
+        hold_left = self._hold_left
+        hold = self._hold
         for i, (xl, xr) in enumerate(zip(l, r)):
-            env = self._env.process(max(abs(xl), abs(xr)))
-            self._update_floor(env)
-            level = level_db(env)
-            floor = level_db(self._floor)
-            open_threshold = floor + self.margin_db + self.hysteresis_db
-            close_threshold = floor + self.margin_db - self.hysteresis_db
-            if not self.open and level > open_threshold:
-                self.open = True
-                self._hold_left = self._hold
-            elif self.open and level < close_threshold:
-                if self._hold_left > 0:
-                    self._hold_left -= 1
+            peak = xl if xl >= 0.0 else -xl
+            other = xr if xr >= 0.0 else -xr
+            if other > peak:
+                peak = other
+            env += (peak - env) * (attack_env if peak > env else release_env)
+            if floor <= 0.0 or env < floor:
+                floor += (env - floor) * floor_down
+            else:
+                floor += (env - floor) * floor_up
+            if not is_open and env > floor * open_ratio:
+                is_open = True
+                hold_left = hold
+            elif is_open and env < floor * close_ratio:
+                if hold_left > 0:
+                    hold_left -= 1
                 else:
-                    self.open = False
-            elif self.open and self._hold_left > 0:
-                self._hold_left -= 1
-            self._target = 1.0 if self.open else 10.0 ** (-self.range_db / 20.0)
-            coef = self._attack if self._target > self._gain else self._release
-            self._gain += (self._target - self._gain) * coef
-            out_l[i] = xl * self._gain
-            out_r[i] = xr * self._gain
+                    is_open = False
+            elif is_open and hold_left > 0:
+                hold_left -= 1
+            target = 1.0 if is_open else closed_gain
+            coef = attack if target > gain else release
+            gain += (target - gain) * coef
+            out_l[i] = xl * gain
+            out_r[i] = xr * gain
+        env_state.value = env
+        self._floor = floor
+        self._gain = gain
+        self.open = is_open
+        self._hold_left = hold_left
         self.floor_db = level_db(self._floor)
         self.gain_db = 20.0 * math.log10(max(self._gain, 1e-9))
         return out_l, out_r

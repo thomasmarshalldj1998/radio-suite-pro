@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import limiter_gain_loop
 from proc_dsp import clamp, copy_stereo, cubic, level_db
 
 try:  # optional vectorised detector; scalar path is the reference
@@ -67,7 +68,8 @@ class TruePeakGuard:
     def latency_samples(self) -> int:
         return self._delay
 
-    def _curve(self, values: Sequence[float]) -> list[float]:
+    def _curve(self, values: Sequence[float]):
+        """True-peak magnitude per sample; ndarray on the NumPy path."""
         n = len(values)
         if n == 0:
             return []
@@ -100,7 +102,7 @@ class TruePeakGuard:
                 )
                 _np.maximum(curve, point, out=curve)
                 _np.maximum(curve[1:], point[:-1], out=curve[1:])
-            return curve.tolist()
+            return curve
         curve = [abs(float(x)) for x in values]
         for i in range(n - 1):
             a = float(values[i - 1]) if i > 0 else float(values[i])
@@ -124,28 +126,22 @@ class TruePeakGuard:
         curve_l = self._curve(l)
         curve_r = self._curve(r)
         if _np is not None and len(l) >= 64:
-            curve = _np.maximum(_np.asarray(curve_l), _np.asarray(curve_r)).tolist()
+            curve = _np.maximum(curve_l, curve_r).tolist()
+            latest_peak = float(_np.maximum(curve_l, curve_r).max())
         else:
             curve = [max(a, b) for a, b in zip(curve_l, curve_r)]
+            latest_peak = max(curve_l + curve_r) if curve_l else 0.0
         n = len(l)
         if _np is not None and n >= 64:
-            gain_curve = _np.empty(n, dtype=_np.float64)
-            gain = self._gain
-            hold_left = self._hold_left
-            hold = self._hold
-            release = self._release
             ceiling = self.ceiling
-            for i in range(n):
-                peak = curve[i]
-                target = 1.0 if peak <= ceiling else ceiling / peak
-                if target < gain:
-                    gain = target
-                    hold_left = hold
-                elif hold_left > 0:
-                    hold_left -= 1
-                else:
-                    gain += (1.0 - gain) * release
-                gain_curve[i] = gain
+            detector = _np.asarray(curve, dtype=_np.float64)
+            targets = _np.where(
+                detector <= ceiling, 1.0, ceiling / _np.maximum(detector, 1e-300)
+            ).tolist()
+            gains, gain, hold_left = limiter_gain_loop(
+                targets, self._gain, self._hold_left, self._hold, self._release
+            )
+            gain_curve = _np.asarray(gains, dtype=_np.float64)
             delay = self._delay
             left = _np.asarray(l, dtype=_np.float64)
             right = _np.asarray(r, dtype=_np.float64)
@@ -167,7 +163,7 @@ class TruePeakGuard:
             self.max_reduction_db = max(
                 0.0, -20.0 * math.log10(max(float(gain_curve.min()), 1e-9))
             )
-            self.true_peak_db = level_db(float(max(curve_l + curve_r)) if n else 0.0)
+            self.true_peak_db = level_db(latest_peak)
             return (
                 _np.clip(delayed_l * gain_curve, -ceiling, ceiling).tolist(),
                 _np.clip(delayed_r * gain_curve, -ceiling, ceiling).tolist(),

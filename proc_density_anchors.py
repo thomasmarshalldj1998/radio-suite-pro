@@ -19,7 +19,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import filter_block_array
 from stream_encoder_core import Biquad, clamp
+
+try:  # optional acceleration; the scalar path is the reference
+    import numpy as _np
+except ImportError:  # pragma: no cover - fallback hosts
+    _np = None
 
 BASS_RANGE = (60.0, 120.0)
 MID_RANGE = (1000.0, 4000.0)
@@ -59,6 +65,60 @@ class _Anchor:
         self.gain_db += (target - self.gain_db) * (self.attack if target < self.gain_db else self.release)
         gain = 10.0 ** (self.gain_db / 20.0)
         return xl + bl * (gain - 1.0), xr + br * (gain - 1.0)
+
+    def process_block(
+        self, xl: Sequence[float], xr: Sequence[float]
+    ) -> tuple[list[float], list[float]] | None:
+        """Same maths as :meth:`process`, with the biquads run in C.
+
+        The envelope and gain recursions stay sample-accurate but operate on
+        plain lists, so the per-sample cost is arithmetic only — the four
+        biquad evaluations per stereo frame are gone. Returns ``None`` when
+        NumPy/SciPy are unavailable so the caller can use the scalar path.
+        """
+        if _np is None:
+            return None
+        bl = filter_block_array(self.filter_l, xl)
+        br = filter_block_array(self.filter_r, xr)
+        if bl is None or br is None:
+            return None
+        bands_l = bl.tolist()
+        bands_r = br.tolist()
+        n = len(bands_l)
+        attack = self.attack
+        release = self.release
+        env_l = self.env_l
+        env_r = self.env_r
+        peaks = [0.0] * n
+        for i in range(n):
+            a = bands_l[i]
+            if a < 0.0:
+                a = -a
+            env_l += (a - env_l) * (attack if a > env_l else release)
+            b = bands_r[i]
+            if b < 0.0:
+                b = -b
+            env_r += (b - env_r) * (attack if b > env_r else release)
+            peaks[i] = env_l if env_l > env_r else env_r
+        self.env_l = env_l
+        self.env_r = env_r
+        env = _np.asarray(peaks, dtype=_np.float64)
+        with _np.errstate(divide="ignore"):
+            env_db = _np.where(env > 0.0, 20.0 * _np.log10(_np.maximum(env, 1e-300)), -120.0)
+        over = _np.clip((env_db - self.threshold_db) / 12.0, 0.0, 1.0)
+        targets = (-self.depth_db * over).tolist()
+        gain_db = self.gain_db
+        gains = [0.0] * n
+        for i in range(n):
+            target = targets[i]
+            gain_db += (target - gain_db) * (attack if target < gain_db else release)
+            gains[i] = gain_db
+        self.gain_db = gain_db
+        gain = _np.power(10.0, _np.asarray(gains, dtype=_np.float64) / 20.0) - 1.0
+        return (
+            (_np.asarray(xl[:n], dtype=_np.float64) + _np.asarray(bands_l) * gain).tolist(),
+            (_np.asarray(xr[:n], dtype=_np.float64) + _np.asarray(bands_r) * gain).tolist(),
+        )
 
 
 class DensityAnchors:
@@ -104,13 +164,29 @@ class DensityAnchors:
         n = min(len(left), len(right))
         if not self.enabled or (self.bass_strength <= 0 and self.mid_strength <= 0):
             return [float(x) for x in left[:n]], [float(x) for x in right[:n]]
+        bass_on = self.bass_strength > 0
+        mid_on = self.mid_strength > 0
+        if _np is not None and n >= 64:
+            out_l = _np.asarray(left[:n], dtype=_np.float64).tolist()
+            out_r = _np.asarray(right[:n], dtype=_np.float64).tolist()
+            processed = True
+            for stage, active in ((self._bass, bass_on), (self._mid, mid_on)):
+                if not active:
+                    continue
+                result = stage.process_block(out_l, out_r)
+                if result is None:
+                    processed = False
+                    break
+                out_l, out_r = result
+            if processed:
+                return out_l, out_r
         out_l = [0.0] * n
         out_r = [0.0] * n
         for i in range(n):
             xl, xr = float(left[i]), float(right[i])
-            if self.bass_strength > 0:
+            if bass_on:
                 xl, xr = self._bass.process(xl, xr)
-            if self.mid_strength > 0:
+            if mid_on:
                 xl, xr = self._mid.process(xl, xr)
             out_l[i], out_r[i] = xl, xr
         return out_l, out_r

@@ -86,11 +86,17 @@ class AgcDualSpeed:
             fast_env = self._fast.value
             slow_a, slow_r = self._slow.attack, self._slow.release
             fast_a, fast_r = self._fast.attack, self._fast.release
-            slow_levels = _np.empty(n, dtype=_np.float64)
-            fast_levels = _np.empty(n, dtype=_np.float64)
+            # Lists inside the loop: appending a Python float is faster than
+            # writing into an ndarray slot; the array is built once at the end.
+            slow_levels = [0.0] * n
+            fast_levels = [0.0] * n
             for i in range(n):
-                linked = abs(l[i])
-                other = abs(r[i])
+                linked = l[i]
+                if linked < 0.0:
+                    linked = -linked
+                other = r[i]
+                if other < 0.0:
+                    other = -other
                 if other > linked:
                     linked = other
                 coef = slow_a if linked > slow_env else slow_r
@@ -101,8 +107,8 @@ class AgcDualSpeed:
                 fast_levels[i] = fast_env
             self._slow.value = slow_env
             self._fast.value = fast_env
-            slow_db = 20.0 * _np.log10(_np.maximum(slow_levels, 1e-12))
-            fast_db = 20.0 * _np.log10(_np.maximum(fast_levels, 1e-12))
+            slow_db = 20.0 * _np.log10(_np.maximum(_np.asarray(slow_levels), 1e-12))
+            fast_db = 20.0 * _np.log10(_np.maximum(_np.asarray(fast_levels), 1e-12))
             slow_gain_db = _np.clip(
                 self.target_db - slow_db, -self.max_cut_db, self.max_boost_db
             )

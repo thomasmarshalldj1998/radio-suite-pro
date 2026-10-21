@@ -17,7 +17,13 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from proc_accel import limiter_gain_loop
 from proc_dsp import clamp, copy_stereo, level_db
+
+try:  # optional vectorised detector / delay / output
+    import numpy as _np
+except ImportError:  # pragma: no cover - fallback hosts
+    _np = None
 
 __all__ = ["LookaheadLimiter"]
 
@@ -68,6 +74,10 @@ class LookaheadLimiter:
         l, r = copy_stereo(left, right)
         if not self.enabled:
             return l, r
+        if _np is not None and len(l) >= 64:
+            result = self._process_block(l, r)
+            if result is not None:
+                return result
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         peak = 0.0
@@ -110,6 +120,44 @@ class LookaheadLimiter:
         self.max_reduction_db = -20.0 * math.log10(max(lowest, 1e-9))
         self.peak_db = level_db(peak)
         return out_l, out_r
+
+    def _process_block(
+        self, l: Sequence[float], r: Sequence[float]
+    ) -> tuple[list[float], list[float]] | None:
+        """Detector, delay and output in NumPy; gain recurrence stays scalar."""
+        n = len(l)
+        xl = _np.asarray(l, dtype=_np.float64)
+        xr = _np.asarray(r, dtype=_np.float64)
+        detector = _np.maximum(_np.abs(xl), _np.abs(xr))
+        ceiling = self.ceiling
+        targets = _np.where(
+            detector <= ceiling, 1.0, ceiling / _np.maximum(detector, 1e-300)
+        ).tolist()
+        gains, gain, hold_left = limiter_gain_loop(
+            targets, self._gain, self._hold_left, self._hold, self._release
+        )
+        gain_array = _np.asarray(gains, dtype=_np.float64)
+        delay = self._delay
+        if delay:
+            pos = self._pos % delay
+            buf_l = _np.asarray(self._buf_l, dtype=_np.float64)
+            buf_r = _np.asarray(self._buf_r, dtype=_np.float64)
+            stream_l = _np.concatenate((buf_l[pos:], buf_l[:pos], xl))
+            stream_r = _np.concatenate((buf_r[pos:], buf_r[:pos], xr))
+            delayed_l, delayed_r = stream_l[:n], stream_r[:n]
+            self._buf_l = stream_l[n : n + delay].tolist()
+            self._buf_r = stream_r[n : n + delay].tolist()
+            self._pos = 0
+        else:
+            delayed_l, delayed_r = xl, xr
+        self._gain = gain
+        self._hold_left = hold_left
+        self.max_reduction_db = -20.0 * math.log10(max(float(gain_array.min()), 1e-9))
+        self.peak_db = level_db(float(detector.max()))
+        return (
+            _np.clip(delayed_l * gain_array, -ceiling, ceiling).tolist(),
+            _np.clip(delayed_r * gain_array, -ceiling, ceiling).tolist(),
+        )
 
     def state(self) -> dict[str, float | int | bool]:
         return {

@@ -18,13 +18,15 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from proc_accel import filter_block_array
+from proc_accel import filter_block_array, limiter_gain_loop
 from stream_encoder_core import Biquad, clamp
 
 try:  # optional acceleration; the stdlib path remains the reference
     import numpy as _np
+    from scipy.ndimage import maximum_filter1d as _maximum_filter1d
 except ImportError:  # pragma: no cover - exercised on hosts without numpy
     _np = None
+    _maximum_filter1d = None
 
 OVERSAMPLE = 16
 CEILINGS = (-0.1, -0.5, -1.0)
@@ -83,6 +85,13 @@ def _build_table(taps: int = _TAPS, phases: int = _PHASES) -> list[list[float]]:
 
 _COEFFS = _build_table()
 
+# One float64 view of each kernel, built once: the convolutions run per block.
+_COEFF_ARRAYS = (
+    [_np.asarray(row, dtype=_np.float64) for row in _COEFFS]
+    if _np is not None
+    else None
+)
+
 
 def true_peak(samples: Sequence[float], phases: int = _PHASES) -> float:
     """Maximum |x| over the reconstructed waveform, using the whole block."""
@@ -92,27 +101,29 @@ def true_peak(samples: Sequence[float], phases: int = _PHASES) -> float:
     return max(_peak_curve(xs, phases))
 
 
-def _peak_curve(samples: Sequence[float], phases: int = _PHASES) -> list[float]:
+def _peak_curve(samples: Sequence[float], phases: int = _PHASES):
     """Per-sample true-peak magnitude (same kernel as `true_peak`).
 
     The reference implementation is a sample × phase × tap loop. For blocks
     of meaningful size it is equivalent to 15 causal FIR convolutions, so the
     optional NumPy path runs those in C and keeps the Python path as the
     fallback on hosts without NumPy. Kernels and alignment are unchanged.
+    The NumPy path returns an ``ndarray`` so callers can fuse further maths
+    without list round-trips.
     """
-    xs = [float(x) for x in samples]
-    n = len(xs)
+    n = len(samples)
     if n == 0:
         return []
     if _np is not None and n >= 64:
-        values = _np.asarray(xs, dtype=_np.float64)
+        values = _np.asarray(samples, dtype=_np.float64)
         curve = _np.abs(values)
         for p in range(1, min(phases, _PHASES)):
             # np.convolve(x, c)[i] = Σ x[i-k]·c[k], exactly the causal
             # interpolation kernel used by the reference loop.
-            phase = _np.convolve(values, _np.asarray(_COEFFS[p], dtype=_np.float64), mode="full")[:n]
+            phase = _np.convolve(values, _COEFF_ARRAYS[p], mode="full")[:n]
             _np.maximum(curve, _np.abs(phase), out=curve)
-        return curve.tolist()
+        return curve
+    xs = [float(x) for x in samples]
     curve = [0.0] * n
     for i in range(n):
         peak = abs(xs[i])
@@ -158,15 +169,19 @@ class _PeakLimiter:
         self, left: Sequence[float], right: Sequence[float]
     ) -> tuple[list[float], list[float]]:
         n = min(len(left), len(right))
-        source_l = [float(x) for x in left[:n]]
-        source_r = [float(x) for x in right[:n]]
+        if type(left[0]) is float and type(right[0]) is float:
+            source_l = list(left[:n])
+            source_r = list(right[:n])
+        else:
+            source_l = [float(x) for x in left[:n]]
+            source_r = [float(x) for x in right[:n]]
         # Interpolate the signed channels, then take the louder one: rectifying
         # first would destroy the waveform the oversampler is reconstructing.
         curve_l = _peak_curve(source_l)
         curve_r = _peak_curve(source_r)
         radius = self.radius
         if _np is not None and n >= 64:
-            combined = _np.maximum(_np.asarray(curve_l), _np.asarray(curve_r))
+            combined = _np.maximum(curve_l, curve_r)
             # `_peak_curve` reconstructs around input[i - taps], so shift it
             # back onto the sample the peak actually belongs to before taking
             # gain from it; otherwise the reduction lands 12 samples early.
@@ -183,9 +198,9 @@ class _PeakLimiter:
                     _np.full(radius, aligned[-1], dtype=_np.float64),
                 )
             )
-            curve = _np.lib.stride_tricks.sliding_window_view(
-                padded, 2 * radius + 1
-            ).max(axis=1).tolist()
+            curve = _maximum_filter1d(
+                padded, size=2 * radius + 1, origin=0, mode="constant", cval=-_np.inf
+            )[radius : radius + n]
         else:
             combined = [max(a, b) for a, b in zip(curve_l, curve_r)]
             tail = combined[-1] if combined else 0.0
@@ -193,6 +208,26 @@ class _PeakLimiter:
             curve = [
                 max(aligned[max(0, i - radius) : i + radius + 1]) for i in range(n)
             ]
+
+        if _np is not None and n >= 64:
+            targets = _np.where(
+                curve <= self.ceiling,
+                1.0,
+                self.ceiling / _np.maximum(curve, 1e-300),
+            ).tolist()
+            gains, gain, hold_left = limiter_gain_loop(
+                targets, self.gain, self.hold_left, self.hold, self.release
+            )
+            gain_curve = _np.asarray(gains, dtype=_np.float64)
+            self.gain = gain
+            self.hold_left = hold_left
+            self.reduction_db = max(
+                0.0, -20.0 * math.log10(max(float(gain_curve.min()), 1e-9))
+            )
+            return (
+                (_np.asarray(source_l, dtype=_np.float64) * gain_curve).tolist(),
+                (_np.asarray(source_r, dtype=_np.float64) * gain_curve).tolist(),
+            )
 
         out_l: list[float] = [0.0] * n
         out_r: list[float] = [0.0] * n

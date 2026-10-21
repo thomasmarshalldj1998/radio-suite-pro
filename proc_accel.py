@@ -26,17 +26,13 @@ try:  # optional acceleration
 except ImportError:  # pragma: no cover - fallback hosts
     _lfilter = None
 
-try:  # optional acceleration for hold/release limiter gain curves
-    from scipy.ndimage import maximum_filter1d as _maximum_filter1d
-except ImportError:  # pragma: no cover - fallback hosts
-    _maximum_filter1d = None
-
 __all__ = [
     "filter_block",
     "filter_block_array",
     "filter_chain",
     "filter_chain_array",
     "instant_attack_gain_curve",
+    "limiter_gain_loop",
     "available",
 ]
 
@@ -105,7 +101,16 @@ def filter_block(biquad: Biquad, values: Sequence[float]) -> list[float]:
 
 
 def filter_chain(filters: Sequence[Biquad], values: Sequence[float]) -> list[float]:
-    """Apply a static biquad chain to a block."""
+    """Apply a static biquad chain to a block.
+
+    The array path keeps the signal in float64 across every stage, so an
+    eight-notch chain costs eight ``lfilter`` calls rather than sixteen
+    list↔array conversions.
+    """
+    if _np is not None and _lfilter is not None and len(values) >= 32:
+        out = filter_chain_array(filters, values)
+        if out is not None:
+            return out.tolist()
     out = list(map(float, values))
     for biquad in filters:
         out = filter_block(biquad, out)
@@ -151,68 +156,29 @@ def instant_attack_gain_curve(
     return gains.tolist()
 
 
-def limiter_gain_curve(
+def limiter_gain_loop(
     targets: Sequence[float],
     gain: float,
     hold_left: int,
     hold: int,
     release: float,
-) -> tuple[list[float], float, int] | None:
-    """Vectorised instant-attack / hold / exponential-release gain curve.
+) -> tuple[list[float], float, int]:
+    """Instant-attack / hold / exponential-release gain curve.
 
-    The scalar reference loop is
-
-        if target < gain: gain = target; hold_left = hold
-        elif hold_left > 0: hold_left -= 1
-        else: gain += (1 - gain) * release
-
-    With ``h = 1 - gain`` and ``d = 1 - release`` that recurrence is
-    ``h = max(attack, h × d)``, where an attack is held for ``hold`` samples.
-    The held attack is a trailing maximum of width ``hold + 1``, and the
-    decayed maximum is a cumulative maximum, so the whole block is closed
-    form. Returned values are the gain curve, the carried gain and the
-    remaining hold. Returns ``None`` when SciPy is unavailable so callers can
-    keep the reference loop.
+    The recurrence is stateful in both the gain *and* the hold counter, so it
+    stays scalar; everything around it (detection, delay, output scaling) is
+    vectorised by the limiter modules. ``targets`` may be any float sequence.
     """
     n = len(targets)
-    if _np is None or _maximum_filter1d is None or n < 64 or hold < 0:
-        return None
-    decay = 1.0 - float(release)
-    if not 0.0 < decay <= 1.0:
-        return None
-    target = _np.asarray(targets, dtype=_np.float64)
-    attack = 1.0 - target
-    _np.maximum(attack, 0.0, out=attack)
-    # Hold each attack for `hold` further samples: a trailing maximum.
-    held = _maximum_filter1d(
-        attack, size=hold + 1, origin=hold // 2, mode="constant", cval=0.0
-    )
-    initial = 1.0 - float(gain)
-    base = 0.0
-    if hold_left > 0:
-        end = min(n, int(hold_left))
-        _np.maximum(held[:end], initial, out=held[:end])
-    elif initial > 0.0:
-        # No hold left: the carried gain releases on the first sample.
-        base = initial
-    idx = _np.arange(n, dtype=_np.float64)
-    # h_i = d^i × max(base, max_{k<=i} held_k × d^-k); a carried gain with no
-    # hold left is an impulse at k = -1, so its term is initial × d.
-    values = held * _np.power(decay, -idx)
-    curve = _np.maximum.accumulate(values)
-    if base:
-        _np.maximum(curve, base * decay, out=curve)
-    curve *= _np.power(decay, idx)
-    gains = 1.0 - curve
-    _np.clip(gains, 0.0, 1.0, out=gains)
-    # An attack shows up as the curve landing exactly on its target.
-    attacked = _np.flatnonzero(
-        (attack > 0.0)
-        & (curve <= attack + 1e-15)
-    )
-    if attacked.size:
-        last = int(attacked[-1])
-        new_hold = max(0, last + hold - (n - 1))
-    else:
-        new_hold = max(0, int(hold_left) - n)
-    return gains.tolist(), float(gains[-1]) if n else float(gain), new_hold
+    out = [0.0] * n
+    for i in range(n):
+        target = targets[i]
+        if target < gain:
+            gain = target
+            hold_left = hold
+        elif hold_left > 0:
+            hold_left -= 1
+        else:
+            gain += (1.0 - gain) * release
+        out[i] = gain
+    return out, gain, hold_left

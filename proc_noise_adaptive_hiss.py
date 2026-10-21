@@ -74,6 +74,9 @@ class AdaptiveHissReducer:
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         env_state = self._env
+        env = env_state.value
+        attack_env = env_state.attack
+        release_env = env_state.release
         floor = self._floor
         fall = self._floor_fall
         rise = self._floor_rise
@@ -83,7 +86,11 @@ class AdaptiveHissReducer:
         for i, (xl, xr) in enumerate(zip(l, r)):
             hl = high_l[i]
             hr = high_r[i]
-            env = env_state.process(max(abs(hl), abs(hr)))
+            level = hl if hl >= 0.0 else -hl
+            other = hr if hr >= 0.0 else -hr
+            if other > level:
+                level = other
+            env += (level - env) * (attack_env if level > env else release_env)
             if floor <= 0.0:
                 floor = env
             elif env < floor:
@@ -95,6 +102,7 @@ class AdaptiveHissReducer:
             gain += (target - gain) * smooth
             out_l[i] = xl + hl * (gain - 1.0)
             out_r[i] = xr + hr * (gain - 1.0)
+        env_state.value = env
         self._floor = floor
         self._gain = gain
         self.floor_db = level_db(floor)

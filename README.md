@@ -279,6 +279,31 @@ primitives are in `proc_dsp.py`; ordering and seven themed presets are in
 python3 tests/test_full_chain.py        # 272 checks: modules, chain, protection, presets
 ```
 
+#### Throughput
+
+Blocks of **1024 or 2048** samples are selectable from the *Full DSP Chain*
+tab (`POST /api/dsp/config`). The hot paths moved into NumPy/SciPy where the
+maths allows it: static biquad chains and FIR kernels run as `lfilter` /
+`convolve` in C, peak-holds use a trailing `maximum_filter1d`, delay lines are
+one contiguous copy, and per-block coefficient/kernel arrays are built once.
+Detector and gain recursions (attack/release, hold counters) remain
+sample-accurate in Python because they are stateful, but they now carry local
+copies of every coefficient instead of per-sample attribute lookups. Bypassed
+stages still return the input untouched and allocate nothing.
+
+The worst case — all 43 stages enabled at 48 kHz — measures **≈1.2× realtime
+at 1024** and **≈1.3× realtime at 2048** on the development host (5-block
+average, so a single GC pause does not read as a dropped block); the live
+figure (and CPU %, latency, dropped blocks) comes from
+`GET /api/status/performance`, which the panel polls every second.
+
+Filter state is float64 on purpose. Narrowing it to float32 halves memory but
+changes the output, and bit-identical audio outranks the memory saving here;
+the reference scalar loops are still selectable (they run whenever NumPy is
+missing). The two paths agree bit-for-bit on the filter/limiter stages and to
+≈1e-14 on the one anchor stage that converts through `np.log10`, which is
+below float64 print precision for audio.
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with

@@ -84,13 +84,14 @@ class DeMudClarity:
                 env = self._env
                 value = env.value
                 attack, release = env.attack, env.release
-                levels = _np.empty(n, dtype=_np.float64)
-                for i in range(n):
-                    level = abs(float(mud[i]))
+                levels = [0.0] * n
+                for i, sample in enumerate(mud.tolist()):
+                    level = sample if sample >= 0.0 else -sample
                     coef = attack if level > value else release
                     value += (level - value) * coef
                     levels[i] = value
                 env.value = value
+                levels = _np.asarray(levels, dtype=_np.float64)
                 mud_base = self.mud_cut_db
                 if self.dynamic:
                     activity = _np.clip((20.0 * _np.log10(_np.maximum(levels, 1e-12)) + 48.0) / 24.0, 0.15, 1.0)

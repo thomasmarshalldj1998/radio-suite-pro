@@ -402,9 +402,7 @@ def _probe_all_modules(block_size: int) -> float:
         import inspect
         import math
 
-        stages = [module_id for module_id, _, _, _ in MODULE_DEFS if module_id not in {
-            "preduck", "density_anchors", "dualband_transient"
-        }]
+        stages = [module_id for module_id, _, _, _ in MODULE_DEFS]
         n = max(256, int(block_size))
         left = [0.2 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0) for i in range(n)]
         right = [0.18 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0 + 0.2) for i in range(n)]
@@ -417,16 +415,19 @@ def _probe_all_modules(block_size: int) -> float:
             ]
             if classes:
                 chain.append(classes[0](enabled=True))
-        # Warm the caches and lazily-built tables first, then time one fresh
-        # block: that is the per-block cost the live meter is asking about.
+        # Warm the caches and lazily-built tables first, then time several
+        # blocks: a dropped block is about sustained throughput, and one cold
+        # block would only measure page faults and first-call overhead.
         for processor in chain:
             left, right = processor.process_stereo(left, right)
         left = [0.2 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0) for i in range(n)]
         right = [0.18 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0 + 0.2) for i in range(n)]
+        blocks = 5
         started = time.perf_counter()
-        for processor in chain:
-            left, right = processor.process_stereo(left, right)
-        return max(1e-9, time.perf_counter() - started)
+        for _ in range(blocks):
+            for processor in chain:
+                left, right = processor.process_stereo(left, right)
+        return max(1e-9, (time.perf_counter() - started) / blocks)
     except Exception:
         return 1.0
 

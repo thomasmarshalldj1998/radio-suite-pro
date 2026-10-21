@@ -65,23 +65,45 @@ class LoudnessGateSilence:
         out_l = [0.0] * len(l)
         out_r = [0.0] * len(r)
         floor_gain = 10.0 ** (-self.range_db / 20.0)
+        # Linear-domain threshold: level_db(env) > threshold ⇔ env > 10^(thr/20).
+        threshold = 10.0 ** (self.threshold_db / 20.0)
+        hold = self._hold
+        attack_coef = self._attack
+        release_coef = self._release
+        gain = self._gain
+        hold_left = self._hold_left
+        silent = self.silent
+        silence_s = self.silence_s
+        env_state = self._env
+        attack_env = env_state.attack
+        release_env = env_state.release
+        env = env_state.value
+        inv_rate = 1.0 / self.sample_rate
         for i, (xl, xr) in enumerate(zip(l, r)):
-            env = self._env.process(max(abs(xl), abs(xr)))
-            level = level_db(env)
-            if level > self.threshold_db:
-                self.silent = False
-                self.silence_s = 0.0
-                self._hold_left = self._hold
-            elif self._hold_left > 0:
-                self._hold_left -= 1
+            peak = xl if xl >= 0.0 else -xl
+            other = xr if xr >= 0.0 else -xr
+            if other > peak:
+                peak = other
+            env += (peak - env) * (attack_env if peak > env else release_env)
+            if env > threshold:
+                silent = False
+                silence_s = 0.0
+                hold_left = hold
+            elif hold_left > 0:
+                hold_left -= 1
             else:
-                self.silent = True
-                self.silence_s += 1.0 / self.sample_rate
-            target = floor_gain if self.silent else 1.0
-            coef = self._attack if target > self._gain else self._release
-            self._gain += (target - self._gain) * coef
-            out_l[i] = xl * self._gain
-            out_r[i] = xr * self._gain
+                silent = True
+                silence_s += inv_rate
+            target = floor_gain if silent else 1.0
+            coef = attack_coef if target > gain else release_coef
+            gain += (target - gain) * coef
+            out_l[i] = xl * gain
+            out_r[i] = xr * gain
+        env_state.value = env
+        self._gain = gain
+        self._hold_left = hold_left
+        self.silent = silent
+        self.silence_s = silence_s
         self.gain_db = 20.0 * math.log10(max(self._gain, 1e-9))
         return out_l, out_r
 

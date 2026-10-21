@@ -94,30 +94,38 @@ class DownwardCompressor:
         # Below this envelope the sample is outside the knee, so the target is
         # exactly unity; skip both the log and the polar conversion.
         quiet_limit = 10.0 ** ((threshold - knee_half) / 20.0)
+        # Above it, the law is target = (threshold_lin / env) ** slope: one
+        # divide + pow instead of a log10 and a 10**. The soft-knee strip is
+        # the only place that still needs the level in dB.
+        threshold_lin = 10.0 ** (threshold / 20.0)
+        knee_hi_limit = quiet_limit * 10.0 ** (self.knee_db / 20.0)
+        power = math.pow
+        unit_makeup = makeup == 1.0
+        full_mix = mix >= 1.0
         for i, (xl, xr) in enumerate(zip(l, r)):
-            linked = abs(xl)
-            other = abs(xr)
+            linked = xl if xl >= 0.0 else -xl
+            other = xr if xr >= 0.0 else -xr
             if other > linked:
                 linked = other
             coef_env = attack_env if linked > env else release_env
             env += (linked - env) * coef_env
             if env <= quiet_limit:
                 target = 1.0
+            elif env >= knee_hi_limit:
+                target = power(threshold_lin / env, slope)
             else:
-                level = -120.0 if env <= 0.0 else 20.0 * log10(env)
+                level = 20.0 * log10(env)
                 over = level - threshold
-                if over >= knee_half:
-                    reduction = over * slope
-                else:
-                    x = over + knee_half
-                    reduction = slope * x * x / (2.0 * knee)
-                target = 10.0 ** (-max(0.0, reduction) / 20.0)
+                x = over + knee_half
+                reduction = slope * x * x / (2.0 * knee)
+                target = 10.0 ** (-reduction / 20.0)
             smooth = attack if target < gain else release
             gain += (target - gain) * smooth
-            wet_l = xl * gain * makeup
-            wet_r = xr * gain * makeup
-            out_l[i] = xl + (wet_l - xl) * mix
-            out_r[i] = xr + (wet_r - xr) * mix
+            wet_factor = gain if unit_makeup else gain * makeup
+            wet_l = xl * wet_factor
+            wet_r = xr * wet_factor
+            out_l[i] = wet_l if full_mix else xl + (wet_l - xl) * mix
+            out_r[i] = wet_r if full_mix else xr + (wet_r - xr) * mix
         env_state.value = env
         self._gain = gain
         self.input_db = -120.0 if env <= 0.0 else 20.0 * log10(env)
