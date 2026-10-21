@@ -158,6 +158,20 @@ console.log("\n1 · lookahead limiter");
     "hold keeps the gain down longer than a free release",
     `${heldRun.gr.toFixed(2)} vs ${afterRelease.gr.toFixed(2)} dB`,
   );
+
+  // A device swap flushes the kernel: the delay line, the window queue and
+  // the held gain must all be gone, or the new endpoint inherits the old
+  // one's lookahead and its release.
+  const swapped = new LookaheadLimiter(SR);
+  swapped.configure(-1, 40, 500, 5);
+  runLimiter(swapped, burst, burst);
+  check(swapped.queueDepth > 0, "a limited block fills the lookahead queue", `${swapped.queueDepth} entries`);
+  swapped.reset();
+  check(swapped.queueDepth === 0, "reset empties the lookahead queue");
+  check(swapped.gainReductionDb === 0, "reset returns the gain to unity");
+  const afterReset = runLimiter(swapped, quiet, quiet);
+  check(afterReset.gr === 0, "the first block after a reset is not limited by the old programme", `${afterReset.gr.toFixed(2)} dB`);
+  check(afterReset.l[0] === 0 && afterReset.l[1] === 0, "the delay line is zeroed, not carrying old samples");
 }
 
 /* ── 4 · worklet module ────────────────────────────────────────────────── */
@@ -205,6 +219,14 @@ console.log("\n1 · lookahead limiter");
   check(peak(outL) <= Math.pow(10, -1 / 20) + 1e-4, "the running worklet holds the ceiling", `${(20 * Math.log10(peak(outL))).toFixed(2)} dBFS`);
   const fallbackGr = posted.at(-1);
   check(typeof fallbackGr === "number" && fallbackGr > 0, "the worklet posts gain reduction as a bare number", `${Number(fallbackGr ?? 0).toFixed(2)} dB`);
+
+  // Device swap: the audio thread must flush its own line on a message, with
+  // no node rebuild (which would need an async addModule on a live graph).
+  node.port.onmessage?.({ data: { reset: true } });
+  const resetOutL = new Float32Array(128);
+  const resetOutR = new Float32Array(128);
+  node.process([[inL, inL]], [[resetOutL, resetOutR]]);
+  check(peak(resetOutL) === 0, "a reset message flushes the running worklet's delay line");
 
   // With a shared meter ring the callback writes the slot and posts nothing.
   const meter = createSpscRing(16);

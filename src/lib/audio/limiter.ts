@@ -131,6 +131,28 @@ export class LookaheadLimiter {
     );
   }
 
+  /**
+   * Flush every sample-held buffer and gain decision.
+   *
+   * A device swap stops the programme source and starts a new one; the
+   * lookahead line still holds samples (and the monotonic queue the gain
+   * targets) from the old endpoint, and the held release would apply that
+   * endpoint's level to the new one. Zeroing in place — no allocation, no new
+   * containers — keeps this callable from the audio thread.
+   */
+  reset(): void {
+    this.bufL.fill(0);
+    this.bufR.fill(0);
+    this.write = 0;
+    this.total = 0;
+    this.qHead = 0;
+    this.qTail = 0;
+    this.qCount = 0;
+    this.gain = 1;
+    this.holdLeft = 0;
+    this.reductionDb = 0;
+  }
+
   get latencySamples(): number {
     return this.lookahead;
   }
@@ -246,6 +268,10 @@ class SignalpathLimiterProcessor extends AudioWorkletProcessor {
       if (typeof d.ceilingDb === "number") {
         this.lim.configure(d.ceilingDb, d.releaseMs, d.holdMs, d.lookaheadMs);
       }
+      // Device swap / graph rebuild: drop the lookahead line and the gain
+      // decided by the previous endpoint. Runs on the audio thread, between
+      // render quanta, so no sample is ever read from a half-flushed buffer.
+      if (d.reset) this.lim.reset();
     };
   }
   process(inputs, outputs) {

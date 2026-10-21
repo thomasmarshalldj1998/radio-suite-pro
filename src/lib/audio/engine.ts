@@ -244,9 +244,19 @@ const CLIP_HOLD_MS = 600;
  */
 const SOURCE_FADE_MS = 20;
 
+/**
+ * Monitor-only fade around a sink switch. Long enough for the output stream
+ * to have restarted before programme is let back through, short enough to be
+ * inaudible as a gap.
+ */
+const MONITOR_FADE_MS = 30;
+
 const stopStream = (stream: MediaStream) => {
   for (const track of stream.getTracks()) track.stop();
 };
+
+const waitMs = (ms: number) =>
+  new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
 
 export class AudioEngine {
   ctx: AudioContext | null = null;
@@ -405,6 +415,18 @@ export class AudioEngine {
   /** Invalidates an in-flight microphone arm when the device changes. */
   private micToken = 0;
   private micArm: Promise<void> | null = null;
+  /**
+   * Device swaps run one at a time. A picker fires on every click and the
+   * swap fades, tears a stream down and awaits getUserMedia/setSinkId — two
+   * of those overlapping would tear down the endpoint the other just opened.
+   */
+  private swapArm: Promise<void> = Promise.resolve();
+  /** Invalidates a queued device swap when a newer one is requested. */
+  private deviceToken = 0;
+  /** The one boot in flight, shared by concurrent powerOn callers. */
+  private bootArm: Promise<void> | null = null;
+  /** Sink the context is actually rendering to ("" = OS default). */
+  private appliedSink = "";
   private frameCostMs = 0;
   private driftMs = 0;
   private clockRefWall = 0;
@@ -594,7 +616,25 @@ export class AudioEngine {
     }
   }
 
-  async powerOn(): Promise<void> {
+  /**
+   * Cold boot, at most once at a time.
+   *
+   * The body awaits the worklet module, so two callers (the transport button
+   * and an encoder go-live, say) used to race: the second closed the first
+   * context while it was still building its graph, leaving nodes attached to a
+   * closed context and the first boot's teardown firing into the live one.
+   * Callers now share the one boot in flight.
+   */
+  powerOn(): Promise<void> {
+    if (this.bootArm) return this.bootArm;
+    const run = this.doPowerOn().finally(() => {
+      if (this.bootArm === run) this.bootArm = null;
+    });
+    this.bootArm = run;
+    return run;
+  }
+
+  private async doPowerOn(): Promise<void> {
     this.resetLoudness();
     this.fadeToken += 1; // any pending power-off teardown is now stale
     const reuse = this.ctx && this.ctx.state !== "closed" && this.graphReady;
@@ -652,6 +692,8 @@ export class AudioEngine {
     const ctx = this.ctx;
     const token = ++this.fadeToken;
     this.sourceToken += 1; // a pending source switch must not fade back in
+    // A queued device swap must not wake the console back up after this.
+    this.deviceToken += 1;
     this.cancelMeterLoop();
     this.powered = false;
     this.loudnessWindow.clear();
@@ -690,6 +732,7 @@ export class AudioEngine {
 
   dispose() {
     this.graphReady = false;
+    this.deviceToken += 1;
     this.powerOff();
     this.backupSrc = null;
     this.backupEl = null;
@@ -2146,6 +2189,9 @@ export class AudioEngine {
   }
 
   private startSource(kind: SourceKind) {
+    // Leaving the microphone makes any queued input swap stale: its fade-in
+    // must not reopen a bus the operator has already switched away from.
+    if (kind !== "mic") this.deviceToken += 1;
     if (kind !== "mic") this.releaseMic();
     if (kind !== "signal") this.stopSignal();
     if (kind !== "file") this.pauseFile();
@@ -2364,11 +2410,20 @@ export class AudioEngine {
     }
   }
 
-  /** Device unplugged mid-show: drop the stream so the panel can say so. */
+  /**
+   * Device unplugged mid-show. The track is gone, so the source must go too —
+   * but leaving the console armed on a dead input is the one failure the
+   * meters cannot show, so the input is re-opened on whatever is left (the
+   * OS default, after the pick is reconciled).
+   */
   private onMicTrackEnded = () => {
     if (this.sourceKind !== "mic") return;
+    const wasLive = this.micStatus === "on";
     this.releaseMic();
     this.notify();
+    if (wasLive && this.ctx && this.powered) {
+      void this.queueDeviceSwap((gen) => this.swapInput(gen));
+    }
   };
 
   /** Tear the microphone down without touching the rest of the graph. */
@@ -2536,31 +2591,132 @@ export class AudioEngine {
   }
 
   private onDeviceChange = () => {
-    void this.refreshDevices();
+    void this.refreshDevices().then(() => {
+      if (!this.ctx) return;
+      // The chosen monitor sink went away. refreshDevices has already
+      // reconciled the pick, but the context is still rendering into the dead
+      // endpoint — re-apply or the console is live with no sound at all.
+      if (this.outputDeviceId !== this.appliedSink) {
+        void this.queueDeviceSwap(() => this.applyOutputDevice());
+      }
+    });
   };
+
+  /**
+   * Run one device lifecycle at a time, newest pick wins.
+   *
+   * A pick only sets a token; the task checks it after every await. A swap
+   * that was overtaken while it was waiting for getUserMedia therefore bails
+   * out instead of connecting a second source or reverting a sink the newer
+   * swap has already moved. The queue itself is a promise chain, so the
+   * teardown of one swap can never interleave with the setup of the next.
+   */
+  private queueDeviceSwap(task: (gen: number) => Promise<void>): Promise<void> {
+    const gen = ++this.deviceToken;
+    const run = this.swapArm.then(
+      () => (gen === this.deviceToken ? task(gen) : undefined),
+      () => (gen === this.deviceToken ? task(gen) : undefined),
+    );
+    this.swapArm = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Forget every decision the previous endpoint produced.
+   *
+   * The source nodes own their buffers and are stopped by releaseMic, but
+   * what survives a swap is the chain's *state*: the ramp cache (which would
+   * suppress the first write to every node), the AGC window and its frozen
+   * hold, the gate hold, the limiter's frozen release, and the worklet's
+   * lookahead line. Carried into a new device at a different level, those
+   * are heard as a slam, a stuck gate or a burst — so they are flushed here,
+   * once, before the new endpoint is patched in.
+   */
+  private resetSignalState(): void {
+    // Drop the cache *before* re-applying: with it cleared, every node is
+    // written with the current parameter set instead of being skipped as
+    // "already at that value" from the old device's take.
+    this.written.clear();
+    this.windowGate.reset();
+    this.agcFrozen = false;
+    this.agcSpreadDb = 0;
+    this.agcHoldGainDb = 0;
+    this.gateOpen = true;
+    this.gateCloseAt = 0;
+    this.limiterHoldUntil = 0;
+    this.workletGr = 0;
+    this.deessCutDb = 0;
+    this.deqCutDb = [0, 0, 0, 0, 0];
+    this.crestDrive = 0;
+    this.clipInUntil = 0;
+    this.clipOutUntil = 0;
+    this.resetLoudness();
+    this.corrHistory.fill(1);
+    this.corrWrite = 0;
+    // The lookahead line is the one buffer the UI cannot reach: flush it on
+    // the audio thread, between quanta, with the kernel's own reset.
+    this.workletLimiter?.port.postMessage({ reset: true });
+    if (this.params) this.apply(this.params);
+  }
+
+  /** Fade the programme bus back in once a source is connected again. */
+  private ensureBusOpen(): void {
+    if (this.powered && this.graphReady) this.fadeBus(1);
+  }
+
+  /**
+   * Hot-swap the microphone: fade, release, flush, open, fade back.
+   *
+   * The fade is what keeps a hard disconnect out of the programme, and the
+   * settle after it is what empties the filters: with the source gone the
+   * chain sees silence for a couple of fade lengths, so every biquad's
+   * history (and the compressor's envelope) has decayed before the new
+   * device — possibly at a very different level — is patched in.
+   */
+  private async swapInput(gen: number): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx || this.sourceKind !== "mic") return;
+    this.micStatus = "arming";
+    this.notify();
+
+    const live = this.powered && this.graphReady;
+    if (live) {
+      this.fadeBus(0);
+      await waitMs(SOURCE_FADE_MS);
+      if (gen !== this.deviceToken) return this.ensureBusOpen();
+    }
+
+    this.releaseMic();
+    this.resetSignalState();
+    if (live) {
+      // Silence-only settle: the old stream is stopped, so this is the point
+      // where delay lines and filter histories drain.
+      await waitMs(SOURCE_FADE_MS);
+      if (gen !== this.deviceToken) return this.ensureBusOpen();
+    }
+
+    await this.openMic();
+    this.ensureBusOpen();
+    this.notify();
+  }
 
   /** Switch inputs; re-arms live so the new device takes over immediately. */
   setInputDevice(id: string) {
+    if (id === this.inputDeviceId) return;
     this.inputDeviceId = id;
     this.saveDevicePrefs();
-    if (this.sourceKind !== "mic") {
-      this.notify();
-      return;
-    }
-    this.releaseMic();
-    if (!this.ctx) {
-      this.notify();
-      return;
-    }
-    void this.openMic();
+    this.notify();
+    if (this.sourceKind !== "mic" || !this.ctx) return;
+    void this.queueDeviceSwap((gen) => this.swapInput(gen));
   }
 
   /** Route the monitor bus to the chosen speakers/headphones. */
   setOutputDevice(id: string) {
+    if (id === this.outputDeviceId) return;
     this.outputDeviceId = id;
     this.saveDevicePrefs();
-    void this.applyOutputDevice();
     this.notify();
+    void this.queueDeviceSwap(() => this.applyOutputDevice());
   }
 
   /**
@@ -2574,8 +2730,19 @@ export class AudioEngine {
     }) | null;
     if (!ctx || typeof ctx.setSinkId !== "function") return;
     const wanted = this.outputDeviceId;
+    // A live setSinkId restarts the output stream. That restart is a click at
+    // best and, on a device with a different hardware buffer, a burst of
+    // uninitialised frames — so the monitor bus is faded out first. The
+    // encoder send taps duckGain upstream, so muting the monitor cannot take
+    // the programme off air.
+    const live = this.powered && this.graphReady;
+    if (live) {
+      this.setNum("monitor", this.monitorGain?.gain, 0, 0.006);
+      await waitMs(MONITOR_FADE_MS);
+    }
     try {
       await ctx.setSinkId(wanted);
+      this.appliedSink = wanted;
     } catch {
       // The device vanished between enumeration and the switch. Drop back to
       // the OS default and say so, rather than leaving the panel claiming a
@@ -2589,10 +2756,15 @@ export class AudioEngine {
       this.saveDevicePrefs();
       try {
         await ctx.setSinkId("");
+        this.appliedSink = "";
       } catch {
         /* context cannot re-open the default sink — nothing left to try */
       }
       this.notify();
+    } finally {
+      // Restore through the ramp cache, so the next parameter apply knows the
+      // monitor is back at its programmed level.
+      this.applyMonitorGain();
     }
   }
 
