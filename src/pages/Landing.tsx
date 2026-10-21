@@ -287,6 +287,32 @@ export default function Landing() {
                 <Link to="/auth?returnTo=/dashboard">Sign in to your station</Link>
               </Button>
             </div>
+            {/* The installers belong on the first screen: a visitor who came
+                for the desktop app should not have to scroll to find it. These
+                are the same version-free URLs the #download section uses, so
+                they never drift from the release. */}
+            <div className="mt-6 flex flex-wrap items-center gap-2">
+              <span className="mr-1 text-[10px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
+                Get the app
+              </span>
+              {DOWNLOADS.map((d) => (
+                <a
+                  key={d.os}
+                  href={d.href}
+                  className="group inline-flex items-center gap-2 rounded-lg border border-border/70 bg-card/80 px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:border-signal/50 hover:text-signal"
+                >
+                  <d.icon className="size-3.5 text-signal" />
+                  {d.os}
+                  <Download className="size-3 text-muted-foreground transition-colors group-hover:text-signal" />
+                </a>
+              ))}
+              <a
+                href="#download"
+                className="text-xs text-muted-foreground underline decoration-border underline-offset-4 transition-colors hover:text-foreground"
+              >
+                all installers · v{APP_VERSION}
+              </a>
+            </div>
             <dl className="mt-10 grid max-w-lg grid-cols-3 gap-4 border-t border-border/60 pt-6">
               {[
                 { k: "Audio path", v: "48 kHz" },
