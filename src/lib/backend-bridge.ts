@@ -65,14 +65,28 @@ export interface DspModule {
   params: Record<string, DspParam>;
 }
 
+export interface PerfStage {
+  id: string;
+  name: string;
+  category: string;
+  /** Mean milliseconds this stage took for one block. */
+  ms: number;
+  /** Share of the measured block time, 0–100. */
+  pct: number;
+}
+
 export interface PerfMetrics {
   realtime_factor: number;
   cpu_dsp_pct: number;
   block_size: number;
   latency_ms: number;
+  /** Mean wall-clock time for one block through all 43 stages. */
+  block_time_ms?: number;
   dropped_blocks: number;
   state: "live" | "lagging" | "offline";
   modules: number;
+  /** Per-stage breakdown, sorted slowest first. Absent on older bridges. */
+  stages?: PerfStage[];
   measured_at: number;
 }
 
@@ -251,9 +265,13 @@ export class SignalPathBackend {
     }
   }
 
-  async getPerfStatus(): Promise<PerfMetrics | null> {
+  async getPerfStatus(force = false): Promise<PerfMetrics | null> {
     try {
-      return await this.request<PerfMetrics>("/status/performance", undefined, 5000);
+      return await this.request<PerfMetrics>(
+        force ? "/status/performance?force=1" : "/status/performance",
+        undefined,
+        5000,
+      );
     } catch {
       return null;
     }

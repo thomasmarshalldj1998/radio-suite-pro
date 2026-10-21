@@ -428,9 +428,11 @@ def dsp_config(req: BlockSizeRequest, authorization: str | None = Header(default
 
 
 @app.get("/api/status/performance")
-def dsp_performance(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def dsp_performance(
+    force: bool = False, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     _require_token(authorization)
-    return dsp_state.performance()
+    return dsp_state.performance(force=force)
 
 
 @app.get("/api/status/codecs")

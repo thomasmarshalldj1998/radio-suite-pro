@@ -99,6 +99,44 @@ def main() -> int:
         check("perf: 43 modules", payload["modules"] == 43)
         check("perf: factor non-negative", payload["realtime_factor"] >= 0)
         check("perf: state valid", payload["state"] in ("live", "lagging", "offline"))
+
+        stages = payload.get("stages") or []
+        check("perf: stage breakdown present", len(stages) > 0)
+        check("perf: one row per measured stage", len(stages) >= 40, str(len(stages)))
+        check(
+            "perf: stage rows carry id/name/category/ms/pct",
+            all(
+                isinstance(row.get("id"), str)
+                and isinstance(row.get("name"), str)
+                and isinstance(row.get("category"), str)
+                and isinstance(row.get("ms"), (int, float))
+                and isinstance(row.get("pct"), (int, float))
+                for row in stages
+            ),
+        )
+        check(
+            "perf: stage ids are unique module ids",
+            len({row["id"] for row in stages}) == len(stages),
+        )
+        check(
+            "perf: stages sorted slowest first",
+            all(stages[i]["ms"] >= stages[i + 1]["ms"] for i in range(len(stages) - 1)),
+        )
+        check("perf: stage times non-negative", all(row["ms"] >= 0 for row in stages))
+        total_pct = sum(row["pct"] for row in stages)
+        check("perf: stage shares sum to ~100%", 90.0 <= total_pct <= 110.0, f"{total_pct:.1f}")
+        check(
+            "perf: stage times fit the block time",
+            sum(row["ms"] for row in stages) <= payload["block_time_ms"] * 1.1 + 1.0,
+        )
+        check("perf: block time present", payload.get("block_time_ms", 0) > 0)
+
+        forced = client.get("/api/status/performance", params={"force": 1})
+        check("perf: force probe 200", forced.status_code == 200, forced.text)
+        check(
+            "perf: force probe keeps stage rows",
+            len(forced.json().get("stages") or []) == len(stages),
+        )
     except Exception:
         FAILED += 1
         traceback.print_exc()

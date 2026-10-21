@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ModuleCard } from "@/components/console/ModuleCard";
+import { StageCostPanel } from "@/components/console/StageCostPanel";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -224,6 +225,7 @@ export function FullChainTab() {
   const [presets, setPresets] = useState<string[]>([...PUBLIC_PRESETS]);
   const [online, setOnline] = useState<boolean | null>(null);
   const [perf, setPerf] = useState<PerfMetrics | null>(null);
+  const [probing, setProbing] = useState(false);
   const [preset, setPreset] = useState("Reference-Flat");
   const [morph, setMorph] = useState(2);
   const [blockSize, setBlockSize] = useState<1024 | 2048>(1024);
@@ -443,6 +445,18 @@ export function FullChainTab() {
     }
   };
 
+  const forceProbe = async () => {
+    if (probing) return;
+    setProbing(true);
+    try {
+      const next = await backend.getPerfStatus(true);
+      if (next) setPerf(next);
+      else toast.error("Performance probe failed");
+    } finally {
+      setProbing(false);
+    }
+  };
+
   const changeBlockSize = async (size: 1024 | 2048) => {
     setBlockSize(size);
     if (online) {
@@ -536,14 +550,20 @@ export function FullChainTab() {
             size="sm"
             variant="ghost"
             className="h-7 cursor-pointer px-2 text-[10px]"
-            onClick={() => void refresh()}
-            aria-label="Refresh DSP chain"
+            onClick={() => {
+              void refresh();
+              void forceProbe();
+            }}
+            disabled={probing}
+            aria-label="Refresh DSP chain and re-measure every stage"
           >
-            <RefreshCw className="size-3.5" />
+            <RefreshCw className={cn("size-3.5", probing && "animate-spin")} />
             Probe
           </Button>
         </div>
       </section>
+
+      <StageCostPanel perf={perf} probing={probing} onProbe={() => void forceProbe()} />
 
       {online === false && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-meter-warn/35 bg-meter-warn/[0.06] px-4 py-3 text-[10px] text-muted-foreground">

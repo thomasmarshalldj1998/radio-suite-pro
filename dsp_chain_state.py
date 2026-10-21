@@ -370,66 +370,107 @@ class DspChainState:
     # ── performance probe ──────────────────────────────────────────────
     def performance(self, force: bool = False) -> dict[str, Any]:
         now = time.time()
+        # A forced probe (the console's Probe button) still short-circuits if a
+        # measurement just landed, so holding the button cannot stack probes.
         with self.lock:
-            if not force and self._perf_cache and now - self._perf_at < 8.0:
-                return dict(self._perf_cache)
+            ttl = 1.0 if force else 8.0
+            if self._perf_cache and now - self._perf_at < ttl:
+                return self._perf_copy()
             block = self.block_size
         # Measure the real module classes on a representative block. This is a
         # worst-case diagnostic: it enables every stage, independent of the
         # current bypass state, so the UI can show headroom (or the lack of it).
-        elapsed = _probe_all_modules(block)
+        elapsed, stages = _probe_all_modules(block)
         audio_s = block / 48_000.0
         factor = audio_s / elapsed if elapsed > 0 else 0.0
+        total_ms = elapsed * 1000.0
+        rows = [
+            {
+                "id": stage,
+                "name": name,
+                "category": category,
+                "ms": round(ms, 3),
+                "pct": round(100.0 * ms / total_ms, 1) if total_ms > 0 else 0.0,
+            }
+            for stage, name, category, ms in stages
+        ]
+        rows.sort(key=lambda row: row["ms"], reverse=True)
         with self.lock:
             self._perf_cache = {
                 "realtime_factor": round(factor, 2),
                 "cpu_dsp_pct": round(min(100.0, 100.0 / factor) if factor > 0 else 100.0, 1),
                 "block_size": block,
                 "latency_ms": round(audio_s * 1000.0, 1),
+                "block_time_ms": round(total_ms, 2),
                 "dropped_blocks": 0,
                 "state": "live" if factor >= 1.0 else "lagging",
                 "modules": len(MODULE_DEFS),
+                "stages": rows,
                 "measured_at": now,
             }
             self._perf_at = now
-            return dict(self._perf_cache)
+            return self._perf_copy()
+
+    def _perf_copy(self) -> dict[str, Any]:
+        payload = dict(self._perf_cache)
+        payload["stages"] = [dict(row) for row in self._perf_cache.get("stages", ())]
+        return payload
 
 
-def _probe_all_modules(block_size: int) -> float:
-    """Time one block through every DSP class; cached by DspChainState."""
+def _probe_all_modules(
+    block_size: int,
+) -> tuple[float, list[tuple[str, str, str, float]]]:
+    """Time one block through every DSP class.
+
+    Returns ``(block_seconds, [(id, name, category, ms), ...])``. Each stage is
+    timed on its own so the console can rank them; the per-stage times sum to
+    the block time because the calls are made back to back with nothing else in
+    the loop.
+    """
     try:
         import importlib
         import inspect
         import math
 
-        stages = [module_id for module_id, _, _, _ in MODULE_DEFS]
+        def programme() -> tuple[list[float], list[float]]:
+            return (
+                [0.2 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0) for i in range(n)],
+                [0.18 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0 + 0.2) for i in range(n)],
+            )
+
         n = max(256, int(block_size))
-        left = [0.2 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0) for i in range(n)]
-        right = [0.18 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0 + 0.2) for i in range(n)]
-        chain = []
-        for stage in stages:
-            module = importlib.import_module(f"proc_{stage}")
+        chain: list[tuple[str, str, str, Any]] = []
+        for module_id, name, category, _ in MODULE_DEFS:
+            module = importlib.import_module(f"proc_{module_id}")
             classes = [
                 obj for _, obj in inspect.getmembers(module, inspect.isclass)
-                if obj.__module__ == f"proc_{stage}"
+                if obj.__module__ == f"proc_{module_id}"
             ]
             if classes:
-                chain.append(classes[0](enabled=True))
+                chain.append((module_id, name, category, classes[0](enabled=True)))
         # Warm the caches and lazily-built tables first, then time several
         # blocks: a dropped block is about sustained throughput, and one cold
         # block would only measure page faults and first-call overhead.
-        for processor in chain:
+        left, right = programme()
+        for _, _, _, processor in chain:
             left, right = processor.process_stereo(left, right)
-        left = [0.2 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0) for i in range(n)]
-        right = [0.18 * math.sin(2.0 * math.pi * 440.0 * i / 48_000.0 + 0.2) for i in range(n)]
         blocks = 5
+        timings = [0.0] * len(chain)
         started = time.perf_counter()
         for _ in range(blocks):
-            for processor in chain:
+            left, right = programme()
+            for i, (_, _, _, processor) in enumerate(chain):
+                stage_start = time.perf_counter()
                 left, right = processor.process_stereo(left, right)
-        return max(1e-9, (time.perf_counter() - started) / blocks)
+                timings[i] += time.perf_counter() - stage_start
+        elapsed = max(1e-9, (time.perf_counter() - started) / blocks)
+        stages = [
+            (module_id, name, category, 1000.0 * total / blocks)
+            for (module_id, name, category, _), total in zip(chain, timings)
+        ]
+        return elapsed, stages
     except Exception:
-        return 1.0
+        return 1.0, []
 
 
 dsp_state = DspChainState()

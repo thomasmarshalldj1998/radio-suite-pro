@@ -297,6 +297,16 @@ average, so a single GC pause does not read as a dropped block); the live
 figure (and CPU %, latency, dropped blocks) comes from
 `GET /api/status/performance`, which the panel polls every second.
 
+The payload also carries a **per-stage breakdown** (`stages[]`: id, name,
+category, mean ms and share of the block) because a single realtime factor
+does not say *which* module is eating the block. The probe times each stage
+individually on the same five-block average and sorts the rows slowest first;
+`?force=1` re-measures immediately for the panel's *Re-measure* button (cached
+for 8 s otherwise, 1 s when forced so held clicks cannot stack probes). The
+*Full DSP Chain* tab renders it as a bar table scaled to the slowest stage,
+red at ≥10 % of the block and amber at ≥5 %; the header compares the measured
+block time against the block's own audio duration (21.3 ms at 1024 samples).
+
 Filter state is float64 on purpose. Narrowing it to float32 halves memory but
 changes the output, and bit-identical audio outranks the memory saving here;
 the reference scalar loops are still selectable (they run whenever NumPy is

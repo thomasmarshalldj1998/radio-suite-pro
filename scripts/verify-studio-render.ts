@@ -19,6 +19,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import Studio from "../src/pages/Studio";
+import { StageCostPanel } from "../src/components/console/StageCostPanel";
+import type { PerfMetrics } from "../src/lib/backend-bridge";
 
 let passed = 0;
 let failed = 0;
@@ -115,6 +117,57 @@ console.log("\n8 · markup hygiene");
 check(!html.includes("NaN"), "no NaN leaked into the markup");
 check(!html.includes("undefined"), "no undefined leaked into the markup");
 check(!html.includes("[object Object]"), "no object stringification leaked");
+
+console.log("\n9 · stage cost panel");
+const stageFixture: PerfMetrics = {
+  realtime_factor: 1.19,
+  cpu_dsp_pct: 83.9,
+  block_size: 1024,
+  latency_ms: 21.3,
+  block_time_ms: 17.9,
+  dropped_blocks: 0,
+  state: "live",
+  modules: 12,
+  measured_at: 1_792_583_410,
+  stages: Array.from({ length: 12 }, (_, i) => ({
+    id: `stage_${i + 1}`,
+    name: `Stage ${String(i + 1).padStart(2, "0")}`,
+    category: i % 2 ? "Dynamics" : "EQ & Tone",
+    ms: Number((2.4 - i * 0.15).toFixed(2)),
+    pct: i === 0 ? 0.4 : Number((13 - i).toFixed(1)),
+  })),
+};
+const panel = renderToStaticMarkup(
+  createElement(StageCostPanel, {
+    perf: stageFixture,
+    probing: false,
+    onProbe: () => {},
+  }),
+);
+const empty = renderToStaticMarkup(
+  createElement(StageCostPanel, { perf: null, probing: false, onProbe: () => {} }),
+);
+check(empty === "", "the panel stays hidden until a measurement arrives");
+check(panel.includes("Stage cost"), "the stage cost panel renders");
+check(
+  panel.includes("17.9 ms / 21.3 ms budget"),
+  "measured block time is shown against the block budget",
+);
+check(panel.includes("12 stages · all forced on"), "the stage count is called out");
+check(panel.includes("border-meter-ok"), "a block that fits the budget reads ok");
+check(panel.includes("Stage 01") && panel.includes("2.40 ms"), "the slowest stage leads with its time");
+check(panel.includes("Stage 08") && !panel.includes("Stage 09"), "only the eight costliest stages render by default");
+check(panel.includes("All 12"), "the full breakdown is one click away");
+check(panel.includes("&lt;1%"), "sub-1% shares are labelled rather than rounded to 0");
+check(!panel.includes("NaN") && !panel.includes("undefined"), "no NaN or undefined in the panel markup");
+const overBudget = renderToStaticMarkup(
+  createElement(StageCostPanel, {
+    perf: { ...stageFixture, block_time_ms: 30.2, realtime_factor: 0.71, state: "lagging" },
+    probing: false,
+    onProbe: () => {},
+  }),
+);
+check(overBudget.includes("border-meter-warn"), "an over-budget block time is flagged");
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);
 process.exit(failed === 0 ? 0 : 1);
