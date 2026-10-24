@@ -311,6 +311,7 @@ interface EngineInternals {
   clipShaper: FakeNode;
   clipWet: FakeNode;
   clipDry: FakeNode;
+  clipDryShape: FakeNode;
   agcFastComp: FakeNode;
   agcComp: FakeNode;
   agcMakeup: FakeNode;
@@ -543,15 +544,24 @@ check(
 // the soft clipper is inserted at that same point: drive → (dry ∥ clipped) →
 // summed peak stage, so both limiter paths see shaved transients instead of
 // driving themselves into a harder knee.
+// The dry leg deliberately runs through a unity-curve shaper with the same
+// oversampling as the clipped leg: the two then share the resampler's delay,
+// so the blend does not comb.
 check(
   edge(internals.limDrive, internals.clipShaper) &&
     edge(internals.clipShaper, internals.clipWet) &&
-    edge(internals.limDrive, internals.clipDry) &&
+    edge(internals.limDrive, internals.clipDryShape) &&
+    edge(internals.clipDryShape, internals.clipDry) &&
     edge(internals.clipWet, internals.limSum) &&
     edge(internals.clipDry, internals.limSum) &&
     edge(internals.limSum, internals.limComp) &&
     edge(internals.limComp, internals.limNative),
-  "the soft clipper sums into the peak stage",
+  "the soft clipper sums into the peak stage, with a matched dry leg",
+);
+check(
+  internals.clipDryShape.oversample === internals.clipShaper.oversample,
+  "both clipper legs pay the same oversampler delay",
+  `${internals.clipDryShape.oversample} / ${internals.clipShaper.oversample}`,
 );
 // the dual-window AGC is a chain: fast peak → slow leveller → makeup
 {

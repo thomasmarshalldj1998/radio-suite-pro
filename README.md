@@ -120,7 +120,16 @@ bun scripts/verify-audio-sources.ts   # source routing, arming, power cycling, 2
 bun scripts/verify-audio-measure.ts   # peaks/true peak/LUFS/LRA + device listing and saved picks
 bun scripts/verify-audio-devices.ts   # device selection, hot-swap, sink fallback
 bun scripts/verify-processing-extras.ts  # loudness standards/CSV, limiter envelopes, width, M/S, monitor checks
+bun scripts/verify-quality.ts        # Nyquist-safe filters, transparent ceiling, matched parallel legs
 ```
+
+Three transparency rules hold across the chain (`src/lib/audio/quality.ts`):
+filter corners fold off Nyquist on a 44.1 kHz context instead of sitting on
+it (the 22 kHz defaults are untouched at 48 kHz); the safety ceiling is linear
+until the last couple of dB and only then bends, so it adds no distortion to
+normal programme; and the dry leg of every parallel waveshaper runs through a
+unity curve with the *same* oversampling as the wet leg, so the blend does not
+comb.
 
 - **Dual-window AGC** — `agc.fast`. The leveller's slow window
   (`thresholdDb`, `ratio`, `attackMs`, `releaseMs`) rides long-term level,
@@ -150,7 +159,18 @@ bun scripts/verify-processing-extras.ts  # loudness standards/CSV, limiter envel
   clamped to 5–10 kHz (default 7.5 kHz); a fast detector (1 ms attack, 60 ms
   release) subtracts up to `maxCutDb` of the band, so sibilance is tamed
   before the final stage sees it rather than after it has already squashed
-  the programme.
+  the programme. `deess.auto` tracks the sibilance band's own ~2 s average and
+  puts the threshold 6 dB above it, so the same settings hold on a quiet
+  podcast and a hot master.
+- **Automatic multiband makeup** — `multiband.autoMakeup` adds 60 % of each
+  band's measured gain reduction to the preset makeup, so a band working
+  harder than its neighbours does not lose body and tilt the tonal balance.
+  It is smoothed over ~0.4 s and capped at +12 dB, and the preset's makeup
+  remains the floor.
+- **Harmonic hum notches** — `restoration.interference.harmonics` engages
+  mains-locked notches at 2f–8f alongside the fundamental (50/60 Hz), which is
+  what a real earth loop puts into a feed. They stay in the graph as allpass
+  sections while off, so toggling never rewires the chain.
 - **Dual-stage limiter** — `limiter.program`. The fast peak stage catches
   transients; a slow program stage with its own ceiling and release rides the
   short-term level. `limiter.adaptive` scales both releases from the live

@@ -82,6 +82,8 @@ import {
 } from "./advanced";
 import {
   WindowGate,
+  autoDeessThresholdDb,
+  autoMakeupDb,
   clampDeessFreq,
   coherenceSafety,
   deessAlpha,
@@ -90,6 +92,7 @@ import {
   phaseStageFrequencies,
   safeWidth,
 } from "./tools";
+import { identityCurve, safeFilterHz, softCeilingCurve } from "./quality";
 import {
   complianceState,
   complianceTarget,
@@ -388,6 +391,13 @@ export class AudioEngine {
   private clipShaper!: WaveShaperNode;
   private clipDry!: GainNode;
   private clipWet!: GainNode;
+  /**
+   * Dry leg of the clipper blend. It runs through a unity transfer curve with
+   * the *same* oversampling as the clipping leg, so the two arrive together:
+   * an oversampled shaper is delayed by its resampler, and blending it with a
+   * directly-tapped dry signal notches the top octaves.
+   */
+  private clipDryShape!: WaveShaperNode;
   private clipThresholdDb = Number.NaN;
   private guardCeilingDb = Number.NaN;
   // loudness rider (Compellor-style leveler / AERO long-term controller)
@@ -493,6 +503,12 @@ export class AudioEngine {
   /** Program bus leaving the de-esser, on its way to the limiter. */
   private deessOut!: GainNode;
   private deessCutDb = 0;
+  /** Sibilance-band level used by the automatic threshold. */
+  private deessBandAnalyser: AnalyserNode | null = null;
+  private deessBandBuf: Float32Array<ArrayBuffer> = new Float32Array(1024);
+  private deessBandDb = -120;
+  /** Per-band automatic makeup (dB) added to the preset's makeup. */
+  private autoMakeupTrack = [0, 0, 0, 0, 0, 0];
   private limDrive!: GainNode;
   private limWetPre!: GainNode;
   private limComp!: DynamicsCompressorNode;
@@ -512,8 +528,18 @@ export class AudioEngine {
   private restHarmShaper!: WaveShaperNode;
   private restHarmWet!: GainNode;
   private restHarmDry!: GainNode;
+  /** Latency-matched dry leg of the harmonic generator (see clipDryShape). */
+  private restHarmDryShape!: WaveShaperNode;
+  /** Exciter shaper — kept as a field so its oversampling is verifiable. */
+  private exShaper!: WaveShaperNode;
   private dcHpf!: BiquadFilterNode;
   private mainsNotch!: BiquadFilterNode;
+  /**
+   * Mains harmonics 2×…8× — real hum is rarely a pure sine. They stay in the
+   * graph as allpass sections when the harmonic bank is off, so engaging it
+   * never rewires the chain.
+   */
+  private mainsHarmonics: BiquadFilterNode[] = [];
   private airShelf!: BiquadFilterNode;
   private presenceHi!: BiquadFilterNode;
   private brillianceHi!: BiquadFilterNode;
@@ -868,6 +894,7 @@ export class AudioEngine {
    */
   private clearGraphRefs() {
     this.hpfStages = [];
+    this.mainsHarmonics = [];
     this.phaseStages = [];
     this.eqFilters = [];
     this.mbComps = [];
@@ -895,6 +922,15 @@ export class AudioEngine {
     if (prev !== undefined && Math.abs(prev - value) < 1e-7) return;
     this.written.set(key, value);
     param.setTargetAtTime(value, this.ctx.currentTime, tc);
+  }
+
+  /**
+   * Filter corner, clamped to what this context can represent. A 22 kHz
+   * low-pass is legal at 48 kHz and degenerate at 44.1 kHz; the console's
+   * setting stays the same either way, only the coefficient is folded down.
+   */
+  private setHz(key: string, param: AudioParam | undefined, hz: number, tc = 0.02) {
+    this.setNum(key, param, safeFilterHz(hz, this.ctx?.sampleRate ?? 48000), tc);
   }
 
   private buildGraph(ctx: AudioContext) {
@@ -962,7 +998,7 @@ export class AudioEngine {
     this.restNotch2.Q.value = 5;
     this.restLp = ctx.createBiquadFilter();
     this.restLp.type = "lowpass";
-    this.restLp.frequency.value = 22000;
+    this.restLp.frequency.value = safeFilterHz(22000, ctx.sampleRate);
     this.restLp.Q.value = 0.707;
     this.restShelf = ctx.createBiquadFilter();
     this.restShelf.type = "highshelf";
@@ -976,10 +1012,20 @@ export class AudioEngine {
     this.mainsNotch.type = "allpass";
     this.mainsNotch.frequency.value = 50;
     this.mainsNotch.Q.value = 20;
+    for (let h = 2; h <= 8; h++) {
+      const notch = ctx.createBiquadFilter();
+      notch.type = "allpass";
+      notch.frequency.value = 50 * h;
+      notch.Q.value = 20;
+      this.mainsHarmonics.push(notch);
+    }
     this.restHarmShaper = ctx.createWaveShaper();
     this.restHarmShaper.oversample = "4x";
     this.restHarmDry = g(1);
     this.restHarmWet = g(0);
+    this.restHarmDryShape = ctx.createWaveShaper();
+    this.restHarmDryShape.oversample = "4x";
+    this.restHarmDryShape.curve = identityCurve();
     this.sourceBus.connect(this.gateGain);
     // Failover crossfade point. The primary path (post-gate) and the standby
     // source meet at inputGain: the backup therefore bypasses the silence gate
@@ -1003,9 +1049,15 @@ export class AudioEngine {
     this.restNotch2.connect(this.restLp);
     this.restLp.connect(this.dcHpf);
     this.dcHpf.connect(this.mainsNotch);
-    this.mainsNotch.connect(this.restShelf);
+    let humNode: AudioNode = this.mainsNotch;
+    for (const notch of this.mainsHarmonics) {
+      humNode.connect(notch);
+      humNode = notch;
+    }
+    humNode.connect(this.restShelf);
     const restOut = g(1);
-    this.restShelf.connect(this.restHarmDry);
+    this.restShelf.connect(this.restHarmDryShape);
+    this.restHarmDryShape.connect(this.restHarmDry);
     this.restHarmDry.connect(restOut);
     this.restShelf.connect(this.restHarmShaper);
     this.restHarmShaper.connect(this.restHarmWet);
@@ -1153,14 +1205,18 @@ export class AudioEngine {
     this.exBp1.frequency.value = 3200;
     this.exBp1.Q.value = 0.9;
     const exDrive = g(4);
-    const exShaper = ctx.createWaveShaper();
+    // No oversampling here used to alias the tanh products back into the
+    // presence band as inharmonic grit. The shaper is the same one; only the
+    // rate it runs at changes.
+    this.exShaper = ctx.createWaveShaper();
+    this.exShaper.oversample = "4x";
     const exCurve = new Float32Array(4097);
     const exK = 2.5;
     for (let i = 0; i < exCurve.length; i++) {
       const x = -1 + (2 * i) / (exCurve.length - 1);
       exCurve[i] = Math.tanh(exK * x) / Math.tanh(exK);
     }
-    exShaper.curve = exCurve;
+    this.exShaper.curve = exCurve;
     this.exBp2 = ctx.createBiquadFilter();
     this.exBp2.type = "bandpass";
     this.exBp2.frequency.value = 5400;
@@ -1168,8 +1224,8 @@ export class AudioEngine {
     this.exMix = g(0);
     eqOut.connect(this.exBp1);
     this.exBp1.connect(exDrive);
-    exDrive.connect(exShaper);
-    exShaper.connect(this.exBp2);
+    exDrive.connect(this.exShaper);
+    this.exShaper.connect(this.exBp2);
     this.exBp2.connect(this.exMix);
     this.exMix.connect(deqSum); // harmonics join the program here
 
@@ -1330,6 +1386,12 @@ export class AudioEngine {
     this.deessDet.release.value = 0.06;
     deessIn.connect(this.deessBpDet);
     this.deessBpDet.connect(this.deessDet);
+    // Band level for the automatic threshold. Tapped before the detector so
+    // the reference is the source's sibilance, not its own gain reduction.
+    this.deessBandAnalyser = ctx.createAnalyser();
+    this.deessBandAnalyser.fftSize = 1024;
+    this.deessBpDet.connect(this.deessBandAnalyser);
+    this.deessBandBuf = new Float32Array(1024);
     const deessSink = g(0);
     this.deessDet.connect(deessSink);
     deessSink.connect(ctx.destination);
@@ -1353,8 +1415,12 @@ export class AudioEngine {
     this.clipWet = g(0);
     this.clipShaper = ctx.createWaveShaper();
     this.clipShaper.oversample = "4x";
+    this.clipDryShape = ctx.createWaveShaper();
+    this.clipDryShape.oversample = "4x";
+    this.clipDryShape.curve = identityCurve();
     this.rebuildClipCurve(DEFAULT_CLIPPER.thresholdDb);
-    this.limDrive.connect(this.clipDry);
+    this.limDrive.connect(this.clipDryShape);
+    this.clipDryShape.connect(this.clipDry);
     this.limDrive.connect(this.clipShaper);
     this.clipShaper.connect(this.clipWet);
     // Both clipper legs sum into one peak-stage input, so the native and
@@ -1431,7 +1497,7 @@ export class AudioEngine {
     // (22 kHz) until a profile is selected.
     this.codecLp = ctx.createBiquadFilter();
     this.codecLp.type = "lowpass";
-    this.codecLp.frequency.value = 22000;
+    this.codecLp.frequency.value = safeFilterHz(22000, ctx.sampleRate);
     this.codecLp.Q.value = 0.707;
     this.outputGain.connect(this.codecLp);
 
@@ -1702,6 +1768,8 @@ export class AudioEngine {
     if (!ctx) return;
     const set = (key: string, param: AudioParam | undefined, value: number, tc?: number) =>
       this.setNum(key, param, value, tc);
+    const setHz = (key: string, param: AudioParam | undefined, value: number, tc?: number) =>
+      this.setHz(key, param, value, tc);
 
     const adv: AdvancedParams = params.advanced ?? DEFAULT_ADVANCED;
     // input calibration offset is a trim memory, applied with the input gain
@@ -1721,7 +1789,7 @@ export class AudioEngine {
       nr.on ? -(nr.attenuationDb / 24) * nrDepth : 0,
       0.05,
     );
-    set(
+    setHz(
       "rest.lp",
       this.restLp.frequency,
       nr.on
@@ -1740,17 +1808,25 @@ export class AudioEngine {
       active: boolean,
     ) => {
       node.type = active ? "notch" : "allpass";
-      set("rest.notch.f", node.frequency, Math.min(18000, Math.max(40, cfg.freqHz)));
+      setHz("rest.notch.f", node.frequency, Math.min(18000, Math.max(40, cfg.freqHz)));
       set("rest.notch.q", node.Q, notchQ(cfg.widthOct));
     };
     setNotch(this.restNotch1, notch.notch1, notch.on);
     setNotch(this.restNotch2, notch.notch2, notch.on);
     const dcHz = dcHighpassHz(adv.restoration.dc);
     this.dcHpf.type = dcHz > 0 ? "highpass" : "allpass";
-    set("rest.dc", this.dcHpf.frequency, dcHz > 0 ? dcHz : 30);
+    setHz("rest.dc", this.dcHpf.frequency, dcHz > 0 ? dcHz : 30);
     const mains = mainsNotchHz(adv.restoration.interference);
     this.mainsNotch.type = mains > 0 ? "notch" : "allpass";
-    set("rest.mains", this.mainsNotch.frequency, mains || 50);
+    setHz("rest.mains", this.mainsNotch.frequency, mains || 50);
+    // Hum harmonics: a mains-locked notch at 2f and 3f. They stay in the
+    // graph as allpass sections when the module (or just the harmonics) is
+    // off, so engaging them never rebuilds the chain.
+    const humHarmonics = mains > 0 && adv.restoration.interference.harmonics;
+    this.mainsHarmonics.forEach((notch, i) => {
+      notch.type = humHarmonics ? "notch" : "allpass";
+      setHz(`rest.mains${i + 2}`, notch.frequency, mains ? mains * (i + 2) : 50 * (i + 2));
+    });
     const rest = adv.restoration.harmonics;
     set("rest.harm", this.restHarmWet.gain, rest.on ? (rest.mix / 100) * 0.4 : 0, 0.02);
     set("rest.harm.dry", this.restHarmDry.gain, rest.on ? 1 : 1, 0.02);
@@ -1763,17 +1839,17 @@ export class AudioEngine {
     // ── v3.1 presence & brilliance (neutral at 0 dB) ──
     const pres = adv.eq.presence;
     const presGain = presenceGains(pres);
-    set("pres.f", this.presenceHi.frequency, pres.presenceMode === "sharp" ? 3800 : 3200);
+    setHz("pres.f", this.presenceHi.frequency, pres.presenceMode === "sharp" ? 3800 : 3200);
     set("pres.q", this.presenceHi.Q, Math.max(0.6, Math.min(2.8, pres.presenceWidth * 1.6)));
     set("pres.g", this.presenceHi.gain, pres.on ? presGain.presenceDb : 0);
-    set(
+    setHz(
       "brill.f",
       this.brillianceHi.frequency,
       pres.airType === "open" ? 14000 : pres.airType === "sparkle" ? 12000 : 10500,
     );
     set("brill.g", this.brillianceHi.gain, pres.on ? presGain.brillianceDb : 0);
     const air = airShelf(adv.eq.air);
-    set("air.f", this.airShelf.frequency, air.freqHz);
+    setHz("air.f", this.airShelf.frequency, air.freqHz);
     set("air.q", this.airShelf.Q, air.q);
     set("air.g", this.airShelf.gain, air.gainDb);
 
@@ -1784,7 +1860,7 @@ export class AudioEngine {
     this.hpfStages.forEach((stage, i) => {
       const active = params.hpf.on && i < hpfQs.length;
       stage.type = active ? "highpass" : "allpass";
-      set(`hpf.${i}.f`, stage.frequency, params.hpf.freqHz);
+      setHz(`hpf.${i}.f`, stage.frequency, params.hpf.freqHz);
       set(`hpf.${i}.q`, stage.Q, hpfQs[i] ?? 0.7071);
     });
 
@@ -1792,7 +1868,7 @@ export class AudioEngine {
     // the cascade is retuned as a whole and bypassed as a whole
     const phaseBase = params.phase.mode === "auto" ? 300 : params.phase.freqHz;
     phaseStageFrequencies(phaseBase).forEach((hz, i) => {
-      set(`phase.${i}`, this.phaseStages[i]?.frequency, hz);
+      setHz(`phase.${i}`, this.phaseStages[i]?.frequency, hz);
     });
     this.crossfade("phase", this.phaseWet, this.phaseDry, params.phase.on);
 
@@ -1812,24 +1888,26 @@ export class AudioEngine {
       // cascade as an allpass section, which is magnitude-neutral.
       f.type = eqBandOn(band) ? band.type : "allpass";
       set(`eq.${i}.g`, f.gain, band.gainDb);
-      set(`eq.${i}.f`, f.frequency, band.freq);
+      setHz(`eq.${i}.f`, f.frequency, band.freq);
       set(`eq.${i}.q`, f.Q, Math.max(band.q, 0.01));
     });
     this.crossfade("eq", this.eqWetPre, this.eqDry, params.eq.on);
 
     params.multiband.splitsHz.forEach((hz, split) => {
       (this.mbSplitFilters[split] ?? []).forEach((f, i) => {
-        set(`mb.split.${split}.${i}`, f.frequency, hz);
+        setHz(`mb.split.${split}.${i}`, f.frequency, hz);
       });
     });
     // Less–More macro: one setting scales every band's ratio and envelope.
     // 5 is the preset's own tuning, so the loaded preset is heard as designed
     // until the operator moves the macro.
     const dens = densityProfile(params.density);
+    const autoMakeupOn = params.multiband.on && !!params.multiband.autoMakeup;
     params.multiband.bands.forEach((band, i) => {
       const comp = this.mbComps[i];
       const makeup = this.mbMakeups[i];
       if (!comp || !makeup) return;
+      if (!autoMakeupOn) this.autoMakeupTrack[i] = 0;
       set(`mb.${i}.t`, comp.threshold, band.thresholdDb);
       set(`mb.${i}.r`, comp.ratio, Math.min(20, Math.max(1, band.ratio * dens.ratioScale)));
       set(
@@ -1842,7 +1920,11 @@ export class AudioEngine {
         comp.release,
         (Math.max(band.releaseMs, 10) * dens.timeScale * (this.speechFast ? 0.5 : 1)) / 1000,
       );
-      set(`mb.${i}.m`, makeup.gain, dbToGain(band.makeupDb));
+      set(
+        `mb.${i}.m`,
+        makeup.gain,
+        dbToGain(band.makeupDb + (autoMakeupOn ? this.autoMakeupTrack[i] : 0)),
+      );
     });
     this.crossfade("mb", this.mbWetPre, this.mbDry, params.multiband.on);
 
@@ -1851,8 +1933,8 @@ export class AudioEngine {
       const det = this.deqDets[i];
       const sub = this.deqSubs[i];
       if (!det || !sub) return;
-      set(`deq.${i}.af`, this.deqBpAudio[i]?.frequency, band.freqHz);
-      set(`deq.${i}.df`, this.deqBpDet[i]?.frequency, band.freqHz);
+      setHz(`deq.${i}.af`, this.deqBpAudio[i]?.frequency, band.freqHz);
+      setHz(`deq.${i}.df`, this.deqBpDet[i]?.frequency, band.freqHz);
       set(`deq.${i}.aq`, this.deqBpAudio[i]?.Q, Math.max(band.q, 0.05));
       set(`deq.${i}.dq`, this.deqBpDet[i]?.Q, Math.max(band.q, 0.05));
       set(`deq.${i}.t`, det.threshold, band.thresholdDb);
@@ -1909,9 +1991,18 @@ export class AudioEngine {
 
     // de-esser: retune the band and detector; a bypass closes the cut
     const deessHz = clampDeessFreq(params.deess.freqHz);
-    set("deess.f", this.deessBpAudio?.frequency, deessHz);
-    set("deess.df", this.deessBpDet?.frequency, deessHz);
-    set("deess.t", this.deessDet?.threshold, params.deess.thresholdDb);
+    setHz("deess.f", this.deessBpAudio?.frequency, deessHz);
+    setHz("deess.df", this.deessBpDet?.frequency, deessHz);
+    // Auto threshold: the tracker in updateDeesser() owns the value; a manual
+    // threshold written here is what it falls back to when auto is off.
+    set(
+      "deess.t",
+      this.deessDet?.threshold,
+      params.deess.auto
+        ? autoDeessThresholdDb(this.deessBandDb)
+        : params.deess.thresholdDb,
+      0.05,
+    );
     set("deess.a", this.deessDet?.attack, Math.max(params.deess.attackMs, 0.1) / 1000);
     set("deess.r", this.deessDet?.release, Math.max(params.deess.releaseMs, 10) / 1000);
     if (!params.deess.on) {
@@ -1968,11 +2059,11 @@ export class AudioEngine {
     // post-limiter pre-emphasis correction
     const pre = adv.limiter.preEmph;
     const preFix = preEmphCorrection(pre);
-    set("preemph.f", this.preEmphShelf.frequency, preFix.freqHz);
+    setHz("preemph.f", this.preEmphShelf.frequency, preFix.freqHz);
     set("preemph.g", this.preEmphShelf.gain, pre.apply === "after" ? preFix.gainDb : 0);
 
     // codec perceptual pre-shaping low-pass
-    set(
+    setHz(
       "codec.lp",
       this.codecLp.frequency,
       codecLowpassHz(adv.limiter.codec, this.streamBitrateKbps),
@@ -1992,15 +2083,15 @@ export class AudioEngine {
     this.crossfade("guard", this.guardWet, this.guardDry, params.limiter.on);
 
     // harmonic exciter
-    set("ex.f1", this.exBp1?.frequency, params.exciter.freqHz);
-    set("ex.f2", this.exBp2?.frequency, params.exciter.freqHz * 1.7);
+    setHz("ex.f1", this.exBp1?.frequency, params.exciter.freqHz);
+    setHz("ex.f2", this.exBp2?.frequency, params.exciter.freqHz * 1.7);
     set("ex.mix", this.exMix?.gain, params.exciter.on ? (params.exciter.mix / 100) * 0.5 : 0);
 
     // low-band reinforcement (psychoacoustic bass module)
     const bass = params.psy.bassSynth;
     const bassHz = Math.min(220, Math.max(40, bass.fundHz * 2));
-    set("bass.f1", this.bass1?.frequency, bassHz);
-    set("bass.f2", this.bass2?.frequency, bassHz);
+    setHz("bass.f1", this.bass1?.frequency, bassHz);
+    setHz("bass.f2", this.bass2?.frequency, bassHz);
     set("bass.drive", this.bassDrive?.gain, 1 + (Math.min(100, Math.max(0, bass.depth)) / 100) * 3);
     set(
       "bass.mix",
@@ -2030,11 +2121,11 @@ export class AudioEngine {
     const ms = params.psy.msTrim;
     set("ms.mid", this.midTrim?.gain, ms.on ? dbToGain(ms.midDb) : 1);
     set("ms.side", this.sideTrim?.gain, ms.on ? dbToGain(ms.sideDb) : 1);
-    set("ms.hpf", this.sideHpf?.frequency, Math.min(1000, Math.max(20, ms.sideHpfHz)));
+    setHz("ms.hpf", this.sideHpf?.frequency, Math.min(1000, Math.max(20, ms.sideHpfHz)));
     this.crossfade("ms.hpf", this.sideHpfWet, this.sideHpfDry, ms.on);
     // low-end mono: 0 = off, otherwise fold side-bass below the crossover
     const lm = Math.min(500, Math.max(0, params.stereo.lowMonoHz ?? 120));
-    set("side.lp", this.sideLp?.frequency, Math.max(40, lm || 120), 0.01);
+    setHz("side.lp", this.sideLp?.frequency, Math.max(40, lm || 120), 0.01);
     this.crossfade("side", this.sideWet, this.sideDry, lm > 0);
 
     set(
@@ -2203,16 +2294,15 @@ export class AudioEngine {
     this.clipThresholdDb = thresholdDb;
   }
 
+  /**
+   * Safety ceiling: unity until the last ~2 dB, then a smooth bend into the
+   * ceiling. The previous transfer was `ceil·tanh(x/ceil)` across the whole
+   * range, which is a compressor — it cost about a decibel at −6 dBFS and
+   * added third harmonic at every level the chain ever produced.
+   */
   private rebuildGuardCurve(ceilingDb: number) {
     if (!this.guardShaper) return;
-    const ceil = Math.min(1, dbToGain(ceilingDb));
-    const n = 8193;
-    const curve = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      const x = -1 + (2 * i) / (n - 1);
-      curve[i] = ceil * Math.tanh(x / ceil);
-    }
-    this.guardShaper.curve = curve;
+    this.guardShaper.curve = softCeilingCurve(ceilingDb);
     this.guardCeilingDb = ceilingDb;
   }
 
@@ -3142,6 +3232,24 @@ export class AudioEngine {
   private updateDeesser() {
     const params = this.params;
     if (!params) return;
+    if (params.deess.auto && this.deessBandAnalyser) {
+      this.deessBandAnalyser.getFloatTimeDomainData(this.deessBandBuf);
+      const db = 10 * Math.log10(Math.max(1e-12, meanSquare(this.deessBandBuf)));
+      // A ~2 s tracker: one loud cymbal must not move the reference the next
+      // one is measured against, but a change of source should follow quickly.
+      this.deessBandDb =
+        this.deessBandDb <= -119
+          ? db
+          : this.deessBandDb + (db - this.deessBandDb) * 0.03;
+      if (params.deess.on) {
+        this.setNum(
+          "deess.t",
+          this.deessDet?.threshold,
+          autoDeessThresholdDb(this.deessBandDb),
+          0.2,
+        );
+      }
+    }
     if (params.deess.on && this.deessDet) {
       const over = Math.max(0, -(this.deessDet.reduction || 0));
       const cut = Math.min(params.deess.maxCutDb, over);
@@ -3167,6 +3275,31 @@ export class AudioEngine {
       // subtracting α of the band ≈ a cut of −20·log10(1−α) at its centre
       const alpha = 1 - Math.pow(10, -cut / 20);
       this.setNum(`deq.${i}.sub`, sub.gain, alpha, 0.008);
+    });
+  }
+
+  /**
+   * Automatic multiband makeup.
+   *
+   * Each band's makeup is normally a preset number, so a band that works
+   * harder than another loses body and the tonal balance tilts. This returns
+   * a fraction of the measured reduction as makeup, smoothed over a few
+   * hundred milliseconds so it reads as tone rather than as level movement.
+   * The preset value stays the floor: the automatic part is added to it, never
+   * substituted for it.
+   */
+  private updateAutoMakeup() {
+    const params = this.params;
+    if (!params?.multiband.on || !params.multiband.autoMakeup) return;
+    params.multiband.bands.forEach((band, i) => {
+      const comp = this.mbComps[i];
+      const makeup = this.mbMakeups[i];
+      if (!comp || !makeup) return;
+      const target = autoMakeupDb(Math.max(0, -(comp.reduction ?? 0)));
+      const cur = this.autoMakeupTrack[i];
+      const next = cur + (target - cur) * 0.12;
+      this.autoMakeupTrack[i] = next;
+      this.setNum(`mb.${i}.m`, makeup.gain, dbToGain(band.makeupDb + next), 0.25);
     });
   }
 
@@ -3348,6 +3481,7 @@ export class AudioEngine {
     const grOf = (comp: DynamicsCompressorNode | undefined): number =>
       Math.max(0, -(comp?.reduction ?? 0));
     const agcOn = this.params?.agc.on ?? false;
+    this.updateAutoMakeup();
 
     if (this.limiterMeter) {
       // Drain the meter ring at snapshot rate: the newest value wins, and the

@@ -1295,6 +1295,27 @@ export function ProcessingTab({
               );
             })}
           </div>
+          <CtrlRow label="Makeup">
+            <Seg
+              value={params.multiband.autoMakeup ? "auto" : "preset"}
+              options={[
+                { value: "preset", label: "Preset" },
+                { value: "auto", label: "Auto" },
+              ]}
+              onChange={(v) =>
+                setParams((p) => ({
+                  ...p,
+                  multiband: { ...p.multiband, autoMakeup: v === "auto" },
+                }))
+              }
+              ariaLabel="Multiband makeup mode"
+            />
+            <span className="text-[10px] text-muted-foreground">
+              {params.multiband.autoMakeup
+                ? "Restores 60 % of each band's gain reduction"
+                : "Preset makeup only"}
+            </span>
+          </CtrlRow>
           <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
             One threshold per band — ratio, timing and makeup ride with the
             loaded preset. Sustained GR over 6 dB on a band means its
@@ -1352,20 +1373,40 @@ export function ProcessingTab({
               <Val>−{params.deess.maxCutDb.toFixed(1)} dB</Val>
             </CtrlRow>
             <CtrlRow label="Thr">
-              <SliderRow
-                min={-40}
-                max={-6}
-                step={1}
-                value={params.deess.thresholdDb}
+              <Seg
+                value={params.deess.auto ? "auto" : "manual"}
+                options={[
+                  { value: "manual", label: "Manual" },
+                  { value: "auto", label: "Auto" },
+                ]}
                 onChange={(v) =>
                   setParams((p) => ({
                     ...p,
-                    deess: { ...p.deess, thresholdDb: v },
+                    deess: { ...p.deess, auto: v === "auto" },
                   }))
                 }
-                label="De-esser threshold"
+                ariaLabel="De-esser threshold mode"
               />
-              <Val>{formatDb(params.deess.thresholdDb, 0)}</Val>
+              {!params.deess.auto && (
+                <SliderRow
+                  min={-40}
+                  max={-6}
+                  step={1}
+                  value={params.deess.thresholdDb}
+                  onChange={(v) =>
+                    setParams((p) => ({
+                      ...p,
+                      deess: { ...p.deess, thresholdDb: v },
+                    }))
+                  }
+                  label="De-esser threshold"
+                />
+              )}
+              <Val>
+                {params.deess.auto
+                  ? "tracking"
+                  : formatDb(params.deess.thresholdDb, 0)}
+              </Val>
             </CtrlRow>
             <CtrlRow label="Release">
               <SliderRow

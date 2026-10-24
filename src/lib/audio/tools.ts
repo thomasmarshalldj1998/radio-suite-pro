@@ -186,6 +186,38 @@ export function deessAlpha(cutDb: number): number {
   return Math.min(0.999, 1 - Math.pow(10, -cut / 20));
 }
 
+/**
+ * Auto de-esser threshold: sit a fixed margin above the *running* level of
+ * the sibilance band instead of at an absolute dBFS number.
+ *
+ * Sibilance is by definition a short rise above the band's own average, so a
+ * threshold relative to that average tracks the source (quiet podcast, hot
+ * master) without re-tuning. The margin is what decides how much of the
+ * steady HF content — cymbals, air — is allowed through untouched; 6 dB keeps
+ * the detector on the peaks rather than the bed. Bounded to the manual
+ * control's range so the same cut depth means the same thing in both modes.
+ */
+export const AUTO_DEESS_MARGIN_DB = 6;
+
+export function autoDeessThresholdDb(bandDb: number): number {
+  const level = Number.isFinite(bandDb) ? bandDb : -120;
+  return Math.min(-6, Math.max(-45, level + AUTO_DEESS_MARGIN_DB));
+}
+
+/**
+ * Automatic multiband makeup: return a fraction of the band's measured gain
+ * reduction as extra makeup.
+ *
+ * Returning all of it would undo the level control the compressor was engaged
+ * for; 60 % restores the body and density a band loses to compression while
+ * leaving the remaining 40 % as genuine levelling. Capped so a badly tuned
+ * band cannot drag the whole programme up.
+ */
+export function autoMakeupDb(reductionDb: number): number {
+  const gr = Number.isFinite(reductionDb) ? reductionDb : 0;
+  return Math.min(12, Math.max(0, gr) * 0.6);
+}
+
 /* ── 5 · adaptive limiter envelopes ───────────────────────────────────── */
 
 /**

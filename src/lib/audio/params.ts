@@ -102,6 +102,11 @@ export interface DeessParams {
   maxCutDb: number;
   attackMs: number;
   releaseMs: number;
+  /**
+   * Track the sibilance band's running level instead of holding the manual
+   * threshold, so the same settings work on a quiet podcast and a hot master.
+   */
+  auto?: boolean;
 }
 
 /** One dynamic-EQ band: cut the band (up to maxCutDb) when it exceeds threshold. */
@@ -333,6 +338,12 @@ export interface ProcessorParams {
     on: boolean;
     splitsHz: MultibandSplits;
     bands: MultibandBands;
+    /**
+     * Restore part of the energy each band's compressor removes, so engaging
+     * the matrix does not tilt the tonal balance toward the least-compressed
+     * bands. Off by default: the preset's makeup is the designed setting.
+     */
+    autoMakeup?: boolean;
   };
   agc: {
     on: boolean;
@@ -516,6 +527,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
   multiband: {
     on: true,
     splitsHz: [...DEFAULT_SPLITS] as MultibandSplits,
+    autoMakeup: false,
     bands: [
       { thresholdDb: -12, ratio: 4, attackMs: 15, releaseMs: 300, makeupDb: 2 },
       { thresholdDb: -13, ratio: 4, attackMs: 10, releaseMs: 280, makeupDb: 2 },
@@ -544,6 +556,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     maxCutDb: 6,
     attackMs: 1,
     releaseMs: 60,
+    auto: false,
   },
   density: 5,
   limiter: {
