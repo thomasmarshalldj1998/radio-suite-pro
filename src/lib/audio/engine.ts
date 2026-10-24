@@ -56,6 +56,13 @@ import {
 } from "./limiter";
 import { createSpscRing, type SpscRing } from "./spsc-ring";
 import {
+  DEVICE_RAMP_MS,
+  outputLatencyMs,
+  rampTo,
+  rampWaitMs,
+  waitForRunning,
+} from "./declick";
+import {
   DEFAULT_ADVANCED,
   agcProfileEnvelope,
   airShelf,
@@ -241,15 +248,19 @@ const CLIP_HOLD_MS = 600;
 /**
  * A source switch fades the program bus out, rebuilds the source, and fades
  * back in. Cutting a live feed at programme level is a click on air.
+ *
+ * DEVICE_RAMP_MS is the fade; this is the wait around it — long enough for
+ * the ramp to land *and* for the delay lines and filter histories to drain
+ * into that silence before the new device is patched in.
  */
 const SOURCE_FADE_MS = 20;
 
 /**
- * Monitor-only fade around a sink switch. Long enough for the output stream
- * to have restarted before programme is let back through, short enough to be
- * inaudible as a gap.
+ * How long a newly opened sink gets to settle before programme is let back
+ * through. An endpoint that has just opened has no history yet: its first
+ * blocks belong to the hardware, not to the programme.
  */
-const MONITOR_FADE_MS = 30;
+const ENDPOINT_SETTLE_MS = 24;
 
 /**
  * Bound on one sink switch. The monitor is faded for the length of the call,
@@ -436,6 +447,27 @@ export class AudioEngine {
   private bootArm: Promise<void> | null = null;
   /** Sink the context is actually rendering to ("" = OS default). */
   private appliedSink = "";
+  /**
+   * Suspend/close in flight. A boot awaits this before asking the system for
+   * a device: two contexts contending for one endpoint is a burst, and no
+   * amount of fading downstream can hide that.
+   */
+  private ctxTeardown: Promise<void> = Promise.resolve();
+  /** True only while this context is known to be clocking. */
+  private contextRunning = false;
+  /**
+   * True while the output bus has been faded in on the current context.
+   * Opening an already-open bus would be a dip in live programme, and
+   * re-opening a bus left at programme level by a suspended power-off would
+   * skip the fade that prevents the click.
+   */
+  private outputOpen = false;
+  /**
+   * The monitor is muted because a device hand-off is in progress, not by the
+   * operator. Kept separately so a parameter apply landing mid-swap cannot
+   * cancel the mute and put uninitialised frames through the new endpoint.
+   */
+  private handoffMuted = false;
   private frameCostMs = 0;
   private driftMs = 0;
   private clockRefWall = 0;
@@ -646,13 +678,24 @@ export class AudioEngine {
   private async doPowerOn(): Promise<void> {
     this.resetLoudness();
     this.fadeToken += 1; // any pending power-off teardown is now stale
+    // The previous power cycle's suspend/close has to have finished before a
+    // new hardware stream is requested. This is the ordering that used to be
+    // missing: `close()` was fired and forgotten, so the new context was
+    // built while the old one still held the endpoint.
+    await this.ctxTeardown;
     const reuse = this.ctx && this.ctx.state !== "closed" && this.graphReady;
     if (!reuse) {
-      if (this.ctx && this.ctx.state !== "closed") {
-        void this.ctx.close().catch(() => undefined);
+      const previous = this.ctx;
+      if (previous && previous.state !== "closed") {
+        this.graphReady = false;
+        this.contextRunning = false;
+        // Awaited, not fire-and-forget: the hardware must be back before the
+        // replacement asks for it.
+        await previous.close().catch(() => undefined);
       }
-      const ctx = new AudioContext({ latencyHint: "interactive" });
+      const ctx = this.createContext();
       this.ctx = ctx;
+      this.contextRunning = false;
       // The limiter module must be registered before buildGraph can create the
       // node. Failure is not fatal: the native compressor path stays in place.
       await this.loadLimiterWorklet(ctx);
@@ -661,13 +704,12 @@ export class AudioEngine {
     const ctx = this.ctx;
     if (!ctx) return;
     if (this.params) this.apply(this.params);
-    try {
-      await ctx.resume();
-    } catch {
-      /* autoplay policy — the wake banner offers the gesture */
-    }
+    // `powered` is reported even when the context refuses to run, so the wake
+    // banner can offer the gesture — but nothing is faded in until the
+    // endpoint is actually clocking. `onstatechange` reopens it later.
     this.powered = true;
     this.snapshotValue = { ...this.snapshotValue, powered: true };
+    await this.resumeAndWait(ctx);
     // A power-off mid-fade leaves the program bus at zero. Restore it before
     // the source is rebuilt, or the console would look alive with no audio.
     this.sourceToken += 1;
@@ -676,7 +718,7 @@ export class AudioEngine {
       this.sourceBus.gain.setValueAtTime(1, ctx.currentTime);
     }
     this.watchDevices();
-    this.openOutput();
+    if (this.contextRunning) this.openOutput();
     void this.applyOutputDevice();
     // A saved microphone is only re-armed when the OS already allows it —
     // boot must never throw a permission prompt at the operator. Every other
@@ -687,14 +729,44 @@ export class AudioEngine {
     this.notify();
   }
 
-  /** Fade the output bus in from silence — no click on power-up or resume. */
+  /**
+   * Construction seam for the hardware context: every boot and rebuild goes
+   * through here, so a second context is never created as a side effect
+   * somewhere else.
+   */
+  protected createContext(): AudioContext {
+    return new AudioContext({ latencyHint: "interactive" });
+  }
+
+  /**
+   * Resume, then wait for the state rather than the promise.
+   *
+   * `resume()` resolves when the request is accepted; on a device that is
+   * still renegotiating, `running` arrives later. Fading in on the promise is
+   * how programme ends up in a buffer the endpoint has not opened yet.
+   */
+  private async resumeAndWait(ctx: AudioContext): Promise<boolean> {
+    try {
+      await ctx.resume();
+    } catch {
+      /* autoplay policy — the wake banner offers the gesture */
+    }
+    this.contextRunning = await waitForRunning(ctx);
+    return this.contextRunning;
+  }
+
+  /** Fade the output bus in from exact silence — no click on power-up or resume. */
   private openOutput() {
-    if (!this.ctx || !this.duckGain) return;
-    const now = this.ctx.currentTime;
+    const ctx = this.ctx;
+    if (!ctx || !this.duckGain || this.outputOpen) return;
+    this.outputOpen = true;
+    const now = ctx.currentTime;
     const gain = this.duckGain.gain;
+    // From zero rather than from wherever the param happens to sit: a bus
+    // left at programme level by a suspended power-off still gets a fade.
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(0, now);
-    gain.setTargetAtTime(1, now, 0.008);
+    gain.linearRampToValueAtTime(1, now + DEVICE_RAMP_MS / 1000);
   }
 
   powerOff() {
@@ -721,19 +793,24 @@ export class AudioEngine {
       // next take-over would be a no-op.
       this.setNum("failover.src", this.srcGain?.gain, 1, 0.01);
       this.setNum("failover.backup", this.backupGain?.gain, 0, 0.01);
-      if (ctx && ctx.state !== "closed") void ctx.suspend();
+      this.outputOpen = false;
+      if (ctx && ctx.state !== "closed") {
+        // Recorded rather than fired and forgotten: the next boot awaits it,
+        // so a new context is never created while this one still holds the
+        // endpoint.
+        this.contextRunning = false;
+        this.ctxTeardown = ctx.suspend().catch(() => undefined);
+      }
       this.notify();
     };
 
     // Suspend only after the bus has faded: stopping the graph at programme
     // level is a click, and a click on the composite is audible on air.
     if (ctx && ctx.state === "running" && this.duckGain) {
-      const now = ctx.currentTime;
-      this.duckGain.gain.cancelScheduledValues(now);
-      this.duckGain.gain.setTargetAtTime(0, now, 0.005);
+      rampTo(this.duckGain.gain, 0, ctx.currentTime);
       globalThis.setTimeout(() => {
         if (this.fadeToken === token && !this.powered) teardown();
-      }, 45);
+      }, rampWaitMs());
     } else {
       teardown();
     }
@@ -748,8 +825,10 @@ export class AudioEngine {
     if (this.backupUrl) URL.revokeObjectURL(this.backupUrl);
     this.backupUrl = null;
     if (this.ctx) {
-      void this.ctx.close().catch(() => undefined);
+      const ctx = this.ctx;
       this.ctx = null;
+      this.contextRunning = false;
+      this.ctxTeardown = ctx.close().catch(() => undefined);
     }
     this.written.clear();
     this.workletLimiter = null;
@@ -821,14 +900,30 @@ export class AudioEngine {
   private buildGraph(ctx: AudioContext) {
     this.clearGraphRefs();
     this.written.clear();
+    this.outputOpen = false;
     this.frameCostMs = 0;
     this.heavyIntervalMs = HEAVY_BASE_MS;
     this.lastHeavyAt = 0;
     // A context suspended by the platform (sleep, device change, tab
     // eviction) is a hard glitch. Resume it as soon as we are allowed to;
     // a deliberate power-off sets `powered` false first, so it is not undone.
+    // The running transition is also the one place programme is let back in:
+    // a fade that was skipped because the endpoint was not clocking gets its
+    // opening here instead of playing into a dead buffer.
     ctx.onstatechange = () => {
-      if (this.powered && ctx.state === "suspended") void ctx.resume();
+      if (!this.powered || this.ctx !== ctx) return;
+      if (ctx.state === "suspended") {
+        this.contextRunning = false;
+        // Nothing is playing, so the next running state must fade in again.
+        this.outputOpen = false;
+        void ctx.resume();
+        return;
+      }
+      if (ctx.state === "running" && !this.contextRunning) {
+        this.contextRunning = true;
+        this.openOutput();
+        this.ensureBusOpen();
+      }
     };
     const g = (v = 1) => {
       const n = ctx.createGain();
@@ -1984,7 +2079,9 @@ export class AudioEngine {
     this.setNum(
       "monitor",
       this.monitorGain?.gain,
-      this.monitorMuted ? 0 : dbToGain(this.params?.monitorDb ?? -6),
+      this.monitorMuted || this.handoffMuted
+        ? 0
+        : dbToGain(this.params?.monitorDb ?? -6),
     );
     // Monitor checks: mono fold and per-channel polarity, monitor path only.
     const mon = this.params?.monitor;
@@ -2220,17 +2317,22 @@ export class AudioEngine {
     globalThis.setTimeout(() => {
       if (token !== this.sourceToken || !this.powered) return;
       this.startSource(kind);
-      this.fadeBus(1);
+      // The microphone opens asynchronously and opens its own bus once the
+      // new track is live; every other source is connected by the time this
+      // line runs.
+      if (kind !== "mic") this.ensureBusOpen();
     }, SOURCE_FADE_MS);
   }
 
+  /**
+   * Program-bus fade. Linear, so it lands on exact zero: the old source has
+   * to be in silence *before* it is disconnected, or the disconnect is a step
+   * down from the residual of an exponential approach.
+   */
   private fadeBus(target: number) {
     const ctx = this.ctx;
     if (!ctx || !this.graphReady || !this.sourceBus) return;
-    const now = ctx.currentTime;
-    const gain = this.sourceBus.gain;
-    gain.cancelScheduledValues(now);
-    gain.setTargetAtTime(target, now, target ? 0.006 : 0.004);
+    rampTo(this.sourceBus.gain, target, ctx.currentTime);
   }
 
   private startSource(kind: SourceKind) {
@@ -2390,6 +2492,7 @@ export class AudioEngine {
         this.micStatus = "on";
         this.notify();
       }
+      this.ensureBusOpen();
       return Promise.resolve();
     }
     if (this.micArm) return this.micArm;
@@ -2438,6 +2541,10 @@ export class AudioEngine {
       this.micNode.connect(this.sourceBus);
       this.micStatus = "on";
       this.notify();
+      // The bus opens only now, with a live track behind it — not when the
+      // arm was requested. A getUserMedia that takes 300 ms used to be a
+      // 300 ms window in which the console faded programme up over nothing.
+      this.ensureBusOpen();
       // Permission granted → real device labels are visible now.
       void this.refreshDevices();
       // The operator may have picked another input while getUserMedia was
@@ -2706,7 +2813,12 @@ export class AudioEngine {
 
   /** Fade the programme bus back in once a source is connected again. */
   private ensureBusOpen(): void {
-    if (this.powered && this.graphReady) this.fadeBus(1);
+    if (!this.powered || !this.graphReady) return;
+    // Only against a clock. A context that is resumed but still renegotiating
+    // hands the fade to a buffer nothing is reading; `onstatechange` reopens
+    // the bus on the first state that can carry audio.
+    if (this.ctx?.state !== "running") return;
+    this.fadeBus(1);
   }
 
   /**
@@ -2740,8 +2852,11 @@ export class AudioEngine {
       if (gen !== this.deviceToken) return this.ensureBusOpen();
     }
 
+    if (gen !== this.deviceToken || this.ctx !== ctx) return;
     await this.openMic();
-    this.ensureBusOpen();
+    // The bus is opened by doOpenMic once the new track is live; a swap that
+    // lost the race must not reopen it under a source it did not open.
+    if (gen !== this.deviceToken || this.ctx !== ctx) return;
     this.notify();
   }
 
@@ -2784,14 +2899,24 @@ export class AudioEngine {
     // uninitialised frames — so the monitor bus is faded out first. The
     // encoder send taps duckGain upstream, so muting the monitor cannot take
     // the programme off air.
-    const live = this.powered && this.graphReady;
-    if (live) {
-      this.setNum("monitor", this.monitorGain?.gain, 0, 0.006);
-      await waitMs(MONITOR_FADE_MS);
-    }
+    const live = this.powered && this.graphReady && ctx.state === "running";
     try {
+      if (live) {
+        this.handoffMuted = true;
+        this.rampMonitor(0);
+        // The ramp clears the graph; the endpoint still holds the frames it
+        // was handed before it. Touching the device before those have played
+        // is the truncated half-buffer at the head of the burst.
+        await waitMs(rampWaitMs() + outputLatencyMs(ctx));
+        // A newer pick owns the sink now; its own swap does the work.
+        if (this.outputDeviceId !== wanted) return;
+      }
       const switched = await this.switchSink(ctx, wanted);
       if (switched === "ok") {
+        // The promise resolves when the endpoint is open, not when its first
+        // buffers have settled. Give them somewhere to go before programme
+        // is let back through.
+        await waitMs(ENDPOINT_SETTLE_MS);
         this.appliedSink = wanted;
         return;
       }
@@ -2816,9 +2941,23 @@ export class AudioEngine {
       this.notify();
     } finally {
       // Restore through the ramp cache, so the next parameter apply knows the
-      // monitor is back at its programmed level.
+      // monitor is back at its programmed level. The hand-off flag is cleared
+      // first: it exists to keep a parameter apply from cancelling the mute,
+      // not to outlive the swap.
+      this.handoffMuted = false;
       this.applyMonitorGain();
     }
+  }
+
+  /**
+   * Ramp the monitor bus and record the destination, so the write cache the
+   * parameter path relies on stays honest about where the bus ended up.
+   */
+  private rampMonitor(target: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.monitorGain) return;
+    rampTo(this.monitorGain.gain, target, ctx.currentTime);
+    this.written.set("monitor", target);
   }
 
   /**
@@ -3491,6 +3630,18 @@ export class AudioEngine {
 
   getStream(): MediaStream | null {
     return this.streamDest?.stream ?? null;
+  }
+
+  /**
+   * The program node the delivery tap should listen to.
+   *
+   * Tapping the graph directly is the difference between a capture that is
+   * scheduled by this context and one that is re-clocked across a
+   * MediaStream hop — the hop is resampled and restarted with the output
+   * device, so a hand-off stalls it. Null before a graph exists.
+   */
+  getCaptureNode(): AudioNode | null {
+    return this.graphReady ? (this.streamGain ?? null) : null;
   }
 }
 

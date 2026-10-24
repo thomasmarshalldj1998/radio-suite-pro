@@ -71,9 +71,15 @@ export function pcmTapWorkletSource(): string {
 export async function attachPcmTap(onBatch: TapCallback): Promise<() => void> {
   const engine = getEngine();
   const ctx = engine.ctx;
-  const stream = engine.getStream();
-  if (!ctx || !stream) throw new Error("Audio engine is not running");
-  const source = ctx.createMediaStreamSource(stream);
+  // Prefer the program node itself over the engine's MediaStream. The stream
+  // hop resamples and is re-clocked with the output device, so a sink change
+  // restarts the capture mid-batch — a splice the encoder then has to emit.
+  // The graph node sits upstream of the device and cannot be renegotiated
+  // out from under the tap.
+  const node = engine.getCaptureNode();
+  const stream = node ? null : engine.getStream();
+  if (!ctx || (!node && !stream)) throw new Error("Audio engine is not running");
+  const source = node ?? ctx.createMediaStreamSource(stream!);
 
   // AudioWorklet path (blob URL — survives Vite without a build-time asset)
   if (ctx.audioWorklet) {

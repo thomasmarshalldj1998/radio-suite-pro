@@ -20,10 +20,14 @@
  * 10  boot never fades the monitor for a sink it already renders to
  * 11  a sink call that never answers still gives the monitor back
  * 12  the monitor mute is engine state every subscriber sees
- * 13  nothing is logged and no promise rejection escapes
+ * 13  a device fade is linear and lands on exact zero
+ * 14  the monitor stays muted for the whole hand-off
+ * 15  the old context is closed before the new one is built
+ * 16  nothing is logged and no promise rejection escapes
  */
 import { DEFAULT_PARAMS } from "../src/lib/audio/params";
 import { AudioEngine } from "../src/lib/audio/engine";
+import { DEVICE_RAMP_MS, rampWaitMs } from "../src/lib/audio/declick";
 
 let passed = 0;
 let failed = 0;
@@ -295,17 +299,32 @@ badSinks.delete("spk-b");
 
 /* ── 11 · monitor across a sink switch ─────────────────────────────────── */
 
-/** An AudioParam stand-in that records the value it was told to approach. */
+/**
+ * An AudioParam stand-in that records the automation it was given, so the
+ * shape of a fade can be checked and not just its destination.
+ */
+interface ParamEvent {
+  type: "set" | "ramp" | "target";
+  value: number;
+  time: number;
+}
 const fakeParam = (value = 1) => ({
   value,
-  setTargetAtTime(v: number) {
+  events: [] as ParamEvent[],
+  setTargetAtTime(v: number, time = 0) {
     this.value = v;
+    this.events.push({ type: "target", value: v, time });
   },
-  setValueAtTime(v: number) {
+  setValueAtTime(v: number, time = 0) {
     this.value = v;
+    this.events.push({ type: "set", value: v, time });
+  },
+  linearRampToValueAtTime(v: number, time = 0) {
+    this.value = v;
+    this.events.push({ type: "ramp", value: v, time });
   },
   cancelScheduledValues() {
-    /* no automation */
+    /* no schedule to cancel */
   },
 });
 
@@ -373,9 +392,143 @@ check(
 );
 off();
 
-/* ── 13 · quiet ────────────────────────────────────────────────────────── */
+/* ── 13 · the shape of a fade ──────────────────────────────────────────── */
 
-console.log("\n13 · no noise");
+console.log("\n13 · a device fade is linear");
+interface FadeInternals {
+  sourceBus: { gain: ReturnType<typeof fakeParam> };
+  monitorGain: { gain: ReturnType<typeof fakeParam> };
+  fadeBus: (target: number) => void;
+  ensureBusOpen: () => void;
+  applyMonitorGain: () => void;
+}
+const rampCtx = fakeContext();
+const ramped = poweredEngine(rampCtx) as unknown as FadeInternals;
+ramped.sourceBus = { gain: fakeParam(1) };
+ramped.fadeBus(0);
+const anchor = ramped.sourceBus.gain.events.find((e) => e.type === "set");
+const landing = ramped.sourceBus.gain.events.find((e) => e.type === "ramp");
+check(ramped.sourceBus.gain.value === 0, "the bus reaches exact zero", ramped.sourceBus.gain.value.toFixed(4));
+check(
+  !!landing && landing.value === 0,
+  "by ramping to it, not approaching it",
+  landing ? `ramp → ${landing.value}` : "no ramp",
+);
+check(
+  !!anchor && !!landing && Math.abs(landing.time - anchor.time - DEVICE_RAMP_MS / 1000) < 1e-9,
+  `the ramp is ${DEVICE_RAMP_MS} ms long`,
+  anchor && landing ? `${Math.round((landing.time - anchor.time) * 1000)} ms` : "—",
+);
+check(
+  !ramped.sourceBus.gain.events.some((e) => e.type === "target"),
+  "no exponential approach is used for a device fade",
+);
+
+rampCtx.state = "suspended";
+ramped.fadeBus(0);
+ramped.ensureBusOpen();
+check(ramped.sourceBus.gain.value === 0, "a fade-in is refused while the context is not running");
+rampCtx.state = "running";
+ramped.ensureBusOpen();
+check(ramped.sourceBus.gain.value === 1, "and opens on the next running state", ramped.sourceBus.gain.value.toFixed(3));
+
+/* ── 14 · the mute holds for the whole hand-off ─────────────────────────── */
+
+console.log("\n14 · the monitor through a slow sink switch");
+const slowCtx = fakeContext();
+const slowEngine = poweredEngine(slowCtx) as unknown as FadeInternals;
+const slowMonitor = (slowEngine as unknown as { monitorGain: { gain: ReturnType<typeof fakeParam> } })
+  .monitorGain;
+let releaseSink: (() => void) | null = null;
+const monitorAtCall: number[] = [];
+slowCtx.setSinkId = async () => {
+  monitorAtCall.push(slowMonitor.gain.value);
+  await new Promise<void>((resolve) => {
+    releaseSink = resolve;
+  });
+};
+slowEngine.setOutputDevice("spk-slow");
+await new Promise((r) => setTimeout(r, rampWaitMs() + 20));
+check(
+  monitorAtCall[0] === 0,
+  "the monitor is at zero when the sink is touched",
+  monitorAtCall.length ? monitorAtCall[0].toFixed(4) : "sink not reached",
+);
+slowEngine.applyMonitorGain(); // a parameter apply landing mid-swap
+check(slowMonitor.gain.value === 0, "a parameter apply cannot cancel the hand-off mute", slowMonitor.gain.value.toFixed(4));
+releaseSink?.();
+await settle();
+check(
+  Math.abs(slowMonitor.gain.value - Math.pow(10, DEFAULT_PARAMS.monitorDb / 20)) < 1e-6,
+  "the monitor returns once the new sink is open",
+  slowMonitor.gain.value.toFixed(3),
+);
+
+/* ── 15 · teardown before re-creation ──────────────────────────────────── */
+
+console.log("\n15 · rebuilding the context");
+const order: string[] = [];
+const oldContext = {
+  state: "running" as AudioContextState,
+  close: async () => {
+    order.push("close");
+    oldContext.state = "closed";
+  },
+};
+Object.defineProperty(globalThis, "AudioContext", {
+  configurable: true,
+  value: function RecordingContext() {
+    const ctx = fakeContext();
+    ctx.close = async () => {
+      order.push("close");
+      (ctx as { state: string }).state = "closed";
+    };
+    ctx.resume = async () => {
+      order.push("resume");
+      (ctx as { state: string }).state = "running";
+    };
+    order.push("create");
+    return ctx;
+  },
+});
+const booting = new AudioEngine() as unknown as Record<string, unknown> & {
+  powered: boolean;
+  powerOn: () => Promise<void>;
+};
+const duck = fakeParam(0);
+const rampInto = duck.linearRampToValueAtTime.bind(duck);
+duck.linearRampToValueAtTime = (v: number, t: number) => {
+  if (v === 1) order.push("fade-in");
+  rampInto(v, t);
+};
+booting.ctx = oldContext;
+booting.graphReady = false;
+booting.loadLimiterWorklet = async () => undefined;
+booting.buildGraph = () => {
+  booting.graphReady = true;
+  booting.sourceBus = { gain: fakeParam(1) };
+  booting.duckGain = { gain: duck };
+};
+booting.watchDevices = () => undefined;
+booting.startSource = () => order.push("source");
+booting.startMeterLoop = () => undefined;
+await booting.powerOn();
+check(
+  order.includes("close") && order.indexOf("close") < order.indexOf("create"),
+  "the old context is closed before the new one is created",
+  order.join(" → "),
+);
+check(order.indexOf("create") < order.indexOf("resume"), "which is then resumed", order.join(" → "));
+check(
+  order.indexOf("resume") < order.indexOf("fade-in"),
+  "and programme fades in only after it reports running",
+  order.join(" → "),
+);
+check(booting.powered, "the console comes up powered");
+
+/* ── 16 · quiet ────────────────────────────────────────────────────────── */
+
+console.log("\n16 · no noise");
 await settle();
 check(logs.length === 0, "nothing was logged to console.error/warn", logs.join(" | "));
 check(rejections.length === 0, "no promise rejection escaped", rejections.map(String).join(" | "));
