@@ -57,6 +57,8 @@ function Bar({
   decay = 22,
   width = 22,
   height = 76,
+  unit,
+  describe,
 }: {
   caption: string;
   numeric: string;
@@ -70,9 +72,18 @@ function Bar({
   decay?: number;
   width?: number;
   height?: number;
+  /** Unit of the numeric readout — dBFS for a level, dB for a gain change. */
+  unit?: string;
+  /** What the bar measures, for the screen reader and the tooltip. */
+  describe?: string;
 }) {
   return (
-    <div className="flex shrink-0 flex-col items-center gap-1">
+    <div
+      className="flex shrink-0 flex-col items-center gap-1"
+      role="img"
+      aria-label={`${describe ?? caption}: ${numeric}${unit ? ` ${unit}` : ""}`}
+      title={describe ? `${describe} — ${numeric}${unit ? ` ${unit}` : ""}` : undefined}
+    >
       <span
         className={cn(
           "text-readout text-[10px] leading-none font-semibold tabular-nums",
@@ -110,8 +121,24 @@ function DeckDivider() {
 }
 
 const fmtPeak = (v: number) =>
-  v <= -69.5 ? "−∞" : v.toFixed(1).replace("-", "−");
-const fmtGr = (v: number) => `−${Math.max(0, v).toFixed(1)}`;
+  !Number.isFinite(v) || v <= -69.5 ? "−∞" : v.toFixed(1).replace("-", "−");
+/** Gain reduction: a real reduction reads as −x; an idle stage reads 0.0. */
+const fmtGr = (v: number) => {
+  const gr = Number.isFinite(v) ? Math.max(0, v) : 0;
+  return gr < 0.05 ? "0.0" : `−${gr.toFixed(1)}`;
+};
+/** Seconds of programme inside the integrated measurement (20 s to a figure). */
+const INTEGRATED_WINDOW_S = 20;
+
+/** Broadcast PPM colouring for a level bar. */
+const peakZone = (db: number) =>
+  db >= -3
+    ? LED.red
+    : db >= -6
+      ? LED.amber
+      : db >= -20
+        ? LED.green
+        : "#59616e";
 
 /**
  * METER BRIDGE — the fixed full-width LED deck: input peaks, AGC and
@@ -220,7 +247,7 @@ export function MeterBridge({
             rows; sm+ keeps one row that safe-centres when it fits and
             stays fully scrollable when it overflows */}
         <div className="mx-auto flex w-full max-w-[1560px] flex-wrap items-stretch justify-center gap-x-4 gap-y-3 px-3 py-2.5 sm:w-max sm:min-w-full sm:flex-nowrap sm:px-4 sm:[justify-content:safe_center]">
-          {/* ── input peaks ── */}
+          {/* ── input peaks (dBFS) ── */}
           <div className="flex shrink-0 items-start gap-2">
             <span className="flex flex-col items-center gap-1.5 pt-1">
               <span
@@ -228,41 +255,29 @@ export function MeterBridge({
                 aria-hidden
               />
               <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
-                In
+                In · dBFS
               </span>
             </span>
             <Bar
               caption="L"
+              describe="Input left peak"
+              unit="dBFS"
               numeric={powered ? fmtPeak(s.inPeakL) : "—"}
               get={() => engine.snapshot().inPeakL}
               min={-60}
               max={0}
-              zone={(db) =>
-                db >= -3
-                  ? LED.red
-                  : db >= -6
-                    ? LED.amber
-                    : db >= -20
-                      ? LED.green
-                      : "#59616e"
-              }
+              zone={peakZone}
               holdMs={holdMs} decay={decay}
             />
             <Bar
               caption="R"
+              describe="Input right peak"
+              unit="dBFS"
               numeric={powered ? fmtPeak(s.inPeakR) : "—"}
               get={() => engine.snapshot().inPeakR}
               min={-60}
               max={0}
-              zone={(db) =>
-                db >= -3
-                  ? LED.red
-                  : db >= -6
-                    ? LED.amber
-                    : db >= -20
-                      ? LED.green
-                      : "#59616e"
-              }
+              zone={peakZone}
               holdMs={holdMs} decay={decay}
             />
           </div>
@@ -273,6 +288,8 @@ export function MeterBridge({
           <div className="flex shrink-0 items-start gap-2.5">
             <Bar
               caption="AGC"
+              describe="AGC gain reduction (measured)"
+              unit="dB"
               numeric={powered ? fmtGr(s.gr.agc) : "—"}
               get={() => -Math.max(0, engine.snapshot().gr.agc)}
               min={-15}
@@ -283,6 +300,7 @@ export function MeterBridge({
             />
             <Bar
               caption="ENH"
+              describe="Exciter mix (parameter, not a measurement)"
               numeric={params.exciter.on ? `${params.exciter.mix.toFixed(1)}` : "off"}
               numericTone={params.exciter.on ? "text-teal-300" : undefined}
               get={() => exciterMix}
@@ -301,6 +319,8 @@ export function MeterBridge({
               <Bar
                 key={cap}
                 caption={cap}
+                describe={`${cap} band gain reduction (measured)`}
+                unit="dB"
                 numeric={
                   powered ? fmtGr(s.gr.bands[i] ?? 0) : "—"
                 }
@@ -317,10 +337,12 @@ export function MeterBridge({
 
           <DeckDivider />
 
-          {/* ── loudness / limiter / bass ── */}
+          {/* ── loudness rider / limiter ── */}
           <div className="flex shrink-0 items-start gap-2.5">
             <Bar
               caption="LOUD"
+              describe="Loudness rider: amount of gain correction applied (measured; the number is signed)"
+              unit="dB"
               numeric={
                 powered
                   ? `${s.riderDb >= 0 ? "+" : "−"}${Math.abs(s.riderDb).toFixed(1)}`
@@ -337,6 +359,8 @@ export function MeterBridge({
             />
             <Bar
               caption="LIM"
+              describe="Limiter gain reduction (measured)"
+              unit="dB"
               numeric={powered ? fmtGr(s.gr.limiter) : "—"}
               numericTone={
                 powered && (s.clipOut || tpOver)
@@ -350,14 +374,42 @@ export function MeterBridge({
               fromTop
               holdMs={holdMs} decay={decay}
             />
+          </div>
+
+          <DeckDivider />
+
+          {/* ── output peaks (the one thing the bridge never showed: what the
+                 chain is actually handing to the monitor/encoder taps) ── */}
+          <div className="flex shrink-0 items-start gap-2">
+            <span className="flex flex-col items-center gap-1.5 pt-1">
+              <span
+                className={cn("led size-1.5", powered && s.clipOut && "led-hot")}
+                aria-hidden
+              />
+              <span className="text-[8px] font-bold tracking-[0.16em] text-panel-mut uppercase">
+                Out · dBFS
+              </span>
+            </span>
             <Bar
-              caption="BASS"
-              numeric={powered ? fmtGr(s.gr.bands[0] ?? 0) : "—"}
-              get={() => -Math.max(0, engine.snapshot().gr.bands[0] ?? 0)}
-              min={-15}
+              caption="L"
+              describe="Output left peak (post-chain)"
+              unit="dBFS"
+              numeric={powered ? fmtPeak(s.outPeakL) : "—"}
+              get={() => engine.snapshot().outPeakL}
+              min={-60}
               max={0}
-              zone={() => LED.blue}
-              fromTop
+              zone={peakZone}
+              holdMs={holdMs} decay={decay}
+            />
+            <Bar
+              caption="R"
+              describe="Output right peak (post-chain)"
+              unit="dBFS"
+              numeric={powered ? fmtPeak(s.outPeakR) : "—"}
+              get={() => engine.snapshot().outPeakR}
+              min={-60}
+              max={0}
+              zone={peakZone}
               holdMs={holdMs} decay={decay}
             />
           </div>
@@ -385,8 +437,25 @@ export function MeterBridge({
                 {!powered ? (
                   <span className="text-panel-mut">—</span>
                 ) : lufsI === null ? (
-                  <span className="text-[13px] font-medium text-panel-mut">
-                    Measuring…
+                  // BS.1770-4 needs 20 s of programme before a gated figure
+                  // means anything. Show how far in we are instead of an
+                  // ellipsis that looks like a stuck meter.
+                  <span
+                    className="text-[13px] font-medium text-panel-mut"
+                    title={`Integrated loudness needs ${INTEGRATED_WINDOW_S} s of programme; ${Math.min(
+                      INTEGRATED_WINDOW_S,
+                      Math.floor(s.measureMs / 1000),
+                    )} s measured`}
+                  >
+                    Measuring{" "}
+                    <span className="text-readout text-white">
+                      {Math.min(
+                        INTEGRATED_WINDOW_S,
+                        Math.floor(s.measureMs / 1000),
+                      )}
+                      s
+                    </span>{" "}
+                    / {INTEGRATED_WINDOW_S} s
                   </span>
                 ) : (
                   <>

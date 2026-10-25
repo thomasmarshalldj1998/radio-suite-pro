@@ -28,7 +28,9 @@ export type AlarmKind =
   /** MPX-over-IP link degraded (loss, jitter, single link) */
   | "link"
   /** audio thread starved — the graph fell behind real time */
-  | "glitch";
+  | "glitch"
+  /** chain running but programme is not reaching a speaker or a mount */
+  | "output";
 
 /** Severity used when an alarm is written to the durable history. */
 export const ALARM_SEVERITY: Record<AlarmKind, "critical" | "warning" | "info"> = {
@@ -43,6 +45,7 @@ export const ALARM_SEVERITY: Record<AlarmKind, "critical" | "warning" | "info"> 
   rds: "warning",
   link: "warning",
   glitch: "critical",
+  output: "critical",
 };
 
 export interface AlarmEvent {
@@ -65,6 +68,7 @@ const COOLDOWN_MS: Record<AlarmKind, number> = {
   rds: 120_000,
   link: 30_000,
   glitch: 60_000,
+  output: 60_000,
 };
 
 const MAX_EVENTS = 50;
@@ -83,6 +87,7 @@ const lastFired: Record<AlarmKind, number> = {
   rds: 0,
   link: 0,
   glitch: 0,
+  output: 0,
 };
 
 const listeners = new Set<() => void>();

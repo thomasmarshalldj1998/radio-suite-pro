@@ -28,6 +28,50 @@ export const DEFAULT_GLITCH: GlitchConfig = {
   recoverMs: -1,
 };
 
+/**
+ * One clock-drift reading: how far the audio clock moved against wall time.
+ *
+ * The engine samples this from the meter pass, which is *not* a fixed-rate
+ * timer: it is a requestAnimationFrame loop that slows down when the page is
+ * busy and stops entirely in a background tab. Turning that into "ms of audio
+ * lost per second" therefore has to divide by the interval actually measured —
+ * a 1.5 s gap with 6 ms lost is 4 ms/s, not 6 — and has to refuse readings it
+ * cannot trust rather than reporting them as stalls.
+ */
+export interface DriftReading {
+  /** Wall time between the two samples (ms). */
+  intervalMs: number;
+  /** Audio clock advance over the same interval (ms). */
+  audioMs: number;
+  /** False when the context was not running at the sample point. */
+  running: boolean;
+}
+
+/** Below this the clock has not advanced enough to resolve a rate. */
+export const MIN_DRIFT_INTERVAL_MS = 600;
+/** Above this the sample covers a throttled/backgrounded page: reject it. */
+export const MAX_DRIFT_INTERVAL_MS = 2600;
+
+/**
+ * Convert a reading into ms of audio lost per second of wall time.
+ *
+ * Returns null when the reading cannot be trusted: a suspended context (the
+ * clock is not meant to advance), a gap too short to resolve, or a gap long
+ * enough to be a throttled tab rather than a starved render thread. The caller
+ * must treat null as "no new information" and re-baseline, never as "healthy"
+ * or "stalled" — that distinction is what stops a background tab from being
+ * reported as an audio underrun.
+ */
+export function driftPerSecond(reading: DriftReading): number | null {
+  const { intervalMs, audioMs, running } = reading;
+  if (!running) return null;
+  if (!Number.isFinite(intervalMs) || !Number.isFinite(audioMs)) return null;
+  if (intervalMs < MIN_DRIFT_INTERVAL_MS) return null;
+  if (intervalMs > MAX_DRIFT_INTERVAL_MS) return null;
+  const lostMs = audioMs - intervalMs;
+  return (lostMs / intervalMs) * 1000;
+}
+
 export interface GlitchEvent {
   type: "stall" | "recovered";
   at: number;

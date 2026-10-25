@@ -36,6 +36,11 @@ import {
 import { getEngine } from "@/lib/audio/engine";
 import { getFm, stopFm, syncFm } from "@/lib/audio/fm";
 import { getOutputs, isConfigured } from "@/lib/audio/outputs";
+import {
+  IDLE_HEALTH,
+  type EngineHealth,
+  type EnginePhase,
+} from "@/lib/audio/health";
 import { evaluateLinkHealth } from "@/lib/audio/linkwatch";
 import { getLink } from "@/lib/audio/mpxlink-runtime";
 import {
@@ -129,19 +134,17 @@ const TABS: { id: TabId; label: string; icon: LucideIcon; hint: string }[] = [
 ];
 
 /**
- * Engine lifecycle — derived from the actual engine plus the start request
- * in flight. "starting" is the user's request; "running" only appears once
- * engine.powered confirms the graph is up. Degraded = running with measured
- * problems (clip, adaptive throttling, clock drift).
+ * Engine lifecycle — one model, from `lib/audio/health`. The header used to
+ * derive this from two different sources (a raw clock sample for the badge and
+ * the output meters for the live chip), which is how it could read
+ * "Degraded" and "Audio live" while nothing reached the speakers.
  */
-type EnginePhase = "offline" | "starting" | "running" | "degraded" | "error";
-
 const PHASE_META: Record<
   EnginePhase,
   { label: string; chip: string; led: string }
 > = {
-  offline: {
-    label: "Offline",
+  stopped: {
+    label: "Stopped",
     chip: "border border-rack-line text-rack-mut",
     led: "",
   },
@@ -150,8 +153,8 @@ const PHASE_META: Record<
     chip: "border border-meter-warn/50 bg-meter-warn/10 text-meter-warn",
     led: "led-warn animate-pulse-live",
   },
-  running: {
-    label: "Running",
+  live: {
+    label: "Live",
     chip: "border border-meter-ok/45 bg-meter-ok/12 text-meter-ok",
     led: "led-on",
   },
@@ -159,6 +162,16 @@ const PHASE_META: Record<
     label: "Degraded",
     chip: "border border-meter-warn/50 bg-meter-warn/12 text-meter-warn",
     led: "led-warn",
+  },
+  "no-input": {
+    label: "No input",
+    chip: "border border-meter-warn/50 bg-meter-warn/12 text-meter-warn",
+    led: "led-warn",
+  },
+  "no-output": {
+    label: "No output",
+    chip: "border border-meter-hot/50 bg-meter-hot/12 text-meter-hot",
+    led: "led-hot",
   },
   error: {
     label: "Error",
@@ -180,8 +193,8 @@ interface Hud {
   powered: boolean;
   onAir: boolean;
   alarm: boolean;
-  degraded: boolean;
-  audioLive: boolean;
+  /** The single engine status, measured — see lib/audio/health. */
+  health: EngineHealth;
   cpu: number | null;
   uptimeMs: number;
   clock: string;
@@ -193,14 +206,25 @@ const HUD_OFF: Hud = {
   powered: false,
   onAir: false,
   alarm: false,
-  degraded: false,
-  audioLive: false,
+  health: IDLE_HEALTH,
   cpu: null,
   uptimeMs: 0,
   clock: "",
   sourceLabel: "Signal generator",
   destLabel: "No output",
 };
+
+/** LED class for a phase — one mapping for the badge, chip and rail. */
+const phaseLed = (phase: EnginePhase) =>
+  phase === "live"
+    ? "led-on"
+    : phase === "degraded" || phase === "no-input"
+      ? "led-warn"
+      : phase === "starting"
+        ? "led-warn animate-pulse-live"
+        : phase === "no-output" || phase === "error"
+          ? "led-hot"
+          : "";
 
 function PhaseBadge({ phase }: { phase: EnginePhase }) {
   const meta = PHASE_META[phase];
@@ -339,6 +363,11 @@ export default function Dashboard() {
   const alarmCondRef = useRef({ driftSince: 0, corrSince: 0, rdsStall: 0 });
   /** Epoch ms of the last clock-stall alarm already reported. */
   const glitchAtRef = useRef(0);
+  /** Current status phase and when it began — route alarms fire once. */
+  const statusRef = useRef<{ phase: EnginePhase; since: number }>({
+    phase: "stopped",
+    since: 0,
+  });
   const paramsRef = useRef(params);
   const openAlarmsRef = useRef(0);
   useEffect(() => {
@@ -448,7 +477,11 @@ export default function Dashboard() {
           fireAlarm(
             "glitch",
             "Audio thread starved",
-            `The graph lost ${Math.abs(snap.perf.driftMs).toFixed(1)} ms of audio per second — the render thread missed its deadline (${snap.perf.stalls} episode${snap.perf.stalls === 1 ? "" : "s"} this session)`,
+            `The render thread missed its deadline: the audio clock fell ${Math.abs(
+              snap.perf.worstDriftMs || snap.perf.driftMs,
+            ).toFixed(1)} ms behind the wall clock per second (${snap.perf.stalls} episode${
+              snap.perf.stalls === 1 ? "" : "s"
+            } this session). Measured while the context was running, so this is a real underrun, not a suspended device.`,
           );
         }
 
@@ -602,20 +635,44 @@ export default function Dashboard() {
           ? `TX ${cfgIdx + 1} ready`
           : "No output configured";
 
+      // ── one status, from measured facts ──
+      // Delivery is passed in because the output matrix lives outside the
+      // engine: an unconfigured stream is reported as "local monitoring only",
+      // never as a processor fault (which is how "NO OUTPUT" used to appear on
+      // a console whose speakers were working).
+      const health = engine.health({
+        onAir: rt.onAir,
+        configured: cfgIdx >= 0,
+      });
+
+      // ── status transitions, reported once each ──
+      // A route fault that persists for six seconds is worth an alarm; the
+      // flicker of one HUD tick is not. The phase has to change first, so a
+      // sticky condition cannot re-fire on the cooldown.
+      const status = statusRef.current;
+      const nowMs = Date.now();
+      if (status.phase !== health.phase) {
+        statusRef.current = { phase: health.phase, since: nowMs };
+      } else if (
+        nowMs - status.since > 6000 &&
+        (health.phase === "no-output" || health.phase === "no-input")
+      ) {
+        fireAlarm(
+          health.phase === "no-output" ? "output" : "silence",
+          health.phase === "no-output"
+            ? "Programme not reaching the output"
+            : "No input signal detected",
+          health.summary,
+        );
+      }
+
       setHud({
         powered,
         onAir: rt.onAir,
         alarm:
           fo.active ||
           (rt.onAir && (snap.clipOut || snap.truePeak > p.limiter.ceilingDb + 0.1)),
-        degraded:
-          powered &&
-          (snap.perf.throttled ||
-            snap.perf.driftMs < -4 ||
-            snap.clipOut ||
-            snap.truePeak > p.limiter.ceilingDb + 0.2),
-        audioLive:
-          powered && Math.max(snap.outPeakL, snap.outPeakR) > -60,
+        health,
         cpu: powered
           ? Math.min(100, Math.round((snap.perf.frameMs / 16.7) * 100))
           : null,
@@ -669,10 +726,8 @@ export default function Dashboard() {
     : engineError && !engine.powered
       ? "error"
       : engine.powered
-        ? hud.degraded
-          ? "degraded"
-          : "running"
-        : "offline";
+        ? hud.health.phase
+        : "stopped";
 
   const logSession = useCallback(
     (title: string, detail: string) => {
@@ -894,29 +949,27 @@ export default function Dashboard() {
               <span
                 className={cn(
                   "flex items-center gap-1.5 rounded border px-2 py-1.5 text-[9px] font-bold tracking-[0.16em] uppercase",
-                  hud.audioLive
-                    ? "border-meter-ok/45 bg-meter-ok/10 text-meter-ok"
-                    : "border-border/70 text-panel-mut",
-                  hud.alarm && "border-meter-hot/50 bg-meter-hot/10 text-meter-hot",
+                  hud.alarm || hud.health.phase === "no-output"
+                    ? "border-meter-hot/50 bg-meter-hot/10 text-meter-hot"
+                    : hud.health.phase === "live"
+                      ? "border-meter-ok/45 bg-meter-ok/10 text-meter-ok"
+                      : "border-meter-warn/50 bg-meter-warn/10 text-meter-warn",
                 )}
-                title={
-                  hud.audioLive
-                    ? "Live audio is flowing through the chain"
-                    : "Engine running — no signal on the output"
-                }
+                title={hud.health.summary}
+                aria-live="polite"
               >
                 <span
                   className={cn(
                     "led size-1.5",
-                    hud.audioLive && "led-on animate-pulse-live",
-                    hud.alarm && "led-hot",
+                    hud.alarm ? "led-hot" : phaseLed(hud.health.phase),
+                    hud.health.phase === "live" && "animate-pulse-live",
                   )}
                   aria-hidden
                 />
-                {hud.alarm && (
+                {(hud.alarm || hud.health.phase === "no-output") && (
                   <TriangleAlert className="size-3.5" aria-hidden />
                 )}
-                {hud.alarm ? "Over limit" : hud.audioLive ? "Audio live" : "Running"}
+                {hud.alarm ? "Over limit" : hud.health.label}
                 <span className="hidden text-readout font-medium sm:inline">
                   {formatHms(hud.uptimeMs)}
                 </span>
@@ -986,9 +1039,12 @@ export default function Dashboard() {
 
             {/* CPU · uptime · system — one grouped cluster, values over labels */}
             <span className="hidden items-center gap-4 rounded-lg border border-rack-line bg-white/[0.02] px-3 py-1.5 lg:flex">
-              <span className="hidden flex-col gap-1 xl:flex">
+              <span
+                className="hidden flex-col gap-1 xl:flex"
+                title="Meter pass — main-thread cost of one measurement tick, as a share of a 60 Hz frame. It is not the render thread's load, and it never degrades the engine."
+              >
                 <span className="text-[8px] leading-none font-semibold tracking-[0.16em] text-rack-mut uppercase">
-                  CPU
+                  Meter
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="block h-1.5 w-12 overflow-hidden rounded-full bg-input">
@@ -1058,17 +1114,7 @@ export default function Dashboard() {
           items={TABS}
           onSelect={setTab}
           phaseLabel={PHASE_META[phase].label}
-          phaseLed={
-            phase === "running"
-              ? "led-on"
-              : phase === "degraded"
-                ? "led-warn"
-                : phase === "starting"
-                  ? "led-warn animate-pulse-live"
-                  : phase === "error"
-                    ? "led-hot"
-                    : ""
-          }
+          phaseLed={phaseLed(phase)}
           activePreset={activePreset}
           dirty={dirty}
           error={phase === "error" ? (engineError ?? "Engine failed to start") : null}

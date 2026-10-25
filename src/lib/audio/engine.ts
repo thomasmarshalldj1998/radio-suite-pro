@@ -36,7 +36,12 @@
  *     unchanged chain schedules no automation at all.
  */
 
-import { GlitchMonitor } from "./glitch";
+import { GlitchMonitor, driftPerSecond } from "./glitch";
+import {
+  deriveEngineHealth,
+  type EngineHealth,
+  type HealthFacts,
+} from "./health";
 import type { ProcessorParams } from "./params";
 import {
   DEFAULT_CLIPPER,
@@ -171,15 +176,26 @@ export interface MeterSnapshot {
   compliance: ComplianceState;
   /** True-peak oversampling factor in use (2 / 4 / 8). */
   truePeakX: number;
-  /** latency & main-thread health */
+  /** latency & render-thread health */
   perf: {
     baseLatencyMs: number;
     outputLatencyMs: number;
+    /** Cost of the main-thread measurement pass (not the render thread). */
     frameMs: number;
+    /** ms of audio lost per second of wall time (negative = starved). */
     driftMs: number;
+    /** False while a drift reading has been rejected as untrustworthy. */
+    driftValid: boolean;
+    /** Wall interval the last accepted drift reading covered (ms). */
+    intervalMs: number;
+    /** The meter pass slowed itself down. Never a render-thread fault. */
     throttled: boolean;
     /** Starved render-thread episodes this session. */
     stalls: number;
+    /** The clock monitor is inside a stall episode right now. */
+    stalled: boolean;
+    /** Worst accepted drift this session, ms of audio lost per second. */
+    worstDriftMs: number;
     /** Epoch ms of the last stall report (0 = never). */
     glitchAt: number;
   };
@@ -227,8 +243,12 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
     outputLatencyMs: 0,
     frameMs: 0,
     driftMs: 0,
+    driftValid: false,
+    intervalMs: 0,
     throttled: false,
     stalls: 0,
+    stalled: false,
+    worstDriftMs: 0,
     glitchAt: 0,
   },
   clipIn: false,
@@ -438,6 +458,33 @@ export class AudioEngine {
   // latency / stability telemetry
   lowLatency = false;
   private glitch = new GlitchMonitor();
+  /** True only when the last clock reading was a trustworthy rate. */
+  private driftValid = false;
+  private driftIntervalMs = 0;
+  /** Wall time of the last programme / processed-signal reading above the floor. */
+  private lastProgramAt = 0;
+  private lastOutAt = 0;
+  private poweredAt = 0;
+  /** Has this context clocked at least one quantum since power-on? */
+  private everClocked = false;
+  /**
+   * Result of the last sink switch, for the diagnostics panel. "refused" is a
+   * device that went away; "unsupported" is a browser without setSinkId —
+   * different faults with the same symptom, so they are stored apart.
+   */
+  private sinkState:
+    | "default"
+    | "applied"
+    | "refused"
+    | "unsupported"
+    | "pending" = "default";
+  /** Last fault the browser reported, with the moment it was raised. */
+  private lastFault: { message: string; at: number } | null = null;
+  /** One recovery in flight, so the button cannot stack resume/switch calls. */
+  private recoveryArm: Promise<boolean> | null = null;
+  /** Identity of the in-flight recovery, so a stale one cannot clear a new one. */
+  private recoveryToken: object | null = null;
+  private lastRecoveryAt = 0;
   /** Invalidates a pending power-off fade when the engine is re-powered. */
   private fadeToken = 0;
   /** Invalidates a pending source switch when another one is requested. */
@@ -734,6 +781,16 @@ export class AudioEngine {
     // banner can offer the gesture — but nothing is faded in until the
     // endpoint is actually clocking. `onstatechange` reopens it later.
     this.powered = true;
+    this.poweredAt = Date.now();
+    // A fresh power cycle is a fresh clock: every drift reference and every
+    // "time since signal" counter belongs to the previous context.
+    this.everClocked = false;
+    this.driftValid = false;
+    this.driftIntervalMs = 0;
+    this.clockRefWall = 0;
+    this.clockRefCtx = 0;
+    this.lastProgramAt = 0;
+    this.lastOutAt = 0;
     this.snapshotValue = { ...this.snapshotValue, powered: true };
     await this.resumeAndWait(ctx);
     // A power-off mid-fade leaves the program bus at zero. Restore it before
@@ -774,10 +831,23 @@ export class AudioEngine {
   private async resumeAndWait(ctx: AudioContext): Promise<boolean> {
     try {
       await ctx.resume();
-    } catch {
-      /* autoplay policy — the wake banner offers the gesture */
+    } catch (err) {
+      // autoplay policy — the wake banner offers the gesture, and the reason
+      // belongs in the diagnostics panel rather than only in the console.
+      this.noteFault(
+        err instanceof Error && err.message
+          ? `Audio device refused to start: ${err.message}`
+          : "Audio device refused to start — the browser is waiting for a click.",
+      );
     }
     this.contextRunning = await waitForRunning(ctx);
+    if (this.contextRunning) {
+      this.everClocked = true;
+    } else {
+      this.noteFault(
+        "The audio context did not reach the running state — the browser is holding the device shut.",
+      );
+    }
     return this.contextRunning;
   }
 
@@ -803,6 +873,11 @@ export class AudioEngine {
     this.deviceToken += 1;
     this.cancelMeterLoop();
     this.powered = false;
+    this.poweredAt = 0;
+    this.everClocked = false;
+    this.driftValid = false;
+    this.clockRefWall = 0;
+    this.clockRefCtx = 0;
     this.loudnessWindow.clear();
     this.snapshotValue = { ...SILENT_SNAPSHOT };
     this.notify();
@@ -957,6 +1032,7 @@ export class AudioEngine {
       }
       if (ctx.state === "running" && !this.contextRunning) {
         this.contextRunning = true;
+        this.everClocked = true;
         this.openOutput();
         this.ensureBusOpen();
       }
@@ -2978,7 +3054,11 @@ export class AudioEngine {
     const ctx = this.ctx as (AudioContext & {
       setSinkId?: (sinkId: string) => Promise<void>;
     }) | null;
-    if (!ctx || typeof ctx.setSinkId !== "function") return;
+    if (!ctx) return;
+    if (typeof ctx.setSinkId !== "function") {
+      this.sinkState = "unsupported";
+      return;
+    }
     const wanted = this.outputDeviceId;
     // Boot hands both of these an empty sink: the context already renders to
     // the OS default, so there is nothing to switch and the monitor must not
@@ -3008,6 +3088,7 @@ export class AudioEngine {
         // is let back through.
         await waitMs(ENDPOINT_SETTLE_MS);
         this.appliedSink = wanted;
+        this.sinkState = wanted ? "applied" : "default";
         return;
       }
       if (switched === "pending") {
@@ -3015,6 +3096,7 @@ export class AudioEngine {
         // as it was, so the next device event retries it — but the monitor
         // is let back through now rather than waiting on a promise that may
         // never answer.
+        this.sinkState = "pending";
         return;
       }
       // The device vanished between enumeration and the switch. Drop back to
@@ -3025,6 +3107,10 @@ export class AudioEngine {
       if (!wanted || ctx.state === "closed") return;
       if (ctx.state !== "running") return;
       if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
+      this.sinkState = "refused";
+      this.noteFault(
+        `The output “${this.monitorState.sinkLabel}” refused to open — falling back to the system default.`,
+      );
       this.outputDeviceId = "";
       this.saveDevicePrefs();
       if ((await this.switchSink(ctx, "")) === "ok") this.appliedSink = "";
@@ -3150,6 +3236,7 @@ export class AudioEngine {
     this.inAnalyserR.getFloatTimeDomainData(this.inBufR);
     this.inPeakL = peakDb(this.inBufL);
     this.inPeakR = peakDb(this.inBufR);
+    if (Math.max(this.inPeakL, this.inPeakR) > -70) this.lastProgramAt = now;
     if (Math.max(this.inPeakL, this.inPeakR) > -0.2) this.clipInUntil = now + CLIP_HOLD_MS;
 
     // raw programme level, measured ahead of the gate — the value the
@@ -3157,6 +3244,7 @@ export class AudioEngine {
     this.gateAnalyser.getFloatTimeDomainData(this.gateBuf);
     const srcLevelDb = peakDb(this.gateBuf);
     this.srcLevelDb = srcLevelDb;
+    if (srcLevelDb > -70) this.lastProgramAt = now;
 
     const advGate = this.params?.advanced?.leveling.gate;
     const gate = this.params?.gate;
@@ -3316,18 +3404,35 @@ export class AudioEngine {
       : { id: "spotify" as const, label: "Spotify", lufs: -14, truePeakDb: -1 };
     const tpFactor = this.params?.limiter.truePeakX ?? 4;
 
-    // audio-clock health: ctx.currentTime vs wall time — sustained negative
-    // drift means the audio thread missed deadlines (glitches / bufferbloat)
-    if (this.clockRefWall === 0) {
+    // ── audio-clock health: ctx.currentTime against wall time ──
+    // Sustained negative drift means the render thread missed deadlines. Two
+    // gates keep the number honest, because this sampler rides the meter pass
+    // (a rAF loop) rather than a fixed-rate timer:
+    //   · the interval jitters and stops entirely in a background tab, so the
+    //     reading is normalised per second of wall time and rejected when the
+    //     gap is not a plausible window;
+    //   · a suspended context is *supposed* to stop its clock, so a sample
+    //     taken across a suspend is not an underrun — it is re-baselined.
+    if (this.clockRefWall === 0 || ctx.state !== "running") {
       this.clockRefWall = now;
       this.clockRefCtx = ctx.currentTime;
-    } else if (now - this.clockRefWall >= 1000) {
-      const drift =
-        (ctx.currentTime - this.clockRefCtx - (now - this.clockRefWall) / 1000) * 1000;
-      this.driftMs = this.driftMs === 0 ? drift : this.driftMs * 0.7 + drift * 0.3;
-      this.glitch.update(this.driftMs, now);
+      this.driftValid = false;
+      this.driftIntervalMs = 0;
+    } else if (now - this.clockRefWall >= 900) {
+      const intervalMs = now - this.clockRefWall;
+      const drift = driftPerSecond({
+        intervalMs,
+        audioMs: (ctx.currentTime - this.clockRefCtx) * 1000,
+        running: ctx.state === "running",
+      });
       this.clockRefWall = now;
       this.clockRefCtx = ctx.currentTime;
+      this.driftIntervalMs = intervalMs;
+      this.driftValid = drift !== null;
+      if (drift !== null) {
+        this.driftMs = drift;
+        this.glitch.update(drift, now);
+      }
     }
 
     // output peaks + correlation
@@ -3335,6 +3440,7 @@ export class AudioEngine {
     this.outAnalyserR.getFloatTimeDomainData(this.outBufR);
     const outPeakL = peakDb(this.outBufL);
     const outPeakR = peakDb(this.outBufR);
+    if (Math.max(outPeakL, outPeakR) > -70) this.lastOutAt = now;
     const correlation = correlationOf(this.outBufL, this.outBufR);
     // 1 Hz correlation history for the phase meter.
     if (now - this.lastCorrAt >= 1000) {
@@ -3381,15 +3487,24 @@ export class AudioEngine {
     const windowLufs = (winMs: number) => this.loudnessWindow.loudness(winMs, now);
 
     // ── integrated loudness + LRA measurement (real, gated per spec) ──
-    if (this.lastMeasureT > 0) this.measureMsAcc += now - this.lastMeasureT;
+    // Only time the device actually rendered counts as measurement time: a
+    // suspended context (or a background tab whose rAF loop stopped) was not
+    // measuring programme, and counting it made "20 s of programme" arrive
+    // after twenty seconds of silence.
+    if (this.lastMeasureT > 0 && ctx.state === "running") {
+      this.measureMsAcc += Math.min(250, now - this.lastMeasureT);
+    }
     this.lastMeasureT = now;
-    if (now - this.lastIBlockAt >= 100) {
+    // Only a context that is actually rendering contributes blocks. A
+    // suspended analyser repeats its last buffer, so pushing while asleep
+    // would stuff the gated measurement with duplicates of one frozen window.
+    if (ctx.state === "running" && now - this.lastIBlockAt >= 100) {
       this.lastIBlockAt = now;
       this.iBlocks.push(windowPower(400));
       if (this.iBlocks.length > 90_000) this.iBlocks.shift();
       this.lufsIValue = gatedIntegrated(this.iBlocks, this.measureMsAcc);
     }
-    if (now - this.lastStBlockAt >= 1000) {
+    if (ctx.state === "running" && now - this.lastStBlockAt >= 1000) {
       this.lastStBlockAt = now;
       this.stBlocks.push(windowPower(3000));
       if (this.stBlocks.length > 12_000) this.stBlocks.shift();
@@ -3537,8 +3652,12 @@ export class AudioEngine {
         outputLatencyMs: (ctx.outputLatency ?? 0) * 1000,
         frameMs: this.frameCostMs,
         driftMs: this.driftMs,
+        driftValid: this.driftValid,
+        intervalMs: this.driftIntervalMs,
         throttled: this.heavyIntervalMs > HEAVY_BASE_MS,
         stalls: this.glitch.stalls,
+        stalled: this.glitch.stalled,
+        worstDriftMs: this.glitch.worstDriftMs,
         glitchAt: this.glitch.lastStallAt,
       },
       clipIn: now < this.clipInUntil,
@@ -3687,6 +3806,166 @@ export class AudioEngine {
 
   snapshot(): MeterSnapshot {
     return this.snapshotValue;
+  }
+
+  /**
+   * Measured facts for the console's status model.
+   *
+   * Nothing here is a parameter: each field comes from a node the graph is
+   * really running, from the audio clock, or from the fault log. Delivery is
+   * supplied by the caller because the output matrix lives outside the engine.
+   */
+  healthFacts(
+    stream: { onAir: boolean; configured: boolean } = {
+      onAir: false,
+      configured: false,
+    },
+  ): HealthFacts {
+    const now = performance.now();
+    const snap = this.snapshotValue;
+    return {
+      powered: this.powered,
+      starting: false,
+      bootError: null,
+      uptimeMs: this.poweredAt ? Date.now() - this.poweredAt : 0,
+      contextState: this.ctx?.state ?? "none",
+      everClocked: this.everClocked,
+      programmeDb: Math.max(snap.inPeakL, snap.inPeakR),
+      outPeakDb: Math.max(snap.outPeakL, snap.outPeakR),
+      silentForMs: this.lastProgramAt ? now - this.lastProgramAt : Infinity,
+      outSilentForMs: this.lastOutAt ? now - this.lastOutAt : Infinity,
+      monitorMuted: this.monitorMuted,
+      monitorDb: this.monitorGainDb,
+      sinkRefused: this.sinkState === "refused",
+      sinkVirtual: this.monitorIsVirtual,
+      sinkLabel: this.monitorState.sinkLabel,
+      stalls: this.glitch.stalls,
+      stalledNow: this.glitch.stalled,
+      lastStallAgoMs: this.glitch.lastStallAt
+        ? now - this.glitch.lastStallAt
+        : Infinity,
+      clipOut: now < this.clipOutUntil,
+      loudnessMeasuring: this.lufsIValue === null,
+      measureMs: this.measureMsAcc,
+      streamOnAir: stream.onAir,
+      streamConfigured: stream.configured,
+    };
+  }
+
+  /** The one status the console shows, derived from those facts. */
+  health(stream?: { onAir: boolean; configured: boolean }): EngineHealth {
+    return deriveEngineHealth(this.healthFacts(stream));
+  }
+
+  /**
+   * Route facts for the diagnostics panel: context, rate, latency in frames,
+   * the sink outcome and the last browser fault. `baseFrames` is derived from
+   * the measured `baseLatency`, so it describes the device rather than a wish.
+   */
+  get diagnostics(): {
+    contextState: string;
+    sampleRate: number;
+    channels: number;
+    baseLatencyMs: number;
+    outputLatencyMs: number;
+    baseFrames: number;
+    sinkState: string;
+    sinkLabel: string;
+    monitorDb: number;
+    monitorMuted: boolean;
+    outputOpen: boolean;
+    workletLimiter: boolean;
+    lastFault: { message: string; at: number } | null;
+  } {
+    const ctx = this.ctx;
+    return {
+      contextState: ctx?.state ?? "none",
+      sampleRate: ctx?.sampleRate ?? 0,
+      channels: this.sourceBus?.channelCount ?? 0,
+      baseLatencyMs: (ctx?.baseLatency ?? 0) * 1000,
+      outputLatencyMs: (ctx?.outputLatency ?? 0) * 1000,
+      baseFrames: Math.round((ctx?.baseLatency ?? 0) * (ctx?.sampleRate ?? 0)),
+      sinkState: this.sinkState,
+      sinkLabel: this.monitorState.sinkLabel,
+      monitorDb: this.monitorGainDb,
+      monitorMuted: this.monitorMuted,
+      outputOpen: this.outputOpen,
+      workletLimiter: this.workletLimiter !== null,
+      lastFault: this.lastFault,
+    };
+  }
+
+  /** Monitor bus gain as the node holds it (dB, −Infinity when shut). */
+  private get monitorGainDb(): number {
+    const g = this.monitorGain?.gain.value;
+    return typeof g === "number" && g > 0
+      ? 20 * Math.log10(Math.min(1e3, g))
+      : -Infinity;
+  }
+
+  /** Record a browser-reported fault for the diagnostics panel (throttled). */
+  private noteFault(message: string) {
+    const at = Date.now();
+    if (this.lastFault?.message === message && at - this.lastFault.at < 5000) return;
+    this.lastFault = { message, at };
+  }
+
+  /**
+   * Safe recovery: resume the context, reopen the output path and rebuild the
+   * monitor level — without reloading the page or tearing down the graph.
+   *
+   * Deliberately not a restart: a restart loses the source and the transport.
+   * One attempt is shared by every caller and no second attempt is allowed
+   * for three seconds, so a device that keeps refusing cannot be hammered by
+   * a UI that keeps asking. Returns whether the context is clocking after it.
+   */
+  async recover(): Promise<boolean> {
+    if (this.recoveryArm) return this.recoveryArm;
+    if (Date.now() - this.lastRecoveryAt < 3000) return this.contextRunning;
+    const token = {};
+    const arm = (async (): Promise<boolean> => {
+      this.lastRecoveryAt = Date.now();
+      try {
+        // No graph at all: a normal boot is the only recovery there is.
+        if (!this.powered || !this.ctx || !this.graphReady) {
+          await this.powerOn();
+          return this.powered && this.contextRunning;
+        }
+        const ctx = this.ctx;
+        if (ctx.state !== "running") await this.resumeAndWait(ctx);
+        if (!this.contextRunning) {
+          this.noteFault(
+            "The browser would not start the audio device — it needs a click or tap first.",
+          );
+          this.notify();
+          return false;
+        }
+        // Re-open from silence rather than at whatever level the bus was left
+        // at, then rebuild the monitor level from the live parameters.
+        this.outputOpen = false;
+        this.openOutput();
+        this.ensureBusOpen();
+        this.applyMonitorGain();
+        await this.applyOutputDevice();
+        this.startMeterLoop();
+        this.notify();
+        return true;
+      } catch (err) {
+        this.noteFault(
+          err instanceof Error ? err.message : "The audio device could not be recovered.",
+        );
+        this.notify();
+        return false;
+      }
+    })().finally(() => {
+      if (this.recoveryToken === token) {
+        this.recoveryArm = null;
+        this.recoveryToken = null;
+      }
+    });
+    this.recoveryArm = arm;
+    this.recoveryToken = token;
+    return arm;
   }
 
   /**

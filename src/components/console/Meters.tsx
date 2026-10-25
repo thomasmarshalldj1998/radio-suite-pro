@@ -105,7 +105,13 @@ export function SegmentBar({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
 
-      const value = Math.min(maxDb, Math.max(minDb, getRef.current()));
+      // A measurement that is not finite (no analyser yet, a divide by zero)
+      // reads as the bottom of the scale: silence, never a lit bar or NaN
+      // geometry.
+      const raw = getRef.current();
+      const value = Number.isFinite(raw)
+        ? Math.min(maxDb, Math.max(minDb, raw))
+        : minDb;
       const t = (value - minDb) / (maxDb - minDb);
       if (value >= peakRef.current) {
         peakRef.current = value;

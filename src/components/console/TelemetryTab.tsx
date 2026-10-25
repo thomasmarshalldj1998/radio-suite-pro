@@ -1,5 +1,6 @@
 import { BackendPanel } from "@/components/console/BackendPanel";
 import { CompliancePanel } from "@/components/console/CompliancePanel";
+import { DiagnosticsPanel } from "@/components/console/DiagnosticsPanel";
 import { LogPanel } from "@/components/console/LogPanel";
 import { EngineChain } from "@/components/console/EngineChain";
 import { LoudnessHistory } from "@/components/console/LoudnessHistory";
@@ -163,6 +164,10 @@ const ALARM_STYLE: Record<AlarmKind, { led: string; chip: string }> = {
   },
   glitch: {
     led: "led-hot",
+    chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
+  },
+  output: {
+    led: "led-hot animate-pulse-live",
     chip: "border-meter-hot/40 bg-meter-hot/10 text-meter-hot",
   },
 };
@@ -370,6 +375,9 @@ export function TelemetryTab({
       >
         <EngineChain />
       </ModuleCard>
+
+      {/* ── one status model + recovery ── */}
+      <DiagnosticsPanel />
 
       {/* ── native codec bridge (Python, optional) ── */}
       <BackendPanel />
@@ -655,9 +663,12 @@ export function TelemetryTab({
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2">
-          <div className="panel-well rounded px-2.5 py-2">
+          <div
+            className="panel-well rounded px-2.5 py-2"
+            title="Main-thread cost of the measurement pass as a share of a 60 Hz frame — not processor CPU and not render-thread load"
+          >
             <p className="text-[8px] font-semibold tracking-[0.12em] text-panel-mut uppercase">
-              CPU
+              Meter load
             </p>
             <p className="text-readout mt-0.5 text-[15px] font-medium text-white">
               {cpu === null ? "―" : `${cpu}`}
@@ -725,15 +736,20 @@ export function TelemetryTab({
             },
             {
               label: "Clock drift",
-              value: powered
-                ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(2)} ms/s`
-                : "—",
-              sub: "negative = glitches",
+              value: !powered
+                ? "—"
+                : snap?.perf.driftValid
+                  ? `${(snap?.perf.driftMs ?? 0) >= 0 ? "+" : "−"}${Math.abs(snap?.perf.driftMs ?? 0).toFixed(2)} ms/s`
+                  : "no reading",
+              sub: snap?.perf.driftValid
+                ? "negative = audio lost"
+                : "suspended or throttled",
             },
             {
               label: "Clock stalls",
               value: powered ? `${snap?.perf.stalls ?? 0}` : "—",
-              sub: "render underruns",
+              sub: snap?.perf.stalled ? "underrun now" : "render underruns",
+              tone: snap?.perf.stalled ? "hot" : undefined,
             },
             {
               label: "Guard profile",
@@ -741,9 +757,9 @@ export function TelemetryTab({
               sub: "oversampling",
             },
             {
-              label: "Meter loop",
-              value: snap?.perf.throttled ? "adaptive · ½ rate" : "adaptive · full",
-              sub: "self-tuning",
+              label: "Meter pass",
+              value: snap?.perf.throttled ? "throttled" : "full rate",
+              sub: "main thread only",
             },
             {
               label: "Clipping",
@@ -775,18 +791,25 @@ export function TelemetryTab({
               tone: !powered ? undefined : corr < 0 ? "hot" : corr < 0.5 ? "warn" : "ok",
             },
             {
+              // Delivery only: an encoding output that was never configured is
+              // not a processor fault. Calling it "NO OUTPUT" made a console
+              // with working speakers read as a dead chain.
               label: "Stream",
-              value: !rt.onAir
-                ? slots.some((s) => s.server || s.name)
+              value: rt.onAir
+                ? `${rt.stats.kbps.toFixed(1)} kbps`
+                : slots.some((s) => s.server || s.name)
                   ? "READY"
-                  : "NO OUTPUT"
-                : `${rt.stats.kbps.toFixed(1)} kbps`,
-              sub: rt.onAir ? "on air" : "encoder state",
+                  : "NOT SET",
+              sub: rt.onAir
+                ? "on air"
+                : slots.some((s) => s.server || s.name)
+                  ? "encoder idle"
+                  : "monitor only",
               tone: rt.onAir
                 ? "ok"
                 : slots.some((s) => s.server || s.name)
                   ? "warn"
-                  : "hot",
+                  : undefined,
             },
           ].map((s) => (
             <div key={s.label} className="panel-well rounded-md px-2.5 py-2">
