@@ -390,7 +390,7 @@ before.
 
 ```bash
 bun install              # installs electron + electron-builder (dev deps)
-bun run desktop:icon     # regenerates build/icon.png from the logo geometry
+bun run desktop:icon     # rebuilds build/icon.png + NSIS art from the brand mark
 
 bun run desktop:build:linux   # AppImage + .deb   → release/
 bun run desktop:build:win     # NSIS installer    → release/  (run on Windows)

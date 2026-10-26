@@ -1,10 +1,13 @@
 /**
- * Rasterize the Signalpath logo to build/icon.png (512×512) with zero
- * dependencies — pure Node: signed-distance-field drawing at 4× scale,
- * box-filtered down, encoded as RGBA PNG via zlib.
+ * Rasterize the Signalpath brand mark to build/icon.png (512×512) with zero
+ * dependencies — pure Node: 4× supersampled rendering, box-filtered down,
+ * RGBA PNG via zlib.
  *
- * Geometry mirrors public/logo.svg: dark rounded square, five capsule
- * meter bars, the centre bar in signal orange.
+ * Geometry and colour stops mirror public/logo.svg exactly: deep navy
+ * rounded square, cyan top glow, five capsule meter bars (centre bar in the
+ * cyan signal gradient), hairline rim and a white specular line. Pixels
+ * outside the rounded square are transparent, so macOS/Windows masks and
+ * Linux launchers composite the mark cleanly.
  *
  *   node scripts/make-icon.mjs
  */
@@ -16,69 +19,129 @@ const SIZE = 512;
 const SS = 4; // supersampling factor
 const N = SIZE * SS;
 
-/** Background rounded-square. */
-const BG = { r: 0x17, g: 0x1b, b: 0x28 };
-const BG_RADIUS = 104;
-
-/** Capsule meter bars: [x, y, w, h, r, fill, alpha] in SVG coordinates. */
-const BARS = [
-  [123, 216, 34, 80, 17, [255, 255, 255], 0.5],
-  [181, 166, 34, 180, 17, [255, 255, 255], 0.85],
-  [239, 96, 34, 320, 17, [0xef, 0x5b, 0x2b], 1.0],
-  [297, 166, 34, 180, 17, [255, 255, 255], 0.85],
-  [355, 216, 34, 80, 17, [255, 255, 255], 0.5],
+/** Background gradient sampled from logo.svg: #1B2231 → #111621 → #080B11. */
+const BG_STOPS = [
+  [0, [0x1b, 0x22, 0x31]],
+  [0.55, [0x11, 0x16, 0x21]],
+  [1, [0x08, 0x0b, 0x11]],
 ];
 
-/** Signed distance to a rounded rectangle centred at (cx, cy). */
-function sdRoundRect(px, py, cx, cy, hw, hh, r) {
-  const dx = Math.abs(px - cx) - (hw - r);
-  const dy = Math.abs(py - cy) - (hh - r);
-  const ax = Math.max(dx, 0);
-  const ay = Math.max(dy, 0);
-  return Math.hypot(ax, ay) + Math.min(Math.max(dx, dy), 0) - r;
+/** Centre bar gradient: #9BF8FF → #00E0FF → #0087A8. */
+const CORE_STOPS = [
+  [0, [0x9b, 0xf8, 0xff]],
+  [0.42, [0x00, 0xe0, 0xff]],
+  [1, [0x00, 0x87, 0xa8]],
+];
+
+/** Capsule meter bars, in logo.svg coordinates. */
+const BARS = [
+  { x: 123, y: 217, w: 34, h: 78, color: [0xea, 0xf2, 0xff], alpha: 0.42 },
+  { x: 181, y: 167, w: 34, h: 178, color: [0xf4, 0xf8, 0xff], alpha: 0.78 },
+  { x: 239, y: 97, w: 34, h: 318, gradient: CORE_STOPS, alpha: 1 },
+  { x: 297, y: 167, w: 34, h: 178, color: [0xf4, 0xf8, 0xff], alpha: 0.78 },
+  { x: 355, y: 217, w: 34, h: 78, color: [0xea, 0xf2, 0xff], alpha: 0.42 },
+];
+
+/** The logo's specular highlight line. */
+const SPECULAR = { x: 243, y: 108, w: 3, h: 296, alpha: 0.28 };
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
 }
 
-// Accumulate coverage at supersampled resolution.
+/** Piecewise-linear multi-stop gradient. */
+function gradient(stops, t) {
+  const v = Math.min(1, Math.max(0, t));
+  for (let i = 1; i < stops.length; i++) {
+    const [p1, c1] = stops[i];
+    if (v <= p1) {
+      const [p0, c0] = stops[i - 1];
+      const k = p1 === p0 ? 0 : (v - p0) / (p1 - p0);
+      return [mix(c0[0], c1[0], k), mix(c0[1], c1[1], k), mix(c0[2], c1[2], k)];
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+/** Point inside a rounded rectangle of half-width hw / half-height hh. */
+function inRoundRect(px, py, cx, cy, hw, hh, r) {
+  const qx = Math.abs(px - cx) - (hw - r);
+  const qy = Math.abs(py - cy) - (hh - r);
+  const ax = Math.max(qx, 0);
+  const ay = Math.max(qy, 0);
+  return ax * ax + ay * ay <= r * r;
+}
+
+// Accumulate straight-alpha colour at supersampled resolution, plus coverage.
 const px = new Float64Array(N * N * 3);
+const cover = new Uint8Array(N * N);
 
 for (let y = 0; y < N; y++) {
   const sy = (y + 0.5) / SS;
+  const bg = gradient(BG_STOPS, sy / SIZE);
+
   for (let x = 0; x < N; x++) {
     const sx = (x + 0.5) / SS;
-    // 16× coverage of the background rounded square (0 or 1 per sample)
-    const bgDist = sdRoundRect(
-      sx,
-      sy,
-      256,
-      256,
-      256,
-      256,
-      BG_RADIUS,
-    );
-    if (bgDist > 0) continue; // transparent outside the icon shape
-    let r = BG.r;
-    let g = BG.g;
-    let b = BG.b;
-    for (const [bx, by, bw, bh, br, [fr, fg, fb], alpha] of BARS) {
-      const dist = sdRoundRect(
+
+    // Outside the rounded square → fully transparent (no colour).
+    if (!inRoundRect(sx, sy, 256, 256, 256, 256, 112)) continue;
+
+    let r = bg[0];
+    let g = bg[1];
+    let b = bg[2];
+
+    // Radial cyan glow: ellipse centred at (256, 132), fading to nothing.
+    const gx = (sx - 256) / 220;
+    const gy = (sy - 132) / 310;
+    const gd = Math.sqrt(gx * gx + gy * gy);
+    if (gd < 1) {
+      const a = 0.22 * (1 - gd);
+      r += (0x00 - r) * a;
+      g += (0xe0 - g) * a;
+      b += (0xff - b) * a;
+    }
+
+    // 1px hairline rim, white fading top → bottom.
+    if (!inRoundRect(sx, sy, 256, 256, 255, 255, 111)) {
+      const a = mix(0.16, 0.02, sy / SIZE);
+      r += (255 - r) * a;
+      g += (255 - g) * a;
+      b += (255 - b) * a;
+    }
+
+    // Capsule meter bars (centre bar uses the cyan signal gradient).
+    for (const bar of BARS) {
+      const bh = bar.h;
+      if (sy < bar.y - 1 || sy > bar.y + bh + 1) continue;
+      if (!inRoundRect(sx, sy, bar.x + bar.w / 2, bar.y + bh / 2, bar.w / 2, bh / 2, bar.w / 2)) continue;
+      const c = bar.gradient ? gradient(bar.gradient, (sy - bar.y) / bh) : bar.color;
+      r += (c[0] - r) * bar.alpha;
+      g += (c[1] - g) * bar.alpha;
+      b += (c[2] - b) * bar.alpha;
+    }
+
+    // Specular highlight line down the centre bar.
+    if (
+      inRoundRect(
         sx,
         sy,
-        bx + bw / 2,
-        by + bh / 2,
-        bw / 2,
-        bh / 2,
-        br,
-      );
-      if (dist <= 0) {
-        r = r + (fr - r) * alpha;
-        g = g + (fg - g) * alpha;
-        b = b + (fb - b) * alpha;
-      }
+        SPECULAR.x + SPECULAR.w / 2,
+        SPECULAR.y + SPECULAR.h / 2,
+        SPECULAR.w / 2,
+        SPECULAR.h / 2,
+        SPECULAR.w / 2,
+      )
+    ) {
+      r += (255 - r) * SPECULAR.alpha;
+      g += (255 - g) * SPECULAR.alpha;
+      b += (255 - b) * SPECULAR.alpha;
     }
-    const i = (y * N + x) * 3;
-    px[i] = r;
-    px[i + 1] = g;
-    px[i + 2] = b;
+
+    const i = y * N + x;
+    px[i * 3] = r;
+    px[i * 3 + 1] = g;
+    px[i * 3 + 2] = b;
+    cover[i] = 1;
   }
 }
 
@@ -91,20 +154,24 @@ for (let y = 0; y < SIZE; y++) {
     let r = 0;
     let g = 0;
     let b = 0;
+    let hits = 0;
     for (let sy = 0; sy < SS; sy++) {
       for (let sx = 0; sx < SS; sx++) {
-        const i = ((y * SS + sy) * N + x * SS + sx) * 3;
-        r += px[i];
-        g += px[i + 1];
-        b += px[i + 2];
+        const i = (y * SS + sy) * N + x * SS + sx;
+        if (!cover[i]) continue;
+        r += px[i * 3];
+        g += px[i * 3 + 1];
+        b += px[i * 3 + 2];
+        hits++;
       }
     }
-    const n = SS * SS;
     const o = rowStart + 1 + x * 4;
-    raw[o] = Math.round(r / n);
-    raw[o + 1] = Math.round(g / n);
-    raw[o + 2] = Math.round(b / n);
-    raw[o + 3] = 255;
+    if (hits > 0) {
+      raw[o] = Math.round(r / hits);
+      raw[o + 1] = Math.round(g / hits);
+      raw[o + 2] = Math.round(b / hits);
+      raw[o + 3] = Math.round((hits / (SS * SS)) * 255);
+    }
   }
 }
 
