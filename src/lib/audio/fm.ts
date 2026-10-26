@@ -99,9 +99,14 @@ export function syncFm(fm: FmParams, stream?: boolean): void {
       emit();
     };
     w.postMessage({ cmd: "init", inRate, fm, stream: streamRequested });
-    tapPending = attachPcmTap((l, r) => {
-      w.postMessage({ cmd: "chunk", channels: [l, r] }, [l.buffer, r.buffer]);
-    })
+    // The composite tap sits ahead of the Web/HD delivery trim, so moving the
+    // streaming output volume cannot change FM deviation.
+    tapPending = attachPcmTap(
+      (l, r) => {
+        w.postMessage({ cmd: "chunk", channels: [l, r] }, [l.buffer, r.buffer]);
+      },
+      engine.getFmTapNode(),
+    )
       .then(() => {
         snap = { ...snap, running: true };
         emit();
@@ -153,6 +158,20 @@ function onWorkerMessage(msg: MpxWorkerOut): void {
     snap = { ...snap, error: msg.message };
     emit();
   }
+}
+
+/**
+ * A sample-rate / quantum change rebuilds the graph, so the composite tap's
+ * node is gone. Re-attach the branch automatically instead of leaving the FM
+ * output silently generating nothing.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("signalpath:audio-rebuilt", () => {
+    const params = applied;
+    if (!params) return;
+    stopFm();
+    syncFm(params, streamRequested);
+  });
 }
 
 export function stopFm(): void {

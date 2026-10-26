@@ -68,7 +68,11 @@ export function pcmTapWorkletSource(): string {
  * Attach a silent PCM tap to the program bus. Returns a cleanup function.
  * Prefers an AudioWorklet; falls back to a ScriptProcessorNode.
  */
-export async function attachPcmTap(onBatch: TapCallback): Promise<() => void> {
+export async function attachPcmTap(
+  onBatch: TapCallback,
+  /** Explicit graph tap (e.g. the FM composite feed); defaults to delivery. */
+  tapNode?: AudioNode | null,
+): Promise<() => void> {
   const engine = getEngine();
   const ctx = engine.ctx;
   // Prefer the program node itself over the engine's MediaStream. The stream
@@ -76,7 +80,7 @@ export async function attachPcmTap(onBatch: TapCallback): Promise<() => void> {
   // restarts the capture mid-batch — a splice the encoder then has to emit.
   // The graph node sits upstream of the device and cannot be renegotiated
   // out from under the tap.
-  const node = engine.getCaptureNode();
+  const node = tapNode ?? engine.getCaptureNode();
   const stream = node ? null : engine.getStream();
   if (!ctx || (!node && !stream)) throw new Error("Audio engine is not running");
   const source = node ?? ctx.createMediaStreamSource(stream!);

@@ -132,6 +132,67 @@ export type SourceKind = "signal" | "mic" | "file";
 export type SignalMode = "tone" | "pink";
 export type MicStatus = "idle" | "arming" | "on" | "error";
 
+/**
+ * Per-bus channel format, the broadcast I/O convention (Stereo Tool et al.):
+ * a stereo feed can be folded, or one leg of it used on both outputs.
+ */
+export type ChannelMode = "stereo" | "mono" | "left" | "right";
+/** Which physical input is feeding the program bus. */
+export type InputSlot = "main" | "backup";
+
+/**
+ * Audio I/O configuration — the settings that belong to the hardware layer
+ * rather than to the processing chain. Kept apart from ProcessorParams so a
+ * preset can never move an operator's device routing.
+ */
+export interface IoConfig {
+  /** Input 2, used as the backup source. "" = OS default (not usable as a backup). */
+  backupInput: string;
+  /** Switch to Input 2 when Input 1 falls silent. */
+  backupEnabled: boolean;
+  mainGainDb: number;
+  backupGainDb: number;
+  mainChannels: ChannelMode;
+  backupChannels: ChannelMode;
+  /** Web/HD delivery bus trim, dB. */
+  webGainDb: number;
+  webChannels: ChannelMode;
+  /** Requested hardware rate; 0 = let the device choose. */
+  sampleRate: number;
+  /** Requested render quantum in frames (the "processing latency" control). */
+  latencyFrames: number;
+}
+
+export const IO_STORE = "signalpath.io.v1";
+
+export const DEFAULT_IO: IoConfig = {
+  backupInput: "",
+  backupEnabled: false,
+  mainGainDb: 0,
+  backupGainDb: 0,
+  mainChannels: "stereo",
+  backupChannels: "stereo",
+  webGainDb: 0,
+  webChannels: "stereo",
+  sampleRate: 0,
+  latencyFrames: 1024,
+};
+
+/**
+ * How long Input 1 has to stay silent before the backup takes over. Long
+ * enough that a natural pause in programme is not a failover, short enough
+ * that dead air does not reach the transmitter.
+ */
+const INPUT_FAILOVER_MS = 3000;
+/** How long Input 1 has to be healthy again before it is restored. */
+const INPUT_RESTORE_MS = 4000;
+/** Peak below this counts as a silent feed. */
+const INPUT_SILENT_DB = -55;
+/** Peak above this counts as a healthy feed. */
+const INPUT_HEALTHY_DB = -50;
+/** Crossfade between the two input paths. */
+const INPUT_CROSSFADE_MS = 60;
+
 export interface MeterSnapshot {
   t: number;
   powered: boolean;
@@ -212,6 +273,25 @@ export interface MeterSnapshot {
   backupActive: boolean;
   /** Peak limiter actually in circuit — the worklet when it loaded, else native. */
   limiterEngine: "native" | "worklet";
+  /** Audio I/O layer: active input, per-bus levels and delivery state. */
+  io: {
+    input: InputSlot;
+    autoSwitched: boolean;
+    mainDb: number;
+    backupDb: number;
+    backupReady: boolean;
+    webL: number;
+    webR: number;
+    monitorL: number;
+    monitorR: number;
+    /** Main-thread share of the metering/render budget, %. */
+    cpuPct: number;
+    /** Render quantum the device is actually using, frames. */
+    bufferFrames: number;
+    /** Usable passband edges of the delivered signal. */
+    bandLowHz: number;
+    bandHighHz: number;
+  };
   /** On-air broadcast delay: engaged, behind by `seconds`, and rebuilding. */
   delay: {
     on: boolean;
@@ -270,6 +350,21 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   speechFast: false,
   backupActive: false,
   limiterEngine: "native",
+  io: {
+    input: "main",
+    autoSwitched: false,
+    mainDb: -120,
+    backupDb: -120,
+    backupReady: false,
+    webL: -120,
+    webR: -120,
+    monitorL: -120,
+    monitorR: -120,
+    cpuPct: 0,
+    bufferFrames: 0,
+    bandLowHz: 30,
+    bandHighHz: 20000,
+  },
   delay: { on: false, seconds: 0, live: false, rebuildMs: 0, dumps: 0 },
 };
 
@@ -323,6 +418,41 @@ const AIR_DUMP_FADE_MS = 8;
 /** Crossfade for engaging, retuning or releasing the delay line. */
 const AIR_DELAY_FADE_MS = 60;
 
+/**
+ * One input's complete path: source → preamp → stereo matrix → program bus.
+ * The matrix always exists, so changing a channel format is a gain write, not
+ * a rewire (a rewire under a live microphone is a click).
+ */
+interface InputPath {
+  stream: MediaStream;
+  node: MediaStreamAudioSourceNode;
+  /** Preamp trim, from the I/O panel. */
+  gain: GainNode;
+  /** Failover crossfade (1 = on the bus, 0 = parked). */
+  fader: GainNode;
+  matrix: ChannelMatrix;
+  /** Post-preamp level, ahead of the fader — a parked backup still meters. */
+  analyser: AnalyserNode;
+  buf: Float32Array<ArrayBuffer>;
+  label: string;
+}
+
+/** 2 → 2 routing matrix: four taps, one per input/output channel pair. */
+interface ChannelMatrix {
+  split: ChannelSplitterNode;
+  merge: ChannelMergerNode;
+  /** [L→L, L→R, R→L, R→R] */
+  taps: [GainNode, GainNode, GainNode, GainNode];
+}
+
+const CHANNEL_MODE_TAPS: Record<ChannelMode, [number, number, number, number]> = {
+  // L→L, L→R, R→L, R→R
+  stereo: [1, 0, 0, 1],
+  mono: [0.5, 0.5, 0.5, 0.5],
+  left: [1, 1, 0, 0],
+  right: [0, 0, 1, 1],
+};
+
 const stopStream = (stream: MediaStream) => {
   for (const track of stream.getTracks()) track.stop();
 };
@@ -345,6 +475,29 @@ export class AudioEngine {
   /** Chosen monitor output ("" = OS default). Applied via setSinkId. */
   outputDeviceId = "";
   private deviceWatching = false;
+
+  /* ── audio I/O layer (Stereo Tool-style routing) ─────────────────────── */
+  /** Hardware routing/config, persisted separately from presets. */
+  io: IoConfig = { ...DEFAULT_IO };
+  /** Input 2 arm state (never blocks Input 1). */
+  backupMicStatus: MicStatus = "idle";
+  backupMicLabel = "";
+  /** Which physical input is on the program bus right now. */
+  private inputActive: InputSlot = "main";
+  /** True while Input 2 is on air because Input 1 went silent. */
+  private autoSwitched = false;
+  private inputSilentSince = 0;
+  private inputHealthySince = 0;
+  private mainLevelDb = -120;
+  private backupLevelDb = -120;
+  /** The two opened input paths, each a complete source → matrix → bus chain. */
+  private mainPath: InputPath | null = null;
+  private backupPath: InputPath | null = null;
+  private backupArm: Promise<void> | null = null;
+  /** Invalidates an in-flight backup arm. */
+  private backupToken = 0;
+  /** Audio-config rebuilds run one at a time, like device swaps. */
+  private configArm: Promise<void> = Promise.resolve();
 
   // file transport
   fileBuffer: AudioBuffer | null = null;
@@ -667,6 +820,20 @@ export class AudioEngine {
   private tiltLo!: BiquadFilterNode;
   private tiltHi!: BiquadFilterNode;
   private monitorGain!: GainNode;
+  /** Web/HD delivery bus: trim → channel matrix → capture tap / stream. */
+  private webGain!: GainNode;
+  private webMatrix: ChannelMatrix | null = null;
+  /** Unity tap for the FM composite, upstream of the Web/HD trim. */
+  private fmTap!: GainNode;
+  private webAnalyserL!: AnalyserNode;
+  private webAnalyserR!: AnalyserNode;
+  private webBufL!: Float32Array<ArrayBuffer>;
+  private webBufR!: Float32Array<ArrayBuffer>;
+  /** Monitor bus meter taps (post mute). */
+  private monAnalyserL!: AnalyserNode;
+  private monAnalyserR!: AnalyserNode;
+  private monBufL!: Float32Array<ArrayBuffer>;
+  private monBufR!: Float32Array<ArrayBuffer>;
   /** Monitor check matrix: mono fold + per-channel polarity (monitor only). */
   private monL!: GainNode;
   private monR!: GainNode;
@@ -733,6 +900,60 @@ export class AudioEngine {
 
   constructor() {
     this.loadDevicePrefs();
+    this.loadIoConfig();
+  }
+
+  /**
+   * Hardware routing survives restarts, but never at the cost of boot: every
+   * field is validated, because a corrupt store must not be able to ask for a
+   * 300 dB trim or a 3-sample quantum.
+   */
+  private loadIoConfig() {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(IO_STORE);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    try {
+      const v = JSON.parse(raw) as Partial<IoConfig>;
+      const mode = (m: unknown): ChannelMode =>
+        m === "mono" || m === "left" || m === "right" ? m : "stereo";
+      const db = (n: unknown, fallback: number, lo: number, hi: number) =>
+        typeof n === "number" && Number.isFinite(n)
+          ? Math.min(hi, Math.max(lo, n))
+          : fallback;
+      const frames = (n: unknown) =>
+        typeof n === "number" && Number.isFinite(n)
+          ? Math.min(8192, Math.max(128, Math.round(n)))
+          : DEFAULT_IO.latencyFrames;
+      this.io = {
+        backupInput: typeof v.backupInput === "string" ? v.backupInput : "",
+        backupEnabled: v.backupEnabled === true,
+        mainGainDb: db(v.mainGainDb, 0, -24, 24),
+        backupGainDb: db(v.backupGainDb, 0, -24, 24),
+        mainChannels: mode(v.mainChannels),
+        backupChannels: mode(v.backupChannels),
+        webGainDb: db(v.webGainDb, 0, -60, 12),
+        webChannels: mode(v.webChannels),
+        sampleRate:
+          v.sampleRate === 44100 || v.sampleRate === 48000 || v.sampleRate === 96000
+            ? v.sampleRate
+            : 0,
+        latencyFrames: frames(v.latencyFrames),
+      };
+    } catch {
+      this.io = { ...DEFAULT_IO };
+    }
+  }
+
+  private saveIoConfig() {
+    try {
+      localStorage.setItem(IO_STORE, JSON.stringify(this.io));
+    } catch {
+      /* storage may be unavailable */
+    }
   }
 
   /** Last-used I/O + source survive restarts, so boot restores the rig. */
@@ -871,7 +1092,18 @@ export class AudioEngine {
    * somewhere else.
    */
   protected createContext(): AudioContext {
-    return new AudioContext({ latencyHint: "interactive" });
+    const rate = this.io.sampleRate || 48000;
+    // latencyHint is honoured as a hint, not a contract: the endpoint decides
+    // the quantum. The I/O panel reports the measured value, not this one.
+    const hint = Math.min(0.5, Math.max(0.001, this.io.latencyFrames / rate));
+    const opts: AudioContextOptions = { latencyHint: hint };
+    if (this.io.sampleRate) opts.sampleRate = this.io.sampleRate;
+    try {
+      return new AudioContext(opts);
+    } catch {
+      // A device that refuses the requested rate still has a default one.
+      return new AudioContext({ latencyHint: "interactive" });
+    }
   }
 
   /**
@@ -1063,6 +1295,7 @@ export class AudioEngine {
     this.deqCutDb = [0, 0, 0, 0, 0];
     this.cwBands = [];
     this.cwSplits = [];
+    this.webMatrix = null;
   }
 
   /* ── graph construction ───────────────────────────────────────────────── */
@@ -1087,6 +1320,44 @@ export class AudioEngine {
    */
   private setHz(key: string, param: AudioParam | undefined, hz: number, tc = 0.02) {
     this.setNum(key, param, safeFilterHz(hz, this.ctx?.sampleRate ?? 48000), tc);
+  }
+
+  /** Build a 2×2 routing matrix; the taps are written by setChannelMatrix. */
+  private createMatrix(ctx: AudioContext): ChannelMatrix {
+    const split = ctx.createChannelSplitter(2);
+    split.channelCount = 2;
+    split.channelCountMode = "explicit";
+    split.channelInterpretation = "speakers";
+    const merge = ctx.createChannelMerger(2);
+    const taps: [GainNode, GainNode, GainNode, GainNode] = [
+      ctx.createGain(),
+      ctx.createGain(),
+      ctx.createGain(),
+      ctx.createGain(),
+    ];
+    split.connect(taps[0], 0);
+    split.connect(taps[1], 0);
+    split.connect(taps[2], 1);
+    split.connect(taps[3], 1);
+    taps[0].connect(merge, 0, 0);
+    taps[1].connect(merge, 0, 1);
+    taps[2].connect(merge, 0, 0);
+    taps[3].connect(merge, 0, 1);
+    for (let i = 0; i < 4; i++) taps[i].gain.value = CHANNEL_MODE_TAPS.stereo[i];
+    return { split, merge, taps };
+  }
+
+  /** Apply a channel format with 5 ms glides — no rewire, no click. */
+  private setChannelMatrix(
+    matrix: ChannelMatrix | null,
+    mode: ChannelMode,
+    key: string,
+  ) {
+    if (!matrix) return;
+    const taps = CHANNEL_MODE_TAPS[mode];
+    matrix.taps.forEach((tap, i) => {
+      this.setNum(`${key}.${i}`, tap.gain, taps[i], 0.005);
+    });
   }
 
   private buildGraph(ctx: AudioContext) {
@@ -1864,10 +2135,50 @@ export class AudioEngine {
     monMerge.connect(this.monitorGain);
     this.monitorGain.connect(ctx.destination);
 
+    // Monitor bus meter: post gain and post mute, so the readout is what the
+    // speaker actually receives rather than what the chain produced.
+    const monOutSplit = ctx.createChannelSplitter(2);
+    this.monAnalyserL = ctx.createAnalyser();
+    this.monAnalyserR = ctx.createAnalyser();
+    this.monAnalyserL.fftSize = 2048;
+    this.monAnalyserR.fftSize = 2048;
+    this.monitorGain.connect(monOutSplit);
+    monOutSplit.connect(this.monAnalyserL, 0);
+    monOutSplit.connect(this.monAnalyserR, 1);
+    this.monBufL = new Float32Array(this.monAnalyserL.fftSize);
+    this.monBufR = new Float32Array(this.monAnalyserR.fftSize);
+
+    // ── FM composite tap ──
+    // Taken ahead of the Web/HD trim, so a delivery-bus volume move can never
+    // change FM deviation. The MPX worker reads this node.
+    this.fmTap = g(1);
+    this.duckGain.connect(this.fmTap);
+
+    // ── Web/HD delivery bus (Stereo Tool "Web/HD output") ──
+    // Trim → channel matrix → PCM capture tap + MediaStream. Both delivery
+    // backends therefore hear the same level and channel format.
+    this.webGain = g(dbToGain(this.io.webGainDb));
+    this.duckGain.connect(this.webGain);
+    this.webMatrix = this.createMatrix(ctx);
+    this.setChannelMatrix(this.webMatrix, this.io.webChannels, "io.web.ch");
+    this.webGain.connect(this.webMatrix.split);
+
     this.streamGain = g(1);
     this.streamDest = ctx.createMediaStreamDestination();
-    this.duckGain.connect(this.streamGain);
+    this.webMatrix.merge.connect(this.streamGain);
     this.streamGain.connect(this.streamDest);
+
+    // Delivery-bus meter, after trim and channel format.
+    const webSplit = ctx.createChannelSplitter(2);
+    this.webAnalyserL = ctx.createAnalyser();
+    this.webAnalyserR = ctx.createAnalyser();
+    this.webAnalyserL.fftSize = 2048;
+    this.webAnalyserR.fftSize = 2048;
+    this.streamGain.connect(webSplit);
+    webSplit.connect(this.webAnalyserL, 0);
+    webSplit.connect(this.webAnalyserR, 1);
+    this.webBufL = new Float32Array(this.webAnalyserL.fftSize);
+    this.webBufR = new Float32Array(this.webAnalyserR.fftSize);
 
     // ── metering tap (post) ──
     const outSplit = ctx.createChannelSplitter(2);
@@ -2343,6 +2654,101 @@ export class AudioEngine {
     set("tilt.hi", this.tiltHi?.gain, slope / 2, 0.03);
     // every other psy module is STORED (parameter-complete, no DSP yet):
     // engaged or not, the graph above is the whole audible path.
+  }
+
+  /**
+   * Change the hardware clock/quantum requests. A live engine is re-created
+   * through the same fade → await teardown → open path a device swap uses, so
+   * a new quantum can never be built on top of the old endpoint.
+   *
+   * The rate is a request: browsers (and drivers) may grant a different one.
+   * `ioState.sampleRateActual` reports what the device actually opened at.
+   */
+  applyAudioConfig(
+    patch: Partial<Pick<IoConfig, "sampleRate" | "latencyFrames">>,
+  ): Promise<void> {
+    const next = { ...this.io, ...patch };
+    const changed =
+      next.sampleRate !== this.io.sampleRate ||
+      next.latencyFrames !== this.io.latencyFrames;
+    this.io = {
+      ...this.io,
+      sampleRate: next.sampleRate,
+      latencyFrames: Math.min(8192, Math.max(128, Math.round(next.latencyFrames))),
+    };
+    this.saveIoConfig();
+    this.notify();
+    if (!changed) return Promise.resolve();
+
+    const run = this.configArm.then(async () => {
+      const wasPowered = this.powered;
+      if (this.ctx) {
+        this.powerOff();
+        // powerOff defers the suspend behind the output fade; wait past it,
+        // then wait for the suspend and close. Opening the new context before
+        // this finishes is the device-contention burst this path avoids.
+        await waitMs(rampWaitMs() + 30);
+        await this.ctxTeardown;
+        const old = this.ctx;
+        this.ctx = null;
+        this.graphReady = false;
+        this.deviceToken += 1;
+        if (old && old.state !== "closed") {
+          await old.close().catch(() => undefined);
+        }
+        this.ctxTeardown = Promise.resolve();
+      }
+      if (wasPowered) {
+        await this.powerOn();
+        // Graph taps (FM composite, PCM captures) point at nodes that no
+        // longer exist. Consumers listen for this and re-attach instead of
+        // running silently against a closed context.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("signalpath:audio-rebuilt"));
+        }
+      }
+      this.notify();
+    });
+    this.configArm = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * The complete audio I/O state for the panel. Actual values are read from
+   * the context; the config is what the operator asked for.
+   */
+  get ioState(): {
+    config: IoConfig;
+    activeInput: InputSlot;
+    autoSwitched: boolean;
+    mainLabel: string;
+    backupLabel: string;
+    backupStatus: MicStatus;
+    mainLevelDb: number;
+    backupLevelDb: number;
+    sampleRateActual: number;
+    quantum: number;
+    latencyMs: number;
+    running: boolean;
+    contextState: string;
+  } {
+    const ctx = this.ctx;
+    return {
+      config: { ...this.io },
+      activeInput: this.inputActive,
+      autoSwitched: this.autoSwitched,
+      mainLabel: this.mainPath?.label ?? this.micLabel,
+      backupLabel: this.backupPath?.label ?? this.backupMicLabel,
+      backupStatus: this.backupMicStatus,
+      mainLevelDb: this.mainLevelDb,
+      backupLevelDb: this.backupLevelDb,
+      sampleRateActual: ctx?.sampleRate ?? 0,
+      quantum: Math.round((ctx?.baseLatency ?? 0) * (ctx?.sampleRate ?? 0)),
+      latencyMs:
+        ((ctx?.baseLatency ?? 0) + (ctx?.outputLatency ?? 0)) * 1000,
+      running: ctx?.state === "running",
+      contextState: ctx?.state ?? "none",
+    };
   }
 
   /** Monitor level, honouring the operator mute that survives re-applies. */
@@ -2978,10 +3384,19 @@ export class AudioEngine {
       const track = stream.getAudioTracks()[0];
       this.micLabel = track?.label || "Microphone";
       track?.addEventListener?.("ended", this.onMicTrackEnded);
-      this.micNode = this.ctx.createMediaStreamSource(stream);
-      this.micNode.connect(this.sourceBus);
+      if (this.mainPath) this.releaseInputPath(this.mainPath);
+      this.mainPath = this.createInputPath(this.ctx, stream, "main");
+      this.micNode = this.mainPath.node;
+      // A freshly opened main input takes the bus; the backup stays parked
+      // until it is needed (and is re-armed below).
+      this.inputActive = "main";
+      this.autoSwitched = false;
+      this.inputSilentSince = 0;
+      this.inputHealthySince = 0;
+      this.applyInputFaders();
       this.micStatus = "on";
       this.notify();
+      if (this.io.backupEnabled) void this.openBackupInput();
       // The bus opens only now, with a live track behind it — not when the
       // arm was requested. A getUserMedia that takes 300 ms used to be a
       // 300 ms window in which the console faded programme up over nothing.
@@ -3023,6 +3438,12 @@ export class AudioEngine {
   private releaseMic() {
     this.micToken += 1;
     this.micArm = null;
+    this.releaseBackupInput();
+    if (this.mainPath) {
+      this.mainPath.stream.getAudioTracks()[0]?.removeEventListener?.("ended", this.onMicTrackEnded);
+      this.releaseInputPath(this.mainPath);
+      this.mainPath = null;
+    }
     this.micNode?.disconnect();
     this.micNode = null;
     if (this.micStream) {
@@ -3034,6 +3455,292 @@ export class AudioEngine {
     this.micStream = null;
     this.micLabel = "";
     this.micStatus = "idle";
+    this.inputActive = "main";
+    this.autoSwitched = false;
+    this.mainLevelDb = -120;
+    this.backupLevelDb = -120;
+  }
+
+  /* ── input paths: main + backup, with silence failover ───────────────── */
+
+  /**
+   * One complete input chain. The preamp feeds both the level detector and
+   * the failover fader, so a parked backup still reports its own level —
+   * that level is what decides whether it is worth switching to.
+   */
+  private createInputPath(
+    ctx: AudioContext,
+    stream: MediaStream,
+    slot: InputSlot,
+  ): InputPath {
+    const node = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain();
+    const fader = ctx.createGain();
+    gain.gain.value = dbToGain(
+      slot === "main" ? this.io.mainGainDb : this.io.backupGainDb,
+    );
+    fader.gain.value = this.inputActive === slot ? 1 : 0;
+    const matrix = this.createMatrix(ctx);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    const buf = new Float32Array(analyser.fftSize);
+
+    node.connect(gain);
+    // Detect the *device* level, ahead of the trim: preamp gain must not be
+    // able to make a live input look silent to the failover logic.
+    node.connect(analyser);
+    gain.connect(fader);
+    fader.connect(matrix.split);
+    matrix.merge.connect(this.sourceBus);
+
+    // The write cache belongs to the previous path; drop the keys before this
+    // one is configured, or the stale "already at this value" would skip it.
+    this.written.delete(`io.${slot}.gain`);
+    for (let i = 0; i < 4; i++) this.written.delete(`io.${slot}.ch.${i}`);
+    this.setChannelMatrix(
+      matrix,
+      slot === "main" ? this.io.mainChannels : this.io.backupChannels,
+      `io.${slot}.ch`,
+    );
+
+    const track = stream.getAudioTracks()[0];
+    return {
+      stream,
+      node,
+      gain,
+      fader,
+      matrix,
+      analyser,
+      buf,
+      label: track?.label || (slot === "main" ? "Input 1" : "Input 2"),
+    };
+  }
+
+  private releaseInputPath(path: InputPath): void {
+    path.node.disconnect();
+    path.gain.disconnect();
+    path.fader.disconnect();
+    path.analyser.disconnect();
+    path.matrix.split.disconnect();
+    path.matrix.merge.disconnect();
+    for (const tap of path.matrix.taps) tap.disconnect();
+    for (const track of path.stream.getTracks()) track.stop();
+  }
+
+  /** Crossfade the two inputs; `immediate` is used when first patching in. */
+  private applyInputFaders(immediate = false): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const write = (path: InputPath | null, on: boolean) => {
+      if (!path) return;
+      if (immediate) path.fader.gain.value = on ? 1 : 0;
+      else rampTo(path.fader.gain, on ? 1 : 0, ctx.currentTime, INPUT_CROSSFADE_MS);
+    };
+    write(this.mainPath, this.inputActive === "main");
+    write(this.backupPath, this.inputActive === "backup");
+  }
+
+  /** Switch the program bus to the other input, with a short crossfade. */
+  private switchInput(slot: InputSlot, auto: boolean): void {
+    if (!this.inputActive || this.inputActive === slot) return;
+    if (slot === "backup" && !this.backupPath) return;
+    this.inputActive = slot;
+    this.autoSwitched = auto;
+    this.inputSilentSince = 0;
+    this.inputHealthySince = 0;
+    this.applyInputFaders();
+    this.notify();
+  }
+
+  /**
+   * Failover state machine. Input 2 is a hot standby: when Input 1 is silent
+   * for long enough and Input 2 has signal, it takes the bus; when Input 1
+   * comes back healthy it is restored. Hysteresis stops a source sitting on
+   * the threshold from flapping the bus during a show.
+   */
+  private updateInputRouting(now: number): void {
+    if (this.mainPath) {
+      this.mainPath.analyser.getFloatTimeDomainData(this.mainPath.buf);
+      this.mainLevelDb = peakDb(this.mainPath.buf);
+    } else {
+      this.mainLevelDb = -120;
+    }
+    if (this.backupPath) {
+      this.backupPath.analyser.getFloatTimeDomainData(this.backupPath.buf);
+      this.backupLevelDb = peakDb(this.backupPath.buf);
+    } else {
+      this.backupLevelDb = -120;
+    }
+    if (!this.mainPath || !this.backupPath || !this.io.backupEnabled) {
+      if (this.inputActive !== "main") this.switchInput("main", false);
+      return;
+    }
+    if (this.inputActive === "main") {
+      if (this.mainLevelDb < INPUT_SILENT_DB) {
+        if (this.inputSilentSince === 0) this.inputSilentSince = now;
+        if (
+          now - this.inputSilentSince >= INPUT_FAILOVER_MS &&
+          this.backupLevelDb > INPUT_SILENT_DB
+        ) {
+          this.switchInput("backup", true);
+        }
+      } else {
+        this.inputSilentSince = 0;
+      }
+      return;
+    }
+    // On the backup: restore the main feed as soon as it is healthy again.
+    if (this.mainLevelDb > INPUT_HEALTHY_DB) {
+      if (this.inputHealthySince === 0) this.inputHealthySince = now;
+      if (now - this.inputHealthySince >= INPUT_RESTORE_MS) {
+        this.switchInput("main", false);
+      }
+    } else {
+      this.inputHealthySince = 0;
+    }
+  }
+
+  /** Arm Input 2. Failure never touches Input 1 — it is only a standby. */
+  private openBackupInput(): Promise<void> {
+    if (!this.ctx || !this.powered || this.sourceKind !== "mic") {
+      return Promise.resolve();
+    }
+    if (!this.io.backupEnabled || !this.io.backupInput) return Promise.resolve();
+    if (this.backupPath) {
+      if (this.backupMicStatus !== "on") {
+        this.backupMicStatus = "on";
+        this.notify();
+      }
+      return Promise.resolve();
+    }
+    if (this.backupArm) return this.backupArm;
+    const run = this.doOpenBackupInput().finally(() => {
+      if (this.backupArm === run) this.backupArm = null;
+    });
+    this.backupArm = run;
+    return run;
+  }
+
+  private async doOpenBackupInput(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const token = ++this.backupToken;
+    this.backupMicStatus = "arming";
+    this.notify();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(
+        this.micConstraints(this.io.backupInput),
+      );
+      if (
+        token !== this.backupToken ||
+        this.sourceKind !== "mic" ||
+        !this.ctx ||
+        stream.getAudioTracks().length === 0
+      ) {
+        stopStream(stream);
+        return;
+      }
+      this.backupPath = this.createInputPath(this.ctx, stream, "backup");
+      this.backupMicLabel = this.backupPath.label;
+      stream.getAudioTracks()[0]?.addEventListener?.("ended", this.onBackupTrackEnded);
+      this.backupMicStatus = "on";
+      this.applyInputFaders();
+      this.notify();
+      void this.refreshDevices();
+    } catch {
+      if (token !== this.backupToken) return;
+      this.backupPath = null;
+      this.backupMicStatus = "error";
+      this.notify();
+    }
+  }
+
+  /** Input 2 itself died: fall back to Input 1 and say so. */
+  private onBackupTrackEnded = () => {
+    this.releaseBackupInput();
+    // Keep the fault visible: the operator enabled a hot standby, and it is
+    // now gone. "Idle" would look like a decision they never made.
+    this.backupMicStatus = "error";
+    this.notify();
+  };
+
+  private releaseBackupInput(): void {
+    this.backupToken += 1;
+    this.backupArm = null;
+    if (this.backupPath) {
+      this.backupPath.stream
+        .getAudioTracks()[0]
+        ?.removeEventListener?.("ended", this.onBackupTrackEnded);
+      this.releaseInputPath(this.backupPath);
+      this.backupPath = null;
+    }
+    this.backupMicStatus = "idle";
+    this.backupMicLabel = "";
+    this.backupLevelDb = -120;
+    if (this.inputActive === "backup") {
+      this.inputActive = "main";
+      this.autoSwitched = false;
+      this.applyInputFaders();
+    }
+  }
+
+  /* ── I/O setters (panel-facing) ──────────────────────────────────────── */
+
+  setBackupInput(id: string): void {
+    if (id === this.io.backupInput) return;
+    this.io.backupInput = id;
+    this.saveIoConfig();
+    this.notify();
+    if (this.sourceKind !== "mic" || !this.ctx) return;
+    this.releaseBackupInput();
+    void this.openBackupInput();
+  }
+
+  setBackupEnabled(on: boolean): void {
+    if (on === this.io.backupEnabled) return;
+    this.io.backupEnabled = on;
+    this.saveIoConfig();
+    this.notify();
+    if (!on) {
+      this.releaseBackupInput();
+      this.notify();
+      return;
+    }
+    void this.openBackupInput();
+  }
+
+  setInputGain(slot: InputSlot, db: number): void {
+    const value = Math.min(24, Math.max(-24, Number.isFinite(db) ? db : 0));
+    if (slot === "main") this.io.mainGainDb = value;
+    else this.io.backupGainDb = value;
+    this.saveIoConfig();
+    const path = slot === "main" ? this.mainPath : this.backupPath;
+    this.setNum(`io.${slot}.gain`, path?.gain.gain, dbToGain(value), 0.03);
+    this.notify();
+  }
+
+  setInputChannels(slot: InputSlot, mode: ChannelMode): void {
+    if (slot === "main") this.io.mainChannels = mode;
+    else this.io.backupChannels = mode;
+    this.saveIoConfig();
+    const path = slot === "main" ? this.mainPath : this.backupPath;
+    this.setChannelMatrix(path?.matrix ?? null, mode, `io.${slot}.ch`);
+    this.notify();
+  }
+
+  setWebGainDb(db: number): void {
+    this.io.webGainDb = Math.min(12, Math.max(-60, Number.isFinite(db) ? db : 0));
+    this.saveIoConfig();
+    this.setNum("io.web.gain", this.webGain?.gain, dbToGain(this.io.webGainDb));
+    this.notify();
+  }
+
+  setWebChannels(mode: ChannelMode): void {
+    this.io.webChannels = mode;
+    this.saveIoConfig();
+    for (let i = 0; i < 4; i++) this.written.delete(`io.web.ch.${i}`);
+    this.setChannelMatrix(this.webMatrix, mode, "io.web.ch");
+    this.notify();
   }
 
   disarmMic() {
@@ -3191,6 +3898,11 @@ export class AudioEngine {
       // endpoint — re-apply or the console is live with no sound at all.
       if (this.outputDeviceId !== this.appliedSink) {
         void this.queueDeviceSwap(() => this.applyOutputDevice());
+      }
+      // A hot standby that was unplugged (or arrived late) is re-armed here,
+      // so replugging the backup device restores protection without a click.
+      if (this.sourceKind === "mic" && this.io.backupEnabled && !this.backupPath) {
+        void this.openBackupInput();
       }
     });
   };
@@ -3567,6 +4279,9 @@ export class AudioEngine {
     this.srcLevelDb = srcLevelDb;
     if (srcLevelDb > -70) this.lastProgramAt = now;
 
+    // Hot-standby input routing (Stereo Tool's Input 2 failover).
+    this.updateInputRouting(now);
+
     const advGate = this.params?.advanced?.leveling.gate;
     const gate = this.params?.gate;
     let gateWantOpen = true;
@@ -3763,6 +4478,17 @@ export class AudioEngine {
     const outPeakR = peakDb(this.outBufR);
     if (Math.max(outPeakL, outPeakR) > -70) this.lastOutAt = now;
     const correlation = correlationOf(this.outBufL, this.outBufR);
+
+    // Bus levels for the Audio I/O panel: what the delivery and monitor
+    // paths are actually carrying, not what the chain upstream produced.
+    this.webAnalyserL.getFloatTimeDomainData(this.webBufL);
+    this.webAnalyserR.getFloatTimeDomainData(this.webBufR);
+    this.monAnalyserL.getFloatTimeDomainData(this.monBufL);
+    this.monAnalyserR.getFloatTimeDomainData(this.monBufR);
+    const webL = peakDb(this.webBufL);
+    const webR = peakDb(this.webBufR);
+    const monL = peakDb(this.monBufL);
+    const monR = peakDb(this.monBufR);
     // 1 Hz correlation history for the phase meter.
     if (now - this.lastCorrAt >= 1000) {
       this.lastCorrAt = now;
@@ -3992,6 +4718,24 @@ export class AudioEngine {
         this.workletLimiter && limiterEngine(this.params?.limiter) === "worklet"
           ? "worklet"
           : "native",
+      io: {
+        input: this.inputActive,
+        autoSwitched: this.autoSwitched,
+        mainDb: this.mainLevelDb,
+        backupDb: this.backupLevelDb,
+        backupReady: this.backupPath !== null,
+        webL,
+        webR,
+        monitorL: monL,
+        monitorR: monR,
+        cpuPct: this.heavyIntervalMs
+          ? Math.min(100, (this.frameCostMs / this.heavyIntervalMs) * 100)
+          : 0,
+        bufferFrames: Math.round((ctx.baseLatency ?? 0) * ctx.sampleRate),
+        bandLowHz:
+          this.params?.hpf.on ? Math.max(20, this.params.hpf.freqHz) : 20,
+        bandHighHz: this.codecLp?.frequency.value ?? ctx.sampleRate / 2,
+      },
       delay: {
         on: this.delayEnabled,
         seconds: this.delaySeconds,
@@ -4388,6 +5132,14 @@ export class AudioEngine {
    */
   getCaptureNode(): AudioNode | null {
     return this.graphReady ? (this.streamGain ?? null) : null;
+  }
+
+  /**
+   * The FM composite tap: processed program ahead of the Web/HD delivery
+   * trim. Null before a graph exists.
+   */
+  getFmTapNode(): AudioNode | null {
+    return this.graphReady ? (this.fmTap ?? null) : null;
   }
 }
 

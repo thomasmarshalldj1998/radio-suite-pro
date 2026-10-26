@@ -110,7 +110,30 @@ const mediaDevices = {
   },
 };
 
+/** Minimal AudioParam stand-in for graph plumbing (events are not asserted here). */
+const fakeAudioParam = (value = 1) => ({
+  value,
+  setTargetAtTime(v: number) {
+    this.value = v;
+  },
+  setValueAtTime(v: number) {
+    this.value = v;
+  },
+  linearRampToValueAtTime(v: number) {
+    this.value = v;
+  },
+  cancelScheduledValues() {
+    /* nothing scheduled */
+  },
+});
+
 const fakeNode = () => ({
+  gain: fakeAudioParam(),
+  frequency: fakeAudioParam(),
+  Q: fakeAudioParam(),
+  channelCount: 2,
+  channelCountMode: "explicit",
+  channelInterpretation: "speakers",
   connect() {
     return this;
   },
@@ -118,6 +141,23 @@ const fakeNode = () => ({
     /* nothing to tear down */
   },
 });
+
+const fakeAnalyser = () => ({
+  fftSize: 1024,
+  connect() {
+    return this;
+  },
+  disconnect() {
+    /* nothing to tear down */
+  },
+  getFloatTimeDomainData() {
+    /* silence */
+  },
+});
+
+/** A browser rejects with a DOMException whose name is what code branches on. */
+const domError = (name: string, message: string) =>
+  Object.assign(new Error(message), { name });
 
 function fakeContext(options: { sink: boolean } = { sink: true }) {
   return {
@@ -127,11 +167,17 @@ function fakeContext(options: { sink: boolean } = { sink: true }) {
     destination: fakeNode(),
     createMediaStreamSource: () => fakeNode(),
     createGain: () => fakeNode(),
+    createAnalyser: () => fakeAnalyser(),
+    createChannelSplitter: () => fakeNode(),
+    createChannelMerger: () => fakeNode(),
+    createMediaStreamDestination: () => ({ stream: {} }),
     setSinkId: options.sink
       ? async (id: string) => {
           sinkCalls.push(id);
           if (hungSinks.has(id)) await new Promise(() => undefined);
-          if (badSinks.has(id)) throw new Error(`NotFoundError: ${id}`);
+          if (badSinks.has(id)) {
+            throw domError("NotFoundError", `The device ${id} is gone`);
+          }
         }
       : undefined,
     resume: async () => undefined,
