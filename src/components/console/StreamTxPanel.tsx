@@ -96,8 +96,18 @@ function loadSecondary(): SecondaryConfig {
   }
 }
 
-/** Panel status per the v3.1 encoder spec. */
-type PanelState = "optimising" | "active" | "underflow" | "failed";
+/**
+ * Panel status per the v3.1 encoder spec.
+ *
+ * The chip used to read "Underflow" for two conditions that have nothing to
+ * do with each other: the protective send buffer dropping audio (the queue
+ * outran the socket) and a reconnect (there is no connection at all). Neither
+ * is an underflow, and a console that says "Underflow" while the socket is
+ * refusing the source sends the operator hunting for an audio-clock fault the
+ * panel does not have. Each state is now named for what it is, and a
+ * reconnect carries its own countdown because `nextRetryMs` is already live.
+ */
+type PanelState = "optimising" | "connecting" | "active" | "dropped" | "retrying" | "failed";
 
 function panelState(tx: StreamClientState, onAir: boolean): {
   state: PanelState;
@@ -111,13 +121,23 @@ function panelState(tx: StreamClientState, onAir: boolean): {
   if (tx.status === "offline" || tx.transport === "none") {
     return { state: "failed", glyph: "✗", label: "Failed", tone: "text-meter-hot" };
   }
-  if (tx.warning || tx.status === "retrying") {
-    return { state: "underflow", glyph: "⚠", label: "Underflow", tone: "text-amber-led" };
+  if (tx.status === "retrying") {
+    const leftMs = tx.nextRetryMs;
+    const secs = leftMs != null ? Math.max(0, Math.ceil(leftMs / 1000)) : null;
+    return {
+      state: "retrying",
+      glyph: "↻",
+      label: secs != null && secs > 0 ? `Reconnecting · ${secs}s` : "Reconnecting",
+      tone: "text-amber-led",
+    };
+  }
+  if (tx.warning) {
+    return { state: "dropped", glyph: "⚠", label: "Buffer drop", tone: "text-amber-led" };
   }
   if (tx.status === "live") {
     return { state: "active", glyph: "●", label: "Active", tone: "text-meter-ok" };
   }
-  return { state: "optimising", glyph: "●", label: "Optimising", tone: "text-amber-led" };
+  return { state: "connecting", glyph: "●", label: "Connecting", tone: "text-amber-led" };
 }
 
 function Field({
@@ -669,11 +689,20 @@ export function StreamTxPanel({
         title="Primary stream"
         subtitle="Source endpoint · codec · pre-shape"
         right={
-          <span className={cn("text-readout text-[11px] font-bold tracking-wide", status.tone)}>
+          <span
+            className={cn("text-readout text-[11px] font-bold tracking-wide", status.tone)}
+            title={rt.tx.error ?? undefined}
+          >
             {status.glyph} {status.label}
           </span>
         }
       >
+        {rt.tx.status === "retrying" && rt.tx.error && (
+          <p className="mb-3 rounded border border-amber-led/45 bg-amber-led/10 px-3 py-2 text-[11px] leading-snug text-amber-led">
+            Not connected — {rt.tx.error}. Nothing is reaching the server until a
+            reconnect succeeds.
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Output slot" className="col-span-2">
             <Select
