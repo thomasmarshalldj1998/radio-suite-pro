@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("signalpath", {
   stream: {
     available: true,
     open: (cfg) => ipcRenderer.invoke("stream:open", cfg),
+    probe: (cfg) => ipcRenderer.invoke("stream:probe", cfg),
     write: (bytes) => ipcRenderer.send("stream:write", bytes),
     metadata: (text) => ipcRenderer.send("stream:metadata", text),
     close: () => ipcRenderer.invoke("stream:close"),

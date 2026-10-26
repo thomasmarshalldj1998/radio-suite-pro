@@ -27,7 +27,7 @@ import {
   type BroadcastFormat,
   type EncoderStats,
 } from "@/lib/audio/encoder";
-import { JsStreamEncoder } from "@/lib/audio/js-encoder";
+import { JsStreamEncoder, jsFormatMime } from "@/lib/audio/js-encoder";
 import { MpxStreamEncoder } from "@/lib/audio/fm";
 import { FmPanel } from "@/components/console/FmPanel";
 import { MpxLinkPanel } from "@/components/console/MpxLinkPanel";
@@ -36,6 +36,7 @@ import {
   STREAM_METAINT,
   StreamClient,
   isStreamableContainer,
+  probeSource,
   streamTitle,
   type StreamClientState,
 } from "@/lib/audio/stream-client";
@@ -207,21 +208,47 @@ function openSource({
   }
   const client = new StreamClient();
   let lastStatus = "";
+  /** Wall clock of the live stretch that a drop interrupted. */
+  let liveSince = 0;
+  /** Wall clock of the first failed attempt in the current outage. */
+  let lostAt = 0;
+  const clock = (t: number) => new Date(t).toLocaleTimeString([], { hour12: false });
+  // Every transition is logged, not just the first failure: a show can drop ten
+  // times, and afterwards the operator needs to know when, for how long, and
+  // why — not simply that it happened once.
   client.onState = (s: StreamClientState) => {
     patchRuntime({ tx: s });
     if (s.status === lastStatus) return;
     lastStatus = s.status;
     if (s.status === "live") {
-      void log({
-        kind: "session",
-        title: `Source connected — ${form.name}`,
-        detail: `${label} → ${url}`,
-      });
+      const now = wallClock();
+      if (lostAt > 0) {
+        const downS = (now - lostAt) / 1000;
+        void log({
+          kind: "session",
+          title: `Source reconnected — ${form.name}`,
+          detail: `${label} → ${url} · back after ${downS.toFixed(1)} s off air · ${clock(now)}`,
+        });
+      } else {
+        void log({
+          kind: "session",
+          title: `Source connected — ${form.name}`,
+          detail: `${label} → ${url} · ${clock(now)}`,
+        });
+      }
+      liveSince = now;
+      lostAt = 0;
     } else if (s.status === "retrying") {
+      const now = wallClock();
+      if (lostAt === 0) lostAt = now;
+      const airedS = liveSince > 0 ? (now - liveSince) / 1000 : 0;
+      const retryS = Math.round((s.nextRetryMs ?? 0) / 1000);
       void log({
         kind: "error",
-        title: "Source connection lost — retrying",
-        detail: s.error ?? "unknown error",
+        title: `Source dropped — attempt ${s.attempt}`,
+        detail: `${s.error ?? "unknown error"} · ${
+          airedS > 0 ? `${airedS.toFixed(1)} s on air · ` : ""
+        }retry in ${retryS} s · ${clock(now)}`,
       });
     }
   };
@@ -267,6 +294,9 @@ export function StreamTxPanel({
   const [npTitle, setNpTitle] = useState("");
   const [npArtist, setNpArtist] = useState("");
   const [saving, setSaving] = useState(false);
+  /** Preflight state: a mount check is in flight, and its last verdict. */
+  const [probing, setProbing] = useState(false);
+  const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null);
   const [meter, setMeter] = useState({
     fill: 0,
     frameMs: 0,
@@ -568,6 +598,62 @@ export function StreamTxPanel({
     }
   };
 
+  /**
+   * Preflight the mount before the encoder is started: one source connection,
+   * closed straight away, so a refusal arrives as a reason (credentials, mount
+   * in use, wrong name) rather than as an endless reconnect to guess at.
+   *
+   * Refused while on air on purpose — the probe would take the mount from the
+   * live source and knock the station off.
+   */
+  const checkMount = async () => {
+    if (rt.onAir || probing) return;
+    if (!isConfigured(form)) {
+      toast.error("Configure the primary stream first");
+      return;
+    }
+    setProbing(true);
+    setProbe(null);
+    try {
+      const jsFmt = activeFmt ? jsFormatFor(activeFmt.id) : null;
+      const mime =
+        activeFmt?.id === "mpx-flac-192"
+          ? "audio/flac"
+          : jsFmt
+            ? jsFormatMime(jsFmt)
+            : (activeFmt?.mimes[0] ?? codec.mimeType);
+      const res = await probeSource({
+        protocol: form.protocol,
+        server: form.server,
+        port: form.port,
+        mount: form.mount,
+        username: form.username || "source",
+        password: form.password,
+        contentType: mime,
+        metaint: 0,
+        name: form.name || "Signalpath",
+        bitrateKbps: form.bitrateKbps,
+        secure: /^https/i.test(form.protocol) || form.port === 443,
+      });
+      setProbe({ ok: res.ok, detail: res.detail });
+      void pushLog({
+        kind: res.ok ? "session" : "error",
+        title: res.ok
+          ? `Source probe passed — ${form.name}`
+          : `Source probe failed — ${form.name}`,
+        detail: res.detail,
+      });
+      if (res.ok) toast.success("Mount is available", { description: res.detail });
+      else toast.error("The mount would refuse this source", { description: res.detail });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setProbe({ ok: false, detail: message });
+      toast.error("Preflight failed", { description: message });
+    } finally {
+      setProbing(false);
+    }
+  };
+
   const disconnect = async () => {
     const runtime = getRuntime();
     await runtime.source?.stop();
@@ -866,12 +952,31 @@ export function StreamTxPanel({
           <Button
             variant="secondary"
             className="h-9"
+            onClick={() => void checkMount()}
+            disabled={rt.onAir || probing}
+            title="Open one source connection to read the server's verdict, then close it"
+          >
+            {probing ? "Checking…" : "Check mount"}
+          </Button>
+          <Button
+            variant="secondary"
+            className="h-9"
             onClick={() => void persist()}
             disabled={saving}
           >
             Save
           </Button>
         </div>
+        {probe && (
+          <p
+            className={cn(
+              "mt-2 text-[10px] leading-snug",
+              probe.ok ? "text-meter-ok" : "text-amber-led",
+            )}
+          >
+            {probe.detail}
+          </p>
+        )}
         {rt.lastError && (
           <p className="mt-2 text-[10px] text-meter-hot">{rt.lastError.message}</p>
         )}

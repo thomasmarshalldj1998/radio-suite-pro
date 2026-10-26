@@ -169,11 +169,23 @@ type Writer = {
   close: () => Promise<void>;
 };
 
-/** Desktop transport: one Node request in the shell, fed over IPC. */
-async function openDesktop(cfg: SourceConfig): Promise<Writer> {
+/**
+ * Desktop transport: one Node request in the shell, fed over IPC.
+ *
+ * The writer is handed back immediately and the server's verdict separately.
+ * That is what lets frames flow during the handshake: a server that answers
+ * only after it has heard the source would otherwise deadlock — the console
+ * waits for a 200 that can never arrive, and every attempt ends in a retry
+ * loop the panel used to label "Underflow".
+ */
+async function openDesktop(
+  cfg: SourceConfig,
+): Promise<{ writer: Writer; accepted: Promise<void> }> {
   const bridge = window.signalpath?.stream;
   if (!bridge) throw new Error("Desktop stream bridge unavailable");
-  const res = await bridge.open({
+  // `open` creates the request synchronously in the shell, so any write
+  // issued after this call has a socket behind it.
+  const opening = bridge.open({
     protocol: cfg.protocol,
     server: cfg.server,
     port: cfg.port,
@@ -186,12 +198,62 @@ async function openDesktop(cfg: SourceConfig): Promise<Writer> {
     bitrateKbps: cfg.bitrateKbps,
     secure: cfg.secure,
   });
-  if (!res.ok) throw new Error(res.error || "the source connection was refused");
-  return {
+  const writer: Writer = {
     write: (bytes) => bridge.write(bytes),
     close: async () => {
       await bridge.close();
     },
+  };
+  const accepted = opening.then((res) => {
+    if (!res.ok) throw new Error(res.error || "the source connection was refused");
+  });
+  return { writer, accepted };
+}
+
+/**
+ * Preflight a mount before the encoder is started.
+ *
+ * Only the desktop shell can do this: a browser PUT cannot pass the CORS
+ * preflight an Icecast source requires, so the browser build reports that
+ * honestly instead of pretending the mount was checked. A successful probe
+ * briefly holds the mount (the shell closes it immediately), which is why the
+ * UI only offers it while off air.
+ */
+export interface SourceProbeResult {
+  ok: boolean;
+  status: number;
+  detail: string;
+}
+
+export async function probeSource(cfg: SourceConfig): Promise<SourceProbeResult> {
+  const bridge = typeof window !== "undefined" ? window.signalpath?.stream : undefined;
+  if (!bridge?.probe) {
+    return {
+      ok: false,
+      status: 0,
+      detail:
+        "A preflight needs the desktop app — a browser source PUT is blocked by the server's CORS policy. Start the source to test the mount from a browser.",
+    };
+  }
+  const res = await bridge.probe({
+    protocol: cfg.protocol,
+    server: cfg.server,
+    port: cfg.port,
+    mount: cfg.mount,
+    username: cfg.username,
+    password: cfg.password,
+    contentType: cfg.contentType,
+    metaint: 0,
+    name: cfg.name,
+    bitrateKbps: cfg.bitrateKbps,
+    secure: cfg.secure,
+  });
+  return {
+    ok: res.ok,
+    status: res.status,
+    detail: res.ok
+      ? `The mount accepted the source and its credentials (${cfg.server}:${cfg.port}/${cfg.mount.replace(/^\/+/, "")}).`
+      : (res.error ?? "the mount refused the source"),
   };
 }
 
@@ -372,24 +434,33 @@ export class StreamClient {
       mountSwitches: this.router?.state.switches ?? 0,
     });
     try {
-      const writer =
-        transport === "desktop"
-          ? await openDesktop(target)
-          : transport === "browser"
-            ? await openBrowser(target, (message) => {
-                void this.fail(message, attemptId);
-              })
-            : (() => {
-                throw new Error(
-                  "This build cannot open a source connection — use the desktop app or a relay.",
-                );
-              })();
+      let writer: Writer;
+      let accepted: Promise<void> | null = null;
+      if (transport === "desktop") {
+        const opened = await openDesktop(target);
+        writer = opened.writer;
+        accepted = opened.accepted;
+      } else if (transport === "browser") {
+        writer = await openBrowser(target, (message) => {
+          void this.fail(message, attemptId);
+        });
+      } else {
+        throw new Error(
+          "This build cannot open a source connection — use the desktop app or a relay.",
+        );
+      }
       if (this.stopped) {
         await writer.close();
         return;
       }
       this.writer = writer;
       this.attachBridge();
+      // Attach first, verdict second: `push` feeds the socket while the
+      // handshake is outstanding, which is the whole point of the split.
+      if (accepted) {
+        await accepted;
+        if (this.stopped || this.attemptId !== attemptId) return;
+      }
       // A reconnect opens a new source session on the server, so the current
       // title has to be announced again or listeners see an empty field.
       if (this.metadata) window.signalpath?.stream?.metadata(this.metadata);
@@ -473,7 +544,11 @@ export class StreamClient {
    * written now (pre-buffer, paced release, protective ceiling).
    */
   push(bytes: Uint8Array) {
-    if (this.state.status !== "live" || !this.writer) {
+    // Feed the socket during the handshake as well as when live: a server that
+    // answers only after hearing the source needs those frames, and a refused
+    // source can waste at most the handshake window.
+    const streaming = this.state.status === "live" || this.state.status === "connecting";
+    if (!streaming || !this.writer) {
       this.update({ droppedBytes: this.state.droppedBytes + bytes.byteLength });
       return;
     }

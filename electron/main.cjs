@@ -125,6 +125,11 @@ ipcMain.handle("stream:open", async (event, cfg) => {
   return streamLink().open(cfg);
 });
 
+ipcMain.handle("stream:probe", async (event, cfg) => {
+  if (!fromApp(event)) return { ok: false, status: 0, error: "not the console window" };
+  return streamLink().probe(cfg);
+});
+
 ipcMain.on("stream:write", (event, bytes) => {
   if (!fromApp(event)) return;
   if (!(bytes instanceof Uint8Array) || bytes.length === 0) return;

@@ -96,13 +96,26 @@ export interface StreamTransportState {
   error: string | null;
 }
 
+export interface StreamProbeResult {
+  ok: boolean;
+  /** HTTP status the server answered with (0 when it never answered). */
+  status: number;
+  error: string | null;
+}
+
 export interface SignalpathStream {
   available: boolean;
   open: (cfg: StreamOpenConfig) => Promise<{
     ok: boolean;
     error?: string;
     sent?: number;
+    status?: number;
   }>;
+  /**
+   * Preflight: one source connection purely to read the mount's verdict, then
+   * closed. Reports why a mount would be refused before the encoder starts.
+   */
+  probe?: (cfg: StreamOpenConfig) => Promise<StreamProbeResult>;
   write: (bytes: Uint8Array) => void;
   metadata: (text: string) => void;
   close: () => Promise<{ ok: boolean }>;

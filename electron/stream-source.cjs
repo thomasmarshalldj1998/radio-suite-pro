@@ -22,6 +22,32 @@ const MAX_BACKLOG_BYTES = 2 * 1024 * 1024;
 
 /** How long to wait for the server's response line before giving up. */
 const CONNECT_TIMEOUT_MS = 5000;
+/**
+ * A server that answers only once it has heard the source (SHOUTcast-style,
+ * and some Icecast front-ends behind a proxy) needs the handshake to stay open
+ * while frames are flowing. The wait is therefore re-armed by progress, under
+ * an absolute cap so a silent or black-holed endpoint still fails cleanly.
+ */
+const HANDSHAKE_IDLE_MS = 3000;
+const HANDSHAKE_MAX_MS = 15_000;
+/** How long a preflight probe waits for the mount's verdict. */
+const PROBE_TIMEOUT_MS = 6000;
+
+/**
+ * Plain-English reading of a source refusal. The status code alone is what the
+ * operator needs: 401 is credentials, 403 is the mount, 404 is the name.
+ */
+function describeRefusal(status, body) {
+  const detail = String(body || "").replace(/\s+/g, " ").trim().slice(0, 160);
+  const reason =
+    {
+      400: "the server rejected the source request (400)",
+      401: "the server refused the source credentials (401) — check the user and password",
+      403: "the mount refused the source (403) — it is already in use, or this user may not take it",
+      404: "the mountpoint was not found (404) — enable it on the server or correct the mount name",
+    }[status] || `the server answered ${status}`;
+  return detail ? `${reason} · ${detail}` : reason;
+}
 
 /**
  * Build the source request target.
@@ -66,6 +92,29 @@ class StreamSource {
     this.timer = null;
     this.target = null;
     this.generation = 0;
+    this.handshakeDeadline = 0;
+  }
+
+  /**
+   * Re-arm the handshake timer. Called at connect and on every frame written
+   * while the verdict is still outstanding, so progress keeps the wait alive
+   * and silence still fails at the idle interval. Never past the hard cap.
+   */
+  armHandshake(ms) {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    const req = this.req;
+    if (!req) return;
+    const generation = this.generation;
+    const left = this.handshakeDeadline - Date.now();
+    if (left <= 0) {
+      req.destroy(new Error("timed out waiting for the server"));
+      return;
+    }
+    this.timer = setTimeout(() => {
+      if (generation !== this.generation) return;
+      req.destroy(new Error("timed out waiting for the server"));
+    }, Math.min(ms, left));
   }
 
   emit(status, error = this.error) {
@@ -154,10 +203,8 @@ class StreamSource {
         socket.setNoDelay(true);
         socket.setKeepAlive(true, 30_000);
       });
-      this.timer = setTimeout(() => {
-        if (generation !== this.generation) return;
-        req.destroy(new Error("timed out waiting for the server"));
-      }, CONNECT_TIMEOUT_MS);
+      this.handshakeDeadline = Date.now() + HANDSHAKE_MAX_MS;
+      this.armHandshake(CONNECT_TIMEOUT_MS);
 
       req.on("response", (res) => {
         if (generation !== this.generation) return;
@@ -205,13 +252,22 @@ class StreamSource {
     });
   }
 
-  /** Write one encoded chunk. Dropped while offline or when the socket lags. */
+  /**
+   * Write one encoded chunk. Dropped while offline or when the socket lags.
+   *
+   * Frames are accepted during the handshake too: a server that answers only
+   * after hearing the source would otherwise deadlock — the renderer waits for
+   * a verdict it never gets, and the 5 s timer turns every attempt into a
+   * retry. Writing while connecting is what makes that server answer at all.
+   */
   write(bytes) {
     const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-    if (!this.req || this.status !== "live" || buf.length === 0) {
+    const wantsFrames = this.status === "live" || this.status === "connecting";
+    if (!this.req || !wantsFrames || buf.length === 0) {
       this.dropped += buf.length;
       return;
     }
+    if (this.status === "connecting") this.armHandshake(HANDSHAKE_IDLE_MS);
     if (this.req.writableLength > MAX_BACKLOG_BYTES) {
       this.dropped += buf.length;
       return;
@@ -246,6 +302,104 @@ class StreamSource {
     payload[0] = frames;
     raw.copy(payload, 1);
     return payload;
+  }
+
+  /**
+   * Preflight: open one source connection purely to read the server's verdict,
+   * then close it. Used before Start, so a refused mount is reported as a
+   * reason (credentials, mount in use, wrong name) instead of as an endless
+   * reconnect the operator has to guess at.
+   *
+   * Never touches the live session: it has its own request, its own timeout
+   * and no state of its own on the instance.
+   */
+  probe(cfg) {
+    if (this.status === "live") {
+      return Promise.resolve({
+        ok: false,
+        status: 0,
+        error: "a source is already live from this console — stop it before probing",
+      });
+    }
+    let target;
+    try {
+      target = resolveTarget(cfg);
+    } catch (err) {
+      return Promise.resolve({
+        ok: false,
+        status: 0,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const auth = Buffer.from(
+      `${cfg.username || "source"}:${cfg.password || ""}`,
+    ).toString("base64");
+    const headers = {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": cfg.contentType || "audio/mpeg",
+      "User-Agent": "Signalpath/2.0 (+https://signalpath.app)",
+      "Ice-Name": cfg.name || "Signalpath",
+      "Ice-Public": "0",
+      Accept: "*/*",
+      Connection: "close",
+    };
+    if (cfg.bitrateKbps > 0) headers["Ice-Bitrate"] = String(cfg.bitrateKbps);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        timer = null;
+        try {
+          req.destroy();
+        } catch {
+          /* already gone */
+        }
+        resolve(result);
+      };
+      let req;
+      try {
+        req = (target.secure ? https : http).request({
+          method: "PUT",
+          host: target.host,
+          port: target.port,
+          path: target.path,
+          headers,
+          agent: false,
+          rejectUnauthorized: false,
+        });
+      } catch (err) {
+        resolve({ ok: false, status: 0, error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      req.on("socket", (socket) => socket.setNoDelay(true));
+      req.on("response", (res) => {
+        const status = res.statusCode || 0;
+        if (status === 200) {
+          finish({ ok: true, status, error: null });
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (part) => {
+          if (body.length < 400) body += part;
+        });
+        res.on("end", () => finish({ ok: false, status, error: describeRefusal(status, body) }));
+        res.resume();
+      });
+      req.on("error", (err) =>
+        finish({ ok: false, status: 0, error: err instanceof Error ? err.message : String(err) }),
+      );
+      timer = setTimeout(
+        () => finish({ ok: false, status: 0, error: "the server did not answer within 6 s" }),
+        PROBE_TIMEOUT_MS,
+      );
+      req.flushHeaders();
+      req.end();
+    });
   }
 
   /** Queue a "Artist - Title" line for the next metadata frame. */
@@ -298,4 +452,4 @@ class StreamSource {
   }
 }
 
-module.exports = { StreamSource, resolveTarget, MAX_BACKLOG_BYTES };
+module.exports = { StreamSource, resolveTarget, describeRefusal, MAX_BACKLOG_BYTES };

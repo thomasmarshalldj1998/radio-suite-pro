@@ -21,6 +21,11 @@ const MIME: Record<JsFormat, { mime: string; ext: string }> = {
   opus: { mime: "audio/ogg", ext: "ogg" },
 };
 
+/** Container MIME a given JS/WASM format produces (for preflight checks). */
+export function jsFormatMime(format: JsFormat): string {
+  return MIME[format].mime;
+}
+
 const TAP_NAME = "signalpath-pcm-tap";
 /** Frames per posted batch (~85 ms at 48 kHz). */
 const BATCH = 4096;

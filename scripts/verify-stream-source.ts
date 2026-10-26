@@ -307,5 +307,75 @@ console.log("\n5 · refusal");
   check(near(src.stats().sent, 0), "a failed connection sends nothing");
 }
 
+/* ── 6 · preflight probe ───────────────────────────────────────────────── */
+
+console.log("\n6 · preflight probe");
+
+const probeCfg = (port: number) => ({
+  protocol: "icecast2",
+  server: "127.0.0.1",
+  port,
+  mount: "/probe",
+  username: "source",
+  password: "hackme",
+  contentType: "audio/mpeg",
+});
+
+{
+  const { server, port, got } = await sourceServer(200);
+  const src = new StreamSource();
+  const res = await src.probe(probeCfg(port));
+  check(res.ok && res.status === 200, "a probe of an open mount passes", res.error ?? "");
+  check(got.method === "PUT", "the probe is a source PUT, so the mount's own rules apply", got.method);
+  check(
+    got.headers["icy-metaint"] === undefined,
+    "and it asks for no metadata framing",
+    String(got.headers["icy-metaint"]),
+  );
+  check(src.stats().status === "idle", "the probe leaves the live source untouched", src.stats().status);
+  server.close();
+}
+
+{
+  const { server, port } = await sourceServer(401);
+  const res = await new StreamSource().probe(probeCfg(port));
+  check(!res.ok && res.status === 401, "a refusal reports its status", `${res.status}`);
+  check(/credentials/i.test(res.error ?? ""), "and names credentials as the reason", res.error ?? "");
+  server.close();
+}
+
+{
+  const { server, port } = await sourceServer(403);
+  const res = await new StreamSource().probe(probeCfg(port));
+  check(!res.ok && res.status === 403, "a busy mount is reported as 403", `${res.status}`);
+  check(/in use/i.test(res.error ?? ""), "and says the mount is taken", res.error ?? "");
+  server.close();
+}
+
+{
+  const res = await new StreamSource().probe(probeCfg(1));
+  check(!res.ok && res.status === 0, "an unreachable endpoint fails the probe instead of hanging", res.error ?? "");
+}
+
+/* ── 7 · frames during an outstanding handshake ────────────────────────── */
+
+console.log("\n7 · handshake that waits for frames");
+
+{
+  const { server, port, got } = await sourceServer(200);
+  const src = new StreamSource();
+  // Start the handshake and feed it without waiting for the verdict: this is
+  // the case a server that answers only after hearing the source needs.
+  const opening = src.open(probeCfg(port));
+  src.write(Buffer.alloc(1024, 3));
+  check(src.stats().dropped === 0, "frames written during the handshake are not dropped", `${src.stats().dropped}`);
+  const res = await opening;
+  check(res.ok, "the source still reaches live", res.error ?? "");
+  src.close();
+  await wait(120);
+  check(got.body.length === 1024, "and the server received every byte", `${got.body.length}`);
+  server.close();
+}
+
 console.log(`\n${passed} checks passed, ${failed} failed.`);
 process.exit(failed === 0 ? 0 : 1);
