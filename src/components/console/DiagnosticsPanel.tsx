@@ -140,14 +140,16 @@ export function DiagnosticsPanel() {
       value: d.sinkState === "unsupported" ? "not supported" : d.sinkLabel,
       note:
         d.sinkState === "refused"
-          ? "refused — using default"
-          : d.sinkState === "pending"
-            ? "switch pending"
-            : d.sinkState === "applied"
-              ? "applied"
-              : d.sinkState === "unsupported"
-                ? "browser default only"
-                : "system default",
+          ? "went away — using default"
+          : d.sinkState === "denied"
+            ? "blocked by the browser — using default"
+            : d.sinkState === "pending"
+              ? "switch pending"
+              : d.sinkState === "applied"
+                ? "applied"
+                : d.sinkState === "unsupported"
+                  ? "browser cannot route — default only"
+                  : "system default",
     },
     {
       label: "Limiter",

@@ -518,13 +518,17 @@ export class AudioEngine {
   private everClocked = false;
   /**
    * Result of the last sink switch, for the diagnostics panel. "refused" is a
-   * device that went away; "unsupported" is a browser without setSinkId —
-   * different faults with the same symptom, so they are stored apart.
+   * device that went away; "unsupported" is a browser without setSinkId;
+   * "denied" is a browser that has the API but will not let this page use it
+   * — different faults with the same symptom (audio on the system default),
+   * so they are stored apart. Only "refused" is the operator's own device
+   * failing, and only "refused" is worth forgetting the pick over.
    */
   private sinkState:
     | "default"
     | "applied"
     | "refused"
+    | "denied"
     | "unsupported"
     | "pending" = "default";
   /** Last fault the browser reported, with the moment it was raised. */
@@ -1112,6 +1116,14 @@ export class AudioEngine {
         this.everClocked = true;
         this.openOutput();
         this.ensureBusOpen();
+        // A sink switch that timed out, or that was abandoned while the
+        // endpoint was shut, is retried here — this transition is the moment
+        // the device can take it. Without this the operator's chosen speaker
+        // could stay unrouted for the rest of the session while the console
+        // claimed the pick was applied.
+        if (this.outputDeviceId !== this.appliedSink) {
+          void this.applyOutputDevice();
+        }
       }
     };
     const g = (v = 1) => {
@@ -3320,6 +3332,16 @@ export class AudioEngine {
     if (!ctx) return;
     if (typeof ctx.setSinkId !== "function") {
       this.sinkState = "unsupported";
+      // A browser with no setSinkId at all (Firefox, Safari) is perfectly
+      // usable with no pick — the monitor follows the system default, which is
+      // the only route there is. It is only worth reporting when the operator
+      // has chosen a device that the platform cannot honour, because otherwise
+      // the header would name a speaker nothing is playing through.
+      if (this.outputDeviceId) {
+        this.noteFault(
+          `This browser cannot route audio to a chosen output device, so “${this.monitorState.sinkLabel}” is ignored — the monitor plays on the system default.`,
+        );
+      }
       return;
     }
     const wanted = this.outputDeviceId;
@@ -3354,25 +3376,44 @@ export class AudioEngine {
         this.sinkState = wanted ? "applied" : "default";
         return;
       }
-      if (switched === "pending") {
-        // The call is still in flight. Everything the console knows is left
-        // as it was, so the next device event retries it — but the monitor
-        // is let back through now rather than waiting on a promise that may
-        // never answer.
+      if (switched === "pending" || switched === "failed") {
+        // Still in flight, or refused for a reason that is not the device. The
+        // pick is kept and everything the console knows is left as it was, so
+        // the next device event or the next running transition retries it —
+        // but the monitor is let back through now rather than waiting on a
+        // promise that may never answer.
         this.sinkState = "pending";
         return;
       }
-      // The device vanished between enumeration and the switch. Drop back to
-      // the OS default and say so, rather than leaving the panel claiming a
-      // sink nothing is routed to. A closed context is not a dead device, and
-      // a suspended one may just refuse the call until it resumes — neither
-      // is evidence that the operator picked the wrong speaker.
+      if (switched === "denied") {
+        // The platform has setSinkId but will not let this page route to
+        // another endpoint: the `speaker-selection` permission policy, which a
+        // cross-origin iframe is not granted by default, or no output-device
+        // permission yet. The speaker is fine and the choice stands — it is
+        // kept on purpose, because forgetting it would not make the route
+        // work, and "no output" would be a lie while the system default is
+        // playing the programme. Chromium reports this as NotAllowedError.
+        this.sinkState = "denied";
+        this.noteFault(
+          `The browser blocked routing the monitor to “${this.monitorState.sinkLabel}” — audio is playing on the system default.`,
+        );
+        return;
+      }
+      // What is left is the device vanishing between enumeration and the
+      // switch. Drop back to the OS default and say so, rather than leaving
+      // the panel claiming a sink nothing is routed to. A closed context is
+      // not a dead device, and a suspended one may simply have its pick
+      // outstanding — neither is evidence that the operator chose wrong, so
+      // both leave the pick in place to be retried on the running transition.
       if (!wanted || ctx.state === "closed") return;
-      if (ctx.state !== "running") return;
+      if (ctx.state !== "running") {
+        this.sinkState = "pending";
+        return;
+      }
       if (this.outputDeviceId !== wanted) return; // a newer pick owns the sink
       this.sinkState = "refused";
       this.noteFault(
-        `The output “${this.monitorState.sinkLabel}” refused to open — falling back to the system default.`,
+        `The output “${this.monitorState.sinkLabel}” went away — falling back to the system default.`,
       );
       this.outputDeviceId = "";
       this.saveDevicePrefs();
@@ -3402,25 +3443,36 @@ export class AudioEngine {
   /**
    * One sink switch, bounded.
    *
-   * "ok" and "refused" are the promise's own answers; "pending" means the
-   * call outlived SINK_SWITCH_TIMEOUT_MS and was abandoned. A rejection that
-   * arrives after the timeout has already been consumed by the race, so no
-   * unhandled rejection escapes when the caller walks away.
+   * The three rejection classes need opposite responses, so they are told
+   * apart rather than collapsed into one "refused": a device that is gone
+   * should be forgotten, a page that is not allowed to route should not be,
+   * and an unknown failure should be tried again. Chromium answers
+   * NotAllowedError for a blocked `speaker-selection` permission and
+   * NotFoundError for a stale device id. "pending" means the call outlived
+   * SINK_SWITCH_TIMEOUT_MS and was abandoned; a rejection that arrives after
+   * the timeout has already been consumed by the race, so no unhandled
+   * rejection escapes when the caller walks away.
    */
   private async switchSink(
     ctx: AudioContext & { setSinkId?: (sinkId: string) => Promise<void> },
     id: string,
-  ): Promise<"ok" | "refused" | "pending"> {
+  ): Promise<"ok" | "denied" | "missing" | "failed" | "pending"> {
+    const classify = (err: unknown): "denied" | "missing" | "failed" => {
+      const name = err instanceof Error ? err.name : "";
+      if (name === "NotAllowedError") return "denied";
+      if (name === "NotFoundError") return "missing";
+      return "failed";
+    };
     try {
       return await Promise.race([
         ctx.setSinkId!(id).then(
           () => "ok" as const,
-          () => "refused" as const,
+          (err: unknown) => classify(err),
         ),
         waitMs(SINK_SWITCH_TIMEOUT_MS).then(() => "pending" as const),
       ]);
-    } catch {
-      return "refused";
+    } catch (err) {
+      return classify(err);
     }
   }
 
@@ -4115,6 +4167,9 @@ export class AudioEngine {
       monitorMuted: this.monitorMuted,
       monitorDb: this.monitorGainDb,
       sinkRefused: this.sinkState === "refused",
+      sinkDenied:
+        this.sinkState === "denied" ||
+        (this.sinkState === "unsupported" && this.outputDeviceId !== ""),
       sinkVirtual: this.monitorIsVirtual,
       sinkLabel: this.monitorState.sinkLabel,
       stalls: this.glitch.stalls,

@@ -53,9 +53,27 @@ interface RawDevice {
 }
 
 /**
- * Normalise enumeration output. Entries with no device id cannot be opened,
- * so they are dropped; the flag records that this happened, so callers can
- * tell "no hardware" from "not allowed to see it yet".
+ * Ids that name the system default rather than a piece of hardware.
+ *
+ * Chromium exposes the system default endpoint before any permission has been
+ * granted, and it does so with the literal id "default" ("communications"
+ * for the voice-call endpoint) rather than the empty string the spec allows.
+ * Such an entry is not a device: no real device id can appear in the list
+ * until the page is allowed to see it. Listing them as devices made the list
+ * look identifiable, which is what let a saved speaker be erased on every
+ * load that happened before the microphone was armed.
+ */
+const PLACEHOLDER_IDS = new Set(["", "default", "communications"]);
+
+/** True for an id that names the system default rather than a device. */
+export function isPlaceholderId(id: string): boolean {
+  return PLACEHOLDER_IDS.has(id.trim().toLowerCase());
+}
+
+/**
+ * Normalise enumeration output. Placeholder endpoints are dropped, so the
+ * list holds only devices that can actually be opened and the flag is a
+ * truthful "did we get to see the hardware".
  */
 export function listDevices(all: readonly RawDevice[]): DeviceListing {
   const pick = (kind: "audioinput" | "audiooutput", fallback: string) => {
@@ -64,7 +82,7 @@ export function listDevices(all: readonly RawDevice[]): DeviceListing {
     let n = 0;
     for (const d of all) {
       if (d.kind !== kind) continue;
-      if (!d.deviceId || seen.has(d.deviceId)) continue;
+      if (isPlaceholderId(d.deviceId) || seen.has(d.deviceId)) continue;
       seen.add(d.deviceId);
       n += 1;
       list.push({
@@ -87,7 +105,9 @@ export function listDevices(all: readonly RawDevice[]): DeviceListing {
 
 /**
  * Keep a saved pick only when the list is trustworthy and the device is not
- * in it. Returns "" (OS default) when the device is genuinely gone.
+ * in it. Returns "" (OS default) when the device is genuinely gone, and also
+ * for a stored placeholder — "" is what the default means now that
+ * placeholders are no longer listed as hardware.
  */
 export function reconcileSelection(
   saved: string,
@@ -95,6 +115,7 @@ export function reconcileSelection(
   identified: boolean,
 ): string {
   if (!saved) return "";
+  if (isPlaceholderId(saved)) return "";
   if (!identified) return saved;
   return devices.some((d) => d.id === saved) ? saved : "";
 }

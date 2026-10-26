@@ -71,6 +71,12 @@ export interface HealthFacts {
   monitorDb: number;
   /** The chosen speaker refused the switch and fell back to the default. */
   sinkRefused: boolean;
+  /**
+   * The platform blocked the switch (missing `speaker-selection` permission,
+   * or a browser without setSinkId). Audio is still playing, on the system
+   * default — a routing wish that was not granted, not a dead output.
+   */
+  sinkDenied: boolean;
   /** The chosen sink is a loopback/virtual endpoint — inaudible locally. */
   sinkVirtual: boolean;
   sinkLabel: string;
@@ -311,19 +317,23 @@ function buildChecks(f: HealthFacts): HealthCheck[] {
           ? f.streamOnAir
             ? "warn"
             : "fail"
-          : f.sinkVirtual
+          : f.sinkVirtual || f.sinkDenied
             ? "warn"
             : "pass",
     detail: !powered
       ? "No route"
       : f.sinkRefused
-        ? "Chosen sink refused — using the system default"
+        ? "Chosen sink went away — using the system default"
         : f.monitorMuted
           ? "Monitor muted"
           : f.monitorDb <= MONITOR_FLOOR_DB
             ? "Monitor at or below −60 dB"
             : `${f.monitorDb.toFixed(1)} dB into “${f.sinkLabel || "System default"}”${
-                f.sinkVirtual ? " (loopback endpoint — inaudible locally)" : ""
+                f.sinkDenied
+                  ? " — the browser would not route the pick, so this is the system default"
+                  : f.sinkVirtual
+                    ? " (loopback endpoint — inaudible locally)"
+                    : ""
               }`,
   });
 
@@ -356,6 +366,7 @@ export const IDLE_FACTS: HealthFacts = {
   monitorMuted: false,
   monitorDb: -6,
   sinkRefused: false,
+  sinkDenied: false,
   sinkVirtual: false,
   sinkLabel: "System default",
   stalls: 0,

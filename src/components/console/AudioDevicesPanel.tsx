@@ -29,6 +29,13 @@ export interface AudioPanelController {
   monitorVirtual?: boolean;
   /** Input and monitor are two sides of the same endpoint (feedback). */
   feedbackRisk?: boolean;
+  /**
+   * Why the browser will not route the monitor to the chosen endpoint, or
+   * null when it can. "unsupported" is a browser with no setSinkId at all
+   * (Firefox, Safari); "denied" is one that has it but withholds the
+   * `speaker-selection` permission — audio still plays on the system default.
+   */
+  outputRouting?: "denied" | "unsupported" | null;
   setInput: (id: string) => void;
   setOutput: (id: string) => void;
   refresh: () => void;
@@ -44,6 +51,7 @@ export function useLocalAudioController(): AudioPanelController {
   const engine = getEngine();
   const [, force] = useState(0);
   useEffect(() => engine.subscribe(() => force((n) => n + 1)), [engine]);
+  const sinkState = engine.diagnostics.sinkState;
   return {
     inputs: engine.inputDevices.length ? engine.inputDevices : EMPTY_INPUTS,
     outputs: engine.outputDevices.length ? engine.outputDevices : EMPTY_OUTPUTS,
@@ -57,6 +65,8 @@ export function useLocalAudioController(): AudioPanelController {
     sourceKind: engine.sourceKind,
     monitorVirtual: engine.monitorIsVirtual,
     feedbackRisk: engine.feedbackRisk,
+    outputRouting:
+      sinkState === "denied" || sinkState === "unsupported" ? sinkState : null,
     setInput: (id) => engine.setInputDevice(id),
     setOutput: (id) => engine.setOutputDevice(id),
     refresh: () => void engine.refreshDevices(),
@@ -256,14 +266,32 @@ export function AudioDevicesPanel({
       </select>
       {noOutputs && (
         <p className="mt-1.5 text-[11px] leading-5 text-meter-warn">
-          No selectable output — plug in speakers or headphones and rescan.
-          Monitoring stays silent until then; the encoder feed is unaffected.
+          No selectable output yet. Browsers list only the system default until
+          this page has been granted audio access — arm the input once, then
+          rescan, and the real speakers appear. On a machine with no sound card
+          there is nothing to list at all.
         </p>
       )}
       <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
         What you hear locally. The stream encoder always carries the full
         program chain regardless of this choice.
       </p>
+      {controller.outputRouting === "denied" && (
+        <p className="mt-2 rounded border border-meter-warn/40 bg-meter-warn/10 px-2 py-1.5 text-[11px] leading-5 text-meter-warn">
+          This browser has the output-device API but will not let the page use
+          it (the speaker-selection permission), so the monitor is playing on
+          the system default. Choose the speaker in the operating system, or
+          run the desktop build, where the route is set natively. The encoder
+          feed is unaffected.
+        </p>
+      )}
+      {controller.outputRouting === "unsupported" && (
+        <p className="mt-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+          This browser gives a page no way to choose an output device — Firefox
+          and Safari do not implement it, so the monitor always follows the
+          system default. The encoder feed is unaffected.
+        </p>
+      )}
       {controller.feedbackRisk && (
         <p className="mt-2 rounded border border-meter-hot/40 bg-meter-hot/10 px-2 py-1.5 text-[11px] leading-5 text-meter-hot">
           Input and monitor are two sides of the same endpoint — the chain is
