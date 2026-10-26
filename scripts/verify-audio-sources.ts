@@ -60,6 +60,7 @@ class FakeParam {
 
 class FakeNode {
   gain = new FakeParam();
+  delayTime = new FakeParam();
   frequency = new FakeParam();
   Q = new FakeParam();
   threshold = new FakeParam();
@@ -111,6 +112,7 @@ class FakeAudioContext {
   onstatechange: null | (() => void) = null;
   destination = new FakeNode();
   createGain = () => new FakeNode();
+  createDelay = () => new FakeNode();
   createBiquadFilter = () => new FakeNode();
   createDynamicsCompressor = () => new FakeNode();
   createAnalyser = () => new FakeNode();

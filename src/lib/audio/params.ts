@@ -450,6 +450,14 @@ export interface ProcessorParams {
   /** FM transmission branch (pre-emphasis + MPX composite generator). */
   fm: FmParams;
   rider: RiderParams;
+  /**
+   * On-air delay (profanity delay). The programme bus runs this many seconds
+   * behind real time so a DUMP can cut the offending seconds out of the
+   * transmission. The delay line sits after the failover crossfade and ahead
+   * of the input trim, so the stream encoder and the monitor both carry the
+   * delayed programme — a dump can never leave the chain out of step.
+   */
+  delay: { on: boolean; seconds: number };
   outputGainDb: number;
   monitorDb: number;
   duckDb: number;
@@ -603,6 +611,7 @@ export const DEFAULT_PARAMS: ProcessorParams = {
     gateDb: -55,
     speed: "fast",
   },
+  delay: { on: false, seconds: 7 },
   outputGainDb: 0,
   monitorDb: -6,
   duckDb: 12,

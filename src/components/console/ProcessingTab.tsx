@@ -1,3 +1,4 @@
+import { OnAirTools } from "@/components/console/OnAirTools";
 import { StreamTxPanel } from "@/components/console/StreamTxPanel";
 import { BandGrBar, StereoLevelMeter, GainReductionMeter } from "@/components/console/Meters";
 import { Fader } from "@/components/console/Fader";
@@ -306,6 +307,7 @@ export type DspSection =
   | "multiband"
   | "limiter"
   | "output"
+  | "onair"
   | "stream";
 
 /** Tab groups mirror the signal path: shape → squeeze → deliver. */
@@ -321,7 +323,10 @@ const DSP_SECTION_GROUPS: { id: DspSection; label: string }[][] = [
     { id: "limiter", label: "Limiter" },
     { id: "output", label: "Output" },
   ],
-  [{ id: "stream", label: "Stream TX" }],
+  [
+    { id: "onair", label: "On Air" },
+    { id: "stream", label: "Stream TX" },
+  ],
 ];
 
 /**
@@ -1958,6 +1963,11 @@ export function ProcessingTab({
           )}
         </ChainBlock>
           </>
+        )}
+        {section === "onair" && (
+          <div className="min-w-0 flex-1">
+            <OnAirTools params={params} setParams={setParams} />
+          </div>
         )}
         {section === "stream" && (
           <div className="min-w-0 flex-1">

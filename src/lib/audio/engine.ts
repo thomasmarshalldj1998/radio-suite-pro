@@ -212,6 +212,17 @@ export interface MeterSnapshot {
   backupActive: boolean;
   /** Peak limiter actually in circuit — the worklet when it loaded, else native. */
   limiterEngine: "native" | "worklet";
+  /** On-air broadcast delay: engaged, behind by `seconds`, and rebuilding. */
+  delay: {
+    on: boolean;
+    seconds: number;
+    /** True while the programme is live and the delay line is re-accumulating. */
+    live: boolean;
+    /** Milliseconds left in that rebuild (0 when the line is whole). */
+    rebuildMs: number;
+    /** Dumps since power-on. */
+    dumps: number;
+  };
 }
 
 export const SILENT_SNAPSHOT: MeterSnapshot = {
@@ -259,6 +270,7 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   speechFast: false,
   backupActive: false,
   limiterEngine: "native",
+  delay: { on: false, seconds: 0, live: false, rebuildMs: 0, dumps: 0 },
 };
 
 /** One heavy measurement pass every N ms (true peak, loudness, blocks). */
@@ -293,6 +305,23 @@ const ENDPOINT_SETTLE_MS = 24;
  * retried by the next device event.
  */
 const SINK_SWITCH_TIMEOUT_MS = 1500;
+
+/**
+ * On-air delay (profanity delay).
+ *
+ * Two delay taps share one input so a dump is a fade, never a rewire. The
+ * muted tap is parked at 0 s (live), faded in over AIR_DUMP_FADE_MS, then
+ * walked back to the full delay at a read rate of exactly 1.0 — the programme
+ * plays at true speed while the delay re-accumulates, so there is no pitch
+ * shift and no gap. The audible tap's delay time is never touched until it is
+ * muted, so no tap jump can ever reach air.
+ */
+const AIR_DELAY_MAX_S = 15;
+const AIR_DELAY_MIN_S = 1;
+/** Crossfade length for a dump: short enough to cut the word, long enough not to click. */
+const AIR_DUMP_FADE_MS = 8;
+/** Crossfade for engaging, retuning or releasing the delay line. */
+const AIR_DELAY_FADE_MS = 60;
 
 const stopStream = (stream: MediaStream) => {
   for (const track of stream.getTracks()) track.stop();
@@ -382,6 +411,26 @@ export class AudioEngine {
   // failover: primary crossfade gain + standby media element into the chain
   private srcGain!: GainNode;
   private backupGain!: GainNode;
+  /* ── on-air delay (profanity delay) ── */
+  private delayIn!: GainNode;
+  private delayDry!: GainNode;
+  private delayTaps: DelayNode[] = [];
+  private delayTapGains: GainNode[] = [];
+  /** Which tap is audible (the other is parked muted at 0 s). */
+  private delayActiveTap = 0;
+  private delaySeconds = 7;
+  private delayEnabled = false;
+  /** True while a dump is rebuilding the delay line (programme is live). */
+  private delayLive = false;
+  /** Wall clock (performance.now) the rebuild completes. */
+  private delayRebuildAt = 0;
+  private delayDumps = 0;
+  private delayLastDumpAt = 0;
+  /** Last applied delay configuration, so re-applying is free. */
+  private delaySig = "";
+  /** Wall clock the graph started clocking — the delay line needs this long
+   *  of programme in its buffer before it can be seated at the full delay. */
+  private graphStartAt = 0;
   private backupEl: HTMLAudioElement | null = null;
   private backupSrc: MediaElementAudioSourceNode | null = null;
   private backupUrl: string | null = null;
@@ -894,6 +943,27 @@ export class AudioEngine {
       // next take-over would be a no-op.
       this.setNum("failover.src", this.srcGain?.gain, 1, 0.01);
       this.setNum("failover.backup", this.backupGain?.gain, 0, 0.01);
+      // The delay line still holds pre-suspend programme. Park it on the live
+      // leg and force a re-arm on the next boot, so those frames can never
+      // air after a restart.
+      this.delaySig = "";
+      this.delayEnabled = false;
+      this.delayLive = false;
+      this.delayRebuildAt = 0;
+      this.graphStartAt = performance.now();
+      if (ctx) {
+        const t = ctx.currentTime;
+        this.delayDry?.gain.cancelScheduledValues(t);
+        this.delayDry?.gain.setValueAtTime(1, t);
+        for (const gn of this.delayTapGains) {
+          gn.gain.cancelScheduledValues(t);
+          gn.gain.setValueAtTime(0, t);
+        }
+        for (const tap of this.delayTaps) {
+          tap.delayTime.cancelScheduledValues(t);
+          tap.delayTime.setValueAtTime(0, t);
+        }
+      }
       this.outputOpen = false;
       if (ctx && ctx.state !== "closed") {
         // Recorded rather than fired and forgotten: the next boot awaits it,
@@ -968,6 +1038,13 @@ export class AudioEngine {
    * appended to (which duplicated HPF/EQ/split filters on every boot).
    */
   private clearGraphRefs() {
+    this.delayTaps = [];
+    this.delayTapGains = [];
+    this.delayActiveTap = 0;
+    this.delayEnabled = false;
+    this.delayLive = false;
+    this.delayRebuildAt = 0;
+    this.delaySig = "";
     this.hpfStages = [];
     this.mainsHarmonics = [];
     this.phaseStages = [];
@@ -1110,8 +1187,31 @@ export class AudioEngine {
     this.srcGain = g(1);
     this.backupGain = g(0);
     this.gateGain.connect(this.srcGain);
-    this.srcGain.connect(this.inputGain);
-    this.backupGain.connect(this.inputGain);
+
+    // ── on-air delay: dry leg + two delay taps ──
+    // The delay sits after the failover crossfade, so whichever source is on
+    // air is delayed by the same amount, and ahead of every processing stage,
+    // so the whole chain (monitor and stream encoder) stays in step with it.
+    // Both taps stay wired; only their gains move, which is what makes a dump
+    // a crossfade instead of a graph rebuild.
+    this.delayIn = g(1);
+    this.delayDry = g(1);
+    this.delayTaps = [];
+    this.delayTapGains = [];
+    for (let i = 0; i < 2; i++) {
+      const tap = ctx.createDelay(AIR_DELAY_MAX_S);
+      tap.delayTime.value = 0;
+      const tapGain = g(0);
+      this.delayIn.connect(tap);
+      tap.connect(tapGain);
+      tapGain.connect(this.inputGain);
+      this.delayTaps.push(tap);
+      this.delayTapGains.push(tapGain);
+    }
+    this.delayIn.connect(this.delayDry);
+    this.delayDry.connect(this.inputGain);
+    this.srcGain.connect(this.delayIn);
+    this.backupGain.connect(this.delayIn);
     // pre-gate detector so a closed gate still hears program return
     this.gateAnalyser = ctx.createAnalyser();
     this.gateAnalyser.fftSize = 2048;
@@ -1822,6 +1922,7 @@ export class AudioEngine {
     this.ksBufInR = new Float32Array(this.inKsAnalyserR.fftSize);
     this.specBufPre = new Uint8Array(this.preSpec.frequencyBinCount);
     this.specBufPost = new Uint8Array(this.postSpec.frequencyBinCount);
+    this.graphStartAt = performance.now();
     this.graphReady = true;
   }
 
@@ -1855,6 +1956,9 @@ export class AudioEngine {
       this.inputGain.gain,
       dbToGain(params.inputGainDb + (calibration.on ? calibration.offsetDb : 0)),
     );
+
+    // ── on-air broadcast delay ──
+    this.applyAirDelay(params.delay);
 
     // ── v3.1 restoration ──
     const nr = adv.restoration.nr;
@@ -2309,6 +2413,165 @@ export class AudioEngine {
     if (!wet || !dry) return; // teardown race: nodes not (or no longer) built
     this.setNum(`${key}.wet`, wet.gain, on ? 1 : 0, 0.015);
     this.setNum(`${key}.dry`, dry.gain, on ? 0 : 1, 0.015);
+  }
+
+  /* ── on-air delay (profanity delay) ────────────────────────────────────── */
+
+  /**
+   * Seat the delay line from the parameter block.
+   *
+   * Engaging, retuning and releasing are all crossfades, and the audible tap's
+   * delay time is only ever written while that tap is muted — except for a
+   * deliberate retune, which walks it over 200 ms so the change is a bend, not
+   * a click. Any rebuild in flight is abandoned first: a tap whose delay time
+   * is being automated must not be re-ramped underneath itself.
+   */
+  private applyAirDelay(cfg: { on: boolean; seconds: number }) {
+    const ctx = this.ctx;
+    if (!ctx || !this.graphReady || this.delayTaps.length < 2) return;
+    const seconds = Math.min(
+      AIR_DELAY_MAX_S,
+      Math.max(AIR_DELAY_MIN_S, Math.round(cfg.seconds * 10) / 10),
+    );
+    const sig = `${cfg.on ? 1 : 0}|${seconds}`;
+    if (sig === this.delaySig) return;
+    const wasOn = this.delayEnabled;
+    this.delaySig = sig;
+    this.delayEnabled = cfg.on;
+    this.delaySeconds = seconds;
+
+    const now = ctx.currentTime;
+    const fade = AIR_DELAY_FADE_MS / 1000;
+    const gains = this.delayTapGains;
+    const ramp = (param: AudioParam, target: number) => {
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(target, now + fade);
+    };
+
+    if (!cfg.on) {
+      // Release: fade back to the live leg, then park both taps muted.
+      this.delayLive = false;
+      this.delayRebuildAt = 0;
+      ramp(this.delayDry.gain, 1);
+      gains.forEach((gn) => ramp(gn.gain, 0));
+      for (const tap of this.delayTaps) {
+        tap.delayTime.cancelScheduledValues(now + fade);
+        tap.delayTime.setValueAtTime(0, now + fade);
+      }
+      return;
+    }
+
+    if (!wasOn) {
+      // Engage. A tap can only be seated at the full delay once its buffer
+      // holds that much programme; on a fresh (or just-restarted) graph it
+      // is empty, so the line arms live and grows the delay at true speed
+      // instead of replaying silence. A primed line seats immediately and the
+      // programme jumps back, which is what engaging a delay by hand does.
+      this.delayActiveTap = 0;
+      const active = this.delayTaps[0];
+      const standby = this.delayTaps[1];
+      const primed = performance.now() - this.graphStartAt >= seconds * 1000 + 250;
+      for (const tap of this.delayTaps) tap.delayTime.cancelScheduledValues(now);
+      standby.delayTime.setValueAtTime(0, now);
+      if (primed) {
+        active.delayTime.setValueAtTime(seconds, now);
+        this.delayLive = false;
+        this.delayRebuildAt = 0;
+      } else {
+        active.delayTime.setValueAtTime(0, now + fade);
+        active.delayTime.linearRampToValueAtTime(seconds, now + fade + seconds);
+        this.delayLive = true;
+        this.delayRebuildAt = performance.now() + seconds * 1000;
+      }
+      const parked = gains[1].gain;
+      parked.cancelScheduledValues(now);
+      parked.setValueAtTime(0, now);
+      ramp(this.delayDry.gain, 0);
+      ramp(gains[0].gain, 1);
+      return;
+    }
+
+    // Retune while engaged (or abandon a rebuild to honour a new setting).
+    this.delayLive = false;
+    this.delayRebuildAt = 0;
+    const activeIndex = this.delayActiveTap;
+    const active = this.delayTaps[activeIndex];
+    const standby = this.delayTaps[1 - activeIndex];
+    active.delayTime.cancelScheduledValues(now);
+    active.delayTime.setValueAtTime(active.delayTime.value, now);
+    active.delayTime.linearRampToValueAtTime(seconds, now + 0.2);
+    standby.delayTime.cancelScheduledValues(now);
+    standby.delayTime.setValueAtTime(0, now);
+    ramp(this.delayDry.gain, 0);
+    ramp(gains[activeIndex].gain, 1);
+    ramp(gains[1 - activeIndex].gain, 0);
+  }
+
+  /**
+   * DUMP — cut the offending seconds out of the transmission.
+   *
+   * The muted tap is parked at 0 s (live) and faded in over 8 ms; the audible
+   * tap fades out over the same window, so the switch is a short crossfade at
+   * programme level, never a click. The new tap then walks back to the full
+   * delay at a read rate of exactly 1.0 while the programme plays at true
+   * speed: no gap, no pitch shift, and the line is armed again afterwards.
+   * Returns false when there is nothing to dump (delay off or engine down).
+   */
+  dumpDelay(): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.graphReady || !this.powered || !this.delayEnabled) return false;
+    if (this.delayTaps.length < 2) return false;
+
+    const now = ctx.currentTime;
+    const from = this.delayActiveTap;
+    const to = 1 - from;
+    const inTap = this.delayTaps[to];
+    const inGain = this.delayTapGains[to];
+    const outGain = this.delayTapGains[from];
+    const fade = AIR_DUMP_FADE_MS / 1000;
+
+    // The incoming tap is muted, so parking it at 0 s (live) is inaudible.
+    inTap.delayTime.cancelScheduledValues(now);
+    inTap.delayTime.setValueAtTime(0, now);
+
+    const ramp = (param: AudioParam, target: number) => {
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(target, now + fade);
+    };
+    ramp(outGain.gain, 0);
+    ramp(inGain.gain, 1);
+
+    // Rebuild behind the fade: slope exactly 1.0 → true-speed playback.
+    inTap.delayTime.cancelScheduledValues(now + fade);
+    inTap.delayTime.setValueAtTime(0, now + fade);
+    inTap.delayTime.linearRampToValueAtTime(
+      this.delaySeconds,
+      now + fade + this.delaySeconds,
+    );
+
+    this.delayActiveTap = to;
+    this.delayLive = true;
+    this.delayRebuildAt = performance.now() + this.delaySeconds * 1000;
+    this.delayDumps += 1;
+    this.delayLastDumpAt = Date.now();
+    this.notify();
+    return true;
+  }
+
+  /** Live broadcast-delay state for the console (mirrored into snapshots). */
+  getDelayStatus() {
+    return {
+      enabled: this.delayEnabled,
+      seconds: this.delaySeconds,
+      live: this.delayLive,
+      rebuildMs: this.delayLive
+        ? Math.max(0, Math.round(this.delayRebuildAt - performance.now()))
+        : 0,
+      dumps: this.delayDumps,
+      lastDumpAt: this.delayLastDumpAt,
+    };
   }
 
   /**
@@ -3231,6 +3494,12 @@ export class AudioEngine {
     const ctx = this.ctx;
     if (!ctx) return;
 
+    // The delay line is whole again: a new dump is armed from here.
+    if (this.delayLive && now >= this.delayRebuildAt) {
+      this.delayLive = false;
+      this.delayRebuildAt = 0;
+    }
+
     // input peaks
     this.inAnalyserL.getFloatTimeDomainData(this.inBufL);
     this.inAnalyserR.getFloatTimeDomainData(this.inBufR);
@@ -3671,6 +3940,15 @@ export class AudioEngine {
         this.workletLimiter && limiterEngine(this.params?.limiter) === "worklet"
           ? "worklet"
           : "native",
+      delay: {
+        on: this.delayEnabled,
+        seconds: this.delaySeconds,
+        live: this.delayLive,
+        rebuildMs: this.delayLive
+          ? Math.max(0, Math.round(this.delayRebuildAt - now))
+          : 0,
+        dumps: this.delayDumps,
+      },
     };
 
     const cost = performance.now() - t0;

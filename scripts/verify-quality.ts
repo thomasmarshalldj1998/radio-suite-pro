@@ -154,6 +154,9 @@ class FakeParam {
   setValueAtTime(v: number) {
     this.value = v;
   }
+  linearRampToValueAtTime(v: number) {
+    this.value = v;
+  }
   cancelScheduledValues() {
     /* nothing scheduled */
   }
@@ -161,6 +164,7 @@ class FakeParam {
 
 class FakeNode {
   gain = new FakeParam();
+  delayTime = new FakeParam();
   frequency = new FakeParam();
   Q = new FakeParam();
   detune = new FakeParam();
@@ -209,6 +213,7 @@ function fakeContext(sampleRate: number) {
     onstatechange: null as null | (() => void),
     destination: new FakeNode(),
     createGain: () => new FakeNode(),
+    createDelay: () => new FakeNode(),
     createBiquadFilter: () => new FakeNode(),
     createDynamicsCompressor: () => new FakeNode(),
     createAnalyser: () => new FakeNode(),

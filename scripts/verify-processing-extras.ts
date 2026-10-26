@@ -197,6 +197,9 @@ class FakeParam {
   setValueAtTime(v: number) {
     this.value = v;
   }
+  linearRampToValueAtTime(v: number) {
+    this.value = v;
+  }
   cancelScheduledValues() {
     /* nothing scheduled */
   }
@@ -208,6 +211,7 @@ let nodeId = 0;
 class FakeNode {
   id = (nodeId += 1);
   gain = new FakeParam();
+  delayTime = new FakeParam();
   frequency = new FakeParam();
   Q = new FakeParam();
   threshold = new FakeParam();
@@ -253,6 +257,7 @@ const fakeCtx = {
   onstatechange: null as null | (() => void),
   destination: new FakeNode(),
   createGain: () => new FakeNode(),
+  createDelay: () => new FakeNode(),
   createBiquadFilter: () => new FakeNode(),
   createDynamicsCompressor: () => new FakeNode(),
   createAnalyser: () => new FakeNode(),

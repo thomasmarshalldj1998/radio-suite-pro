@@ -67,6 +67,7 @@ import {
   Power,
   Radio,
   RotateCcw,
+  Scissors,
   SlidersHorizontal,
   Sparkles,
   TriangleAlert,
@@ -200,6 +201,14 @@ interface Hud {
   clock: string;
   sourceLabel: string;
   destLabel: string;
+  /** Broadcast-delay state, mirrored from the engine snapshot. */
+  delay: {
+    on: boolean;
+    seconds: number;
+    live: boolean;
+    rebuildMs: number;
+    dumps: number;
+  };
 }
 
 const HUD_OFF: Hud = {
@@ -212,6 +221,7 @@ const HUD_OFF: Hud = {
   clock: "",
   sourceLabel: "Signal generator",
   destLabel: "No output",
+  delay: { on: false, seconds: 0, live: false, rebuildMs: 0, dumps: 0 },
 };
 
 /** LED class for a phase — one mapping for the badge, chip and rail. */
@@ -680,6 +690,7 @@ export default function Dashboard() {
         clock: new Date().toLocaleTimeString(),
         sourceLabel,
         destLabel,
+        delay: snap.delay,
       });
     };
     tick();
@@ -846,6 +857,23 @@ export default function Dashboard() {
     };
   }, [engine, startEngine]);
 
+  /** DUMP — cut the on-air delay's worth of programme from every output. */
+  const dumpProgramme = useCallback(() => {
+    if (!engine.dumpDelay()) {
+      toast.error("Nothing to dump", {
+        description: "The broadcast delay is bypassed or the engine is stopped.",
+      });
+      return;
+    }
+    toast.success("Programme dumped", {
+      description: `${(hud.delay.seconds || 0).toFixed(1)} s cut · delay re-arming behind the dump.`,
+    });
+    logSession(
+      "Programme dumped",
+      `Broadcast delay · ${(hud.delay.seconds || 0).toFixed(1)} s cut from air`,
+    );
+  }, [engine, hud.delay.seconds, logSession]);
+
   const stopEngine = useCallback(() => {
     if (powerBusyRef.current || !engine.powered) return;
     engine.powerOff();
@@ -860,9 +888,12 @@ export default function Dashboard() {
 
   const applyPreset = useCallback((p: ProcessorParams, name: string) => {
     const coerced = coerceParams(p);
-    setParams(coerced);
+    // The on-air delay is transmission state, not tone: a preset (or a
+    // daypart switch) must never take the profanity delay off air.
+    const next = { ...coerced, delay: paramsRef.current.delay };
+    setParams(next);
     setActivePreset(name);
-    setBaseline({ params: cloneParams(coerced), name });
+    setBaseline({ params: cloneParams(next), name });
   }, []);
 
   /** REVERT — restore the chain to the last loaded preset snapshot. */
@@ -1033,6 +1064,37 @@ export default function Dashboard() {
             >
               <Activity className="size-4" />
             </Button>
+
+            {/* broadcast delay: the dump control lives on the header so it is
+                reachable from every console page, not just the DSP tab */}
+            {params.delay.on && (
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={dumpProgramme}
+                disabled={!hud.powered}
+                title={
+                  hud.delay.live
+                    ? `Delay re-arming — ${Math.ceil(hud.delay.rebuildMs / 1000)} s until it is available again`
+                    : `Cut ${params.delay.seconds.toFixed(1)} s of programme from air`
+                }
+                aria-label="Dump the broadcast delay"
+                className="h-9 cursor-pointer gap-1.5 px-2.5 text-[11px] font-bold tracking-[0.12em] uppercase sm:px-3"
+              >
+                <Scissors className="size-3.5" />
+                <span className="hidden sm:inline">Dump</span>
+                <span
+                  className={cn(
+                    "text-readout text-[10px] font-semibold",
+                    hud.delay.live ? "text-amber-led" : "text-white/75",
+                  )}
+                >
+                  {hud.delay.live
+                    ? `${Math.ceil(hud.delay.rebuildMs / 1000)}s`
+                    : `${params.delay.seconds.toFixed(1)}s`}
+                </span>
+              </Button>
+            )}
 
             {/* monitor bus: what the speakers are really being fed */}
             <MonitorReadout />

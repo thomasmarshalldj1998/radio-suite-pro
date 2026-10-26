@@ -44,6 +44,9 @@ class Param {
   setValueAtTime(v: number) {
     this.value = v;
   }
+  linearRampToValueAtTime(v: number) {
+    this.value = v;
+  }
   cancelScheduledValues() {
     /* no automation */
   }

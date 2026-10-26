@@ -334,6 +334,48 @@ missing). The two paths agree bit-for-bit on the filter/limiter stages and to
 ≈1e-14 on the one anchor stage that converts through `np.log10`, which is
 below float64 print precision for audio.
 
+## v3.0.0 — on-air release
+
+The v3.0.0 cut adds the two things a broadcast processor is judged on when the
+programme is live: a way to take something off air, and a truthful record of
+what went out.
+
+### Broadcast Delay (`delay`)
+
+- A real **profanity delay** stage in the audio graph — after the failover
+  crossfade and ahead of every processor, so the **stream encoder, the FM
+  branch and the monitor all carry the same delayed programme**.
+- **DUMP** cuts the delay time out of the transmission in one **8 ms
+  crossfade**, then re-arms the line at true speed (read rate 1.0×), so there is
+  no gap, no click and no pitch shift. The two taps swap roles, which means no
+  node is ever rewired on air.
+- Arming is honest about the physics: a **cold or restarted line grows the
+  delay live** instead of replaying an empty buffer, and a primed line seats
+  the full delay immediately.
+- 1–12 s in 0.5 s steps. State (engaged / rebuilding / armed, rebuild
+  countdown, dump count) is in the meter snapshot and on the header DUMP
+  control, which is reachable from every console page. Both the dump and the
+  aircheck are written to the station log.
+- The delay is transmission state, not tone: **applying a preset or a daypart
+  never takes it off air**.
+
+### Aircheck recorder (`lib/audio/aircheck.ts`)
+
+- Captures the **post-limiter programme bus** (the same `MediaStream` the
+  encoder uses) to Opus/WebM where available, AAC/MP4 otherwise.
+- Runs at module scope, so moving between console pages never stops a capture;
+  a take is saved with duration and size, downloadable, and deletable.
+- Bounded on purpose: 3 h per take, a 400 MB ceiling, and the six newest takes
+  are kept in memory (blob URLs are revoked when a take is dropped).
+
+### Verification
+
+`bun scripts/verify-air-delay.ts` drives the real `AudioEngine` against a
+stand-in `AudioContext` that records scheduled automation: cold/primed arming,
+the shared 8 ms dump crossfade, the rebuild ramp's 1.0× slope, refusals, and
+old-save coercion (26 checks). The release guard still runs through
+`bun run verify`.
+
 ## Desktop App (Windows, macOS, Linux)
 
 The whole console also ships as a standalone desktop package built with

@@ -333,6 +333,7 @@ class MockContext {
     Object.assign(new Node(), { oversample: "none", curve: null as Float32Array | null });
   createChannelSplitter = () => new Node();
   createChannelMerger = () => new Node();
+  createDelay = () => Object.assign(new Node(), { delayTime: new Param(0) });
   createBufferSource = () =>
     Object.assign(new Node(), { buffer: null, loop: false, start() {}, stop() {} });
   createOscillator = () =>
