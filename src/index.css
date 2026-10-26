@@ -319,6 +319,134 @@
   }
 }
 
+/* ── branded boot splash ─────────────────────────────────────────────── */
+.splash-screen {
+  background:
+    radial-gradient(70% 55% at 50% 43%, rgb(0 224 255 / 7%), transparent 72%),
+    var(--background);
+  color: var(--foreground);
+}
+
+.splash-grid {
+  background-image:
+    linear-gradient(to right, rgb(21 34 51 / 5%) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(21 34 51 / 5%) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.75;
+  -webkit-mask-image: radial-gradient(
+    ellipse 70% 62% at 50% 50%,
+    #000 12%,
+    transparent 78%
+  );
+  mask-image: radial-gradient(
+    ellipse 70% 62% at 50% 50%,
+    #000 12%,
+    transparent 78%
+  );
+}
+
+.splash-wash {
+  background:
+    radial-gradient(38% 26% at 50% 47%, rgb(0 224 255 / 9%), transparent 100%),
+    radial-gradient(72% 52% at 50% 110%, rgb(16 24 40 / 5%), transparent 65%);
+}
+
+.splash-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.splash-mark-halo {
+  position: absolute;
+  inset: -38px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle,
+    rgb(0 224 255 / 20%) 0%,
+    rgb(0 224 255 / 6%) 42%,
+    transparent 68%
+  );
+  filter: blur(6px);
+  animation: splash-halo 3.4s ease-in-out infinite;
+}
+
+.splash-mark-ring {
+  position: absolute;
+  inset: -11px;
+  border-radius: 30%;
+  border: 1px solid rgb(0 224 255 / 22%);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
+}
+
+.splash-track {
+  background: rgb(15 23 42 / 8%);
+  box-shadow: inset 0 1px 1px rgb(15 23 42 / 6%);
+}
+
+.splash-bar {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    #00b8d4 22%,
+    #00e0ff 55%,
+    #9bf8ff 78%,
+    transparent 100%
+  );
+  animation: splash-sweep 1.5s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+
+.splash-led {
+  box-shadow:
+    0 0 0 3px rgb(0 224 255 / 12%),
+    0 0 10px rgb(0 224 255 / 60%);
+  animation: splash-led 1.8s ease-in-out infinite;
+}
+
+@keyframes splash-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+@keyframes splash-halo {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes splash-led {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-bar {
+    width: 42%;
+    opacity: 0.7;
+    animation: none;
+    transform: none;
+  }
+  .splash-mark-halo,
+  .splash-led {
+    animation: none;
+  }
+}
+
 /* ── Signalpath premium chrome & platform behaviour ──────────────────── */
 
 /* engine header plate — restrained cyan top highlight over ultra-dark */

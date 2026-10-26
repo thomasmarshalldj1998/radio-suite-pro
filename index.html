@@ -7,6 +7,7 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="viewport"
     content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#fbfaf7" />
   <meta name="description"
     content="Signalpath — a precision broadcast audio processor suite and stream encoder for radio stations: multiband dynamics, EBU R128 loudness metering, and live Opus/AAC stream encoding." />
   <title>Signalpath — Broadcast Audio Processor & Stream Encoder</title>
@@ -15,11 +16,347 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
     rel="stylesheet" />
+  <style>
+    html {
+      background: #fbfaf7;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    .boot-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      box-sizing: border-box;
+      padding: 5rem 1.5rem;
+      color: #1f232d;
+      background:
+        radial-gradient(70% 55% at 50% 43%, rgb(0 224 255 / 7%), transparent 72%),
+        #fbfaf7;
+      font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .boot-grid {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.75;
+      background-image:
+        linear-gradient(to right, rgb(21 34 51 / 5%) 1px, transparent 1px),
+        linear-gradient(to bottom, rgb(21 34 51 / 5%) 1px, transparent 1px);
+      background-size: 64px 64px;
+      -webkit-mask-image: radial-gradient(ellipse 70% 62% at 50% 50%, #000 12%, transparent 78%);
+      mask-image: radial-gradient(ellipse 70% 62% at 50% 50%, #000 12%, transparent 78%);
+    }
+
+    .boot-wash {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(38% 26% at 50% 47%, rgb(0 224 255 / 9%), transparent 100%),
+        radial-gradient(72% 52% at 50% 110%, rgb(16 24 40 / 5%), transparent 65%);
+    }
+
+    .boot-corners {
+      position: absolute;
+      inset: 16px;
+      pointer-events: none;
+    }
+
+    .boot-corners span {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      border: 0 solid rgb(31 35 45 / 15%);
+    }
+
+    .boot-tl {
+      top: 0;
+      left: 0;
+      border-top-width: 1px !important;
+      border-left-width: 1px !important;
+    }
+
+    .boot-tr {
+      top: 0;
+      right: 0;
+      border-top-width: 1px !important;
+      border-right-width: 1px !important;
+    }
+
+    .boot-bl {
+      bottom: 0;
+      left: 0;
+      border-bottom-width: 1px !important;
+      border-left-width: 1px !important;
+    }
+
+    .boot-br {
+      right: 0;
+      bottom: 0;
+      border-right-width: 1px !important;
+      border-bottom-width: 1px !important;
+    }
+
+    .boot-center {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+
+    .boot-mark {
+      position: relative;
+      display: grid;
+      width: 76px;
+      height: 76px;
+      place-items: center;
+    }
+
+    .boot-mark img {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 76px;
+      height: 76px;
+      border-radius: 22%;
+      outline: 1px solid rgb(0 0 0 / 10%);
+      box-shadow: 0 18px 44px -18px rgb(8 11 17 / 60%);
+    }
+
+    .boot-halo {
+      position: absolute;
+      inset: -38px;
+      border-radius: 9999px;
+      background: radial-gradient(circle, rgb(0 224 255 / 20%) 0%, rgb(0 224 255 / 6%) 42%, transparent 68%);
+      filter: blur(6px);
+      animation: boot-halo 3.4s ease-in-out infinite;
+    }
+
+    .boot-ring {
+      position: absolute;
+      inset: -11px;
+      border: 1px solid rgb(0 224 255 / 22%);
+      border-radius: 30%;
+      box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
+    }
+
+    .boot-brand {
+      margin: 2rem 0 0;
+      font-size: 1.7rem;
+      font-weight: 600;
+      line-height: 1;
+      letter-spacing: -0.045em;
+    }
+
+    .boot-eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      margin: 0.625rem 0 0;
+      color: #707887;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+    }
+
+    .boot-eyebrow span {
+      width: 20px;
+      height: 1px;
+      background: rgb(0 224 255 / 60%);
+    }
+
+    .boot-meter {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 16rem;
+      margin-top: 2.5rem;
+    }
+
+    .boot-track {
+      width: 100%;
+      height: 2px;
+      overflow: hidden;
+      border-radius: 9999px;
+      background: rgb(15 23 42 / 8%);
+      box-shadow: inset 0 1px 1px rgb(15 23 42 / 6%);
+    }
+
+    .boot-bar {
+      display: block;
+      width: 42%;
+      height: 100%;
+      border-radius: 9999px;
+      background: linear-gradient(90deg, transparent 0%, #00b8d4 22%, #00e0ff 55%, #9bf8ff 78%, transparent 100%);
+      animation: boot-sweep 1.5s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+    }
+
+    .boot-status {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      margin-top: 1rem;
+      color: #6b7280;
+      font-size: 9.5px;
+      font-weight: 500;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+
+    .boot-led {
+      width: 6px;
+      height: 6px;
+      border-radius: 9999px;
+      background: #00e0ff;
+      box-shadow: 0 0 0 3px rgb(0 224 255 / 12%), 0 0 10px rgb(0 224 255 / 60%);
+      animation: boot-led 1.8s ease-in-out infinite;
+    }
+
+    .boot-foot {
+      position: absolute;
+      right: 0;
+      bottom: 28px;
+      left: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 0 12px;
+      padding: 0 24px;
+      color: #6b7280;
+      font-size: 8.5px;
+      font-weight: 500;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+
+    .boot-dash {
+      width: 24px;
+      height: 1px;
+      background: #e5e7eb;
+    }
+
+    @keyframes boot-sweep {
+      0% {
+        transform: translateX(-110%);
+      }
+
+      100% {
+        transform: translateX(360%);
+      }
+    }
+
+    @keyframes boot-halo {
+
+      0%,
+      100% {
+        opacity: 0.55;
+        transform: scale(0.94);
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1.04);
+      }
+    }
+
+    @keyframes boot-led {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.35;
+      }
+    }
+
+    @media (min-width: 640px) {
+      .boot-corners {
+        inset: 28px;
+      }
+    }
+
+    @media (max-width: 639px) {
+      .boot-optional {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .boot-bar {
+        width: 42%;
+        opacity: 0.7;
+        animation: none;
+        transform: none;
+      }
+
+      .boot-halo,
+      .boot-led {
+        animation: none;
+      }
+    }
+  </style>
 </head>
 
 
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <div class="boot-splash" role="status" aria-label="Signalpath — Calibrating signal path">
+      <div class="boot-grid" aria-hidden="true"></div>
+      <div class="boot-wash" aria-hidden="true"></div>
+      <div class="boot-corners" aria-hidden="true">
+        <span class="boot-tl"></span>
+        <span class="boot-tr"></span>
+        <span class="boot-bl"></span>
+        <span class="boot-br"></span>
+      </div>
+
+      <div class="boot-center">
+        <div class="boot-mark">
+          <span class="boot-halo" aria-hidden="true"></span>
+          <span class="boot-ring" aria-hidden="true"></span>
+          <img src="/logo.svg" width="76" height="76" alt="" />
+        </div>
+        <p class="boot-brand">Signalpath</p>
+        <p class="boot-eyebrow">
+          <span aria-hidden="true"></span>
+          Precision broadcast audio
+          <span aria-hidden="true"></span>
+        </p>
+        <div class="boot-meter">
+          <div class="boot-track"><span class="boot-bar" aria-hidden="true"></span></div>
+          <div class="boot-status">
+            <span class="boot-led" aria-hidden="true"></span>
+            Calibrating signal path
+          </div>
+        </div>
+        <noscript>
+          <p style="margin:1.25rem 0 0;font-size:11px;color:#8a8f9b;">
+            JavaScript is required to load Signalpath.
+          </p>
+        </noscript>
+      </div>
+
+      <div class="boot-foot">
+        <span>48 kHz · 32-bit float</span>
+        <span class="boot-dash boot-optional" aria-hidden="true"></span>
+        <span class="boot-optional">EBU R128</span>
+      </div>
+    </div>
+  </div>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 

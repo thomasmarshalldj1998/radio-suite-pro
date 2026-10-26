@@ -17,17 +17,18 @@ export function Brand({
         alt=""
         width={size}
         height={size}
-        className="rounded-[22%] shadow-[0_2px_8px_-2px_rgba(16,24,40,0.35)]"
+        className="rounded-[22%] shadow-[0_2px_8px_-2px_rgba(16,24,40,0.35)] ring-1 ring-black/5 dark:ring-white/10"
       />
       <div className="leading-none">
         <p
-          className="font-semibold tracking-tight"
+          className="font-semibold tracking-[-0.035em]"
           style={{ fontSize: Math.round(size * 0.46) }}
         >
           Signalpath
         </p>
         {tagline && (
-          <p className="mt-1 text-[9px] font-medium tracking-[0.16em] text-muted-foreground uppercase">
+          <p className="mt-1.5 flex items-center gap-1.5 text-[8.5px] font-medium tracking-[0.18em] text-muted-foreground uppercase">
+            <span aria-hidden className="h-px w-2.5 shrink-0 bg-signal/70" />
             {tagline}
           </p>
         )}

@@ -1,1 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="104" fill="#171b28"/><rect x="123" y="216" width="34" height="80" rx="17" fill="#ffffff" fill-opacity="0.5"/><rect x="181" y="166" width="34" height="180" rx="17" fill="#ffffff" fill-opacity="0.85"/><rect x="239" y="96" width="34" height="320" rx="17" fill="#ef5b2b"/><rect x="297" y="166" width="34" height="180" rx="17" fill="#ffffff" fill-opacity="0.85"/><rect x="355" y="216" width="34" height="80" rx="17" fill="#ffffff" fill-opacity="0.5"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="sp-bg" x1="256" y1="0" x2="256" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B2231" />
+      <stop offset="0.55" stop-color="#111621" />
+      <stop offset="1" stop-color="#080B11" />
+    </linearGradient>
+    <radialGradient id="sp-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 132) rotate(90) scale(310 220)">
+      <stop stop-color="#00E0FF" stop-opacity="0.22" />
+      <stop offset="1" stop-color="#00E0FF" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="sp-core" x1="256" y1="97" x2="256" y2="415" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9BF8FF" />
+      <stop offset="0.42" stop-color="#00E0FF" />
+      <stop offset="1" stop-color="#0087A8" />
+    </linearGradient>
+    <linearGradient id="sp-rim" x1="256" y1="1" x2="256" y2="511" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.16" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.02" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sp-bg)" />
+  <rect width="512" height="512" rx="112" fill="url(#sp-glow)" />
+  <rect x="1" y="1" width="510" height="510" rx="111" stroke="url(#sp-rim)" />
+  <rect x="123" y="217" width="34" height="78" rx="17" fill="#EAF2FF" fill-opacity="0.42" />
+  <rect x="181" y="167" width="34" height="178" rx="17" fill="#F4F8FF" fill-opacity="0.78" />
+  <rect x="239" y="97" width="34" height="318" rx="17" fill="url(#sp-core)" />
+  <rect x="297" y="167" width="34" height="178" rx="17" fill="#F4F8FF" fill-opacity="0.78" />
+  <rect x="355" y="217" width="34" height="78" rx="17" fill="#EAF2FF" fill-opacity="0.42" />
+  <rect x="243" y="108" width="3" height="296" rx="1.5" fill="#FFFFFF" fill-opacity="0.28" />
+</svg>

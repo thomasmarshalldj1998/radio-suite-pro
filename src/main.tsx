@@ -2,6 +2,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { AudioSync } from "@/components/console/AudioSync";
 import { AudioWakeBanner } from "@/components/console/AudioWakeBanner";
 import { RequireAuth } from "@/components/RequireAuth";
+import { SplashScreen } from "@/components/SplashScreen";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import {
   CLOUD_ENABLED,
@@ -30,15 +31,6 @@ const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const Studio = lazy(() => import("./pages/Studio.tsx"));
 const Devices = lazy(() => import("./pages/Devices.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
-
-// Simple loading fallback for route transitions
-function RouteLoading() {
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="animate-pulse text-muted-foreground">Loading...</div>
-    </div>
-  );
-}
 
 /** Silent error boundary — if VlyToolbar crashes it renders nothing instead of
  *  crashing the whole app (e.g. hook errors in the browser runtime). */
@@ -145,7 +137,7 @@ function AppTree() {
       <AudioWakeBanner />
       <Router>
         <RouteSyncer />
-        <Suspense fallback={<RouteLoading />}>
+        <Suspense fallback={<SplashScreen />}>
           <Routes>
             <Route
               path="/"
