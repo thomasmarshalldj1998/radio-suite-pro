@@ -12,11 +12,12 @@ import {
   setFailoverConfig,
   subscribeFailover,
   takeOver,
+  tuneFailover,
 } from "@/lib/audio/failover";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, Radio, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Radio, ShieldCheck, Wand2 } from "lucide-react";
 
 /** Live programme level, throttled to 4 Hz — enough for a status strip. */
 function useSourceLevel(): { levelDb: number; powered: boolean } {
@@ -222,6 +223,31 @@ export function FailoverCard({ className }: { className?: string }) {
             className="h-7 w-20 text-[11px]"
           />
           <Val>s</Val>
+        </CtrlRow>
+        <CtrlRow label="Auto-tune">
+          <span className="min-w-0 flex-1 text-[10px] text-muted-foreground sm:text-right">
+            {state.floorDb !== null
+              ? `Programme floor ${state.floorDb.toFixed(1).replace("-", "−")} dBFS · threshold 10 dB below`
+              : "Measures live programme, then sets threshold and timings"}
+          </span>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="cursor-pointer"
+            disabled={!powered}
+            onClick={() => {
+              const tuned = tuneFailover();
+              if (!tuned.ok) {
+                toast.error("Could not tune failover", { description: tuned.reason });
+                return;
+              }
+              toast.success("Failover tuned", {
+                description: `Threshold ${tuned.thresholdDb.toFixed(1)} dBFS · hold ${(tuned.holdMs / 1000).toFixed(1)} s · return ${(tuned.returnMs / 1000).toFixed(1)} s`,
+              });
+            }}
+          >
+            <Wand2 className="size-3.5" /> Tune failover
+          </Button>
         </CtrlRow>
         <CtrlRow label="Return">
           <span className="text-[10px] text-muted-foreground">after</span>

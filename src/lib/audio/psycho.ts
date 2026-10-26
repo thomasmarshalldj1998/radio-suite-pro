@@ -19,7 +19,7 @@ export const PSY_STATUS: Record<string, "live" | "stored"> = {
   latency: "live",
   tilt: "live",
   preEmphasis: "stored",
-  declipper: "stored",
+  declipper: "live",
   dehummer: "stored",
   artifact: "stored",
   clock: "stored",

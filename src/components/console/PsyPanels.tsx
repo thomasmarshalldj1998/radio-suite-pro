@@ -187,8 +187,8 @@ export function PsyPreamp({
     <>
       <PsyBlock
         module="declipper"
-        title="Restoration"
-        subtitle="Declip · dehum · artifact repair · clock · crosstalk"
+        title="Adaptive declipper"
+        subtitle="Live flat-top repair · input stage · detailed editor in Restoration suite"
       >
         <CtrlRow label="Declipper">
           <OnOff
@@ -236,8 +236,14 @@ export function PsyPreamp({
             }
             aria="Declipper reconstruction"
           />
-          <Num>{psy.declipper.reconstruct.toFixed(0)} / 100 · 4×</Num>
+          <Num>{psy.declipper.reconstruct.toFixed(0)} / 100 · flat-top</Num>
         </CtrlRow>
+      </PsyBlock>
+      <PsyBlock
+        module="dehummer"
+        title="Restoration"
+        subtitle="Dehum · artifact repair · clock · crosstalk"
+      >
         <CtrlRow label="Dehummer">
           <OnOff
             aria="Spectral dehummer"
@@ -419,8 +425,16 @@ export function PsyPreamp({
       <PsyBlock
         module="declipper"
         title="Restoration monitor"
-        subtitle="Live detector feed · repair params stored above"
+        subtitle="Live flat-top repair · input detector feed"
       >
+        <CtrlRow label="Repaired">
+          <Num>
+            {snap ? `${snap.declipRepair.toFixed(1)} %` : "—"}
+          </Num>
+        </CtrlRow>
+        <CtrlRow label="Peak restore">
+          <Num>{snap ? formatDb(snap.declipPeakDb) : "—"}</Num>
+        </CtrlRow>
         <CtrlRow label="Input peak">
           <Num>
             {snap

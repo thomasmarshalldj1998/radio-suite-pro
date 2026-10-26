@@ -305,8 +305,8 @@ const restorationRows: Ctrl[] = [
     { value: "fast", label: "Fast" },
   ]),
   N("Transient protect", "restoration.nr.transientProtect", 0, 100, 1, 0, " %"),
-  H("Impulse & peak restoration"),
-  T("Impulse restore", "restoration.impulse.on"),
+  H("Declipper — detailed editor"),
+  T("Declipper", "restoration.impulse.on"),
   N("Sensitivity", "restoration.impulse.sensitivity", 0, 100, 1, 0, " %"),
   N("Reconstruct", "restoration.impulse.reconstruct", 0, 100, 1, 0, " %"),
   E("Oversample", "restoration.impulse.oversample", [
@@ -400,7 +400,7 @@ export function RestorationSuite(props: PanelProps) {
   return (
     <AdvancedCard
       title="Restoration suite"
-      subtitle="Noise · impulse · phase · SRC · DRR · harmonics — all bypassed by default"
+      subtitle="Noise · declip · phase · SRC · DRR · harmonics — all bypassed by default"
       rows={restorationRows}
       {...props}
     />

@@ -1,7 +1,8 @@
 /**
  * Processor parameter model for the Signalpath broadcast chain:
  *
- *   input gain → HPF → phase rotator (4-stage allpass) → 6-band EQ →
+ *   input gain → declipper (flat-top repair) → HPF → phase rotator
+ *   (4-stage allpass) → 6-band EQ →
  *   dynamic EQ (3 subtractive bands) → program AGC (window-gated leveller)
  *   → 6-band multiband compressor (LR4 crossovers, Less–More macro) →
  *   de-esser (dynamic 6–10 kHz) → composite limiter (fast peak stage +

@@ -53,6 +53,10 @@ export interface FailoverState {
   healthyMs: number;
   /** Latest measured programme level (dBFS). */
   levelDb: number;
+  /** Quietest-programme estimate from the last auto-tune (dBFS; null = never). */
+  floorDb: number | null;
+  /** Epoch ms of the last auto-tune (0 = never). */
+  tunedAt: number;
   /** Automatic take-overs this session. */
   takes: number;
   /** Last state change, for the status line. */
@@ -72,6 +76,111 @@ export interface FailoverEvent {
 }
 
 const STORAGE_KEY = "signalpath.failover.v1";
+
+/** Programme levels kept for auto-tune (about two minutes at the 2 Hz tick). */
+const TRACE_MS = 120_000;
+const levelTrace: { at: number; db: number; backup: boolean }[] = [];
+
+function recordLevel(levelDb: number, at: number, backup: boolean) {
+  const last = levelTrace[levelTrace.length - 1];
+  if (last && at - last.at < 100) return;
+  levelTrace.push({ at, db: levelDb, backup });
+  const cutoff = at - TRACE_MS;
+  while (levelTrace.length > 0 && levelTrace[0].at < cutoff) levelTrace.shift();
+}
+
+/** Result of a measured auto-tune, with the figures behind the setting. */
+export interface FailoverTuning {
+  ok: boolean;
+  reason: string;
+  thresholdDb: number;
+  holdMs: number;
+  returnMs: number;
+  fadeMs: number;
+  /** Quietest-programme percentile the threshold was derived from. */
+  floorDb: number;
+  medianDb: number;
+  /** Spread (dB) between typical programme and its quiet passages. */
+  spreadDb: number;
+  samples: number;
+}
+
+/**
+ * Measure the station rather than guessing at it.
+ *
+ * A dead-air threshold set too high trips on quiet speech; set too low it
+ * misses a dead carrier. This takes the last ~90 s of genuine programme
+ * (not standby, not digital silence), finds its quietest decile and places
+ * the threshold 10 dB below that. The hold follows the measured level
+ * spread: a station that runs ads 15 dB hotter than speech gets a longer
+ * hold, so a quiet link doesn't look like a dead one.
+ */
+export function tuneFailover(now = Date.now()): FailoverTuning {
+  const samples = levelTrace.filter(
+    (s) =>
+      now - s.at <= 90_000 &&
+      !s.backup &&
+      Number.isFinite(s.db) &&
+      s.db > -80 &&
+      s.db < -3,
+  );
+  const cfg = state.config;
+  if (samples.length < 12) {
+    return {
+      ok: false,
+      reason: "Not enough programme yet — run the engine with programme for about 10 seconds.",
+      thresholdDb: cfg.thresholdDb,
+      holdMs: cfg.holdMs,
+      returnMs: cfg.returnMs,
+      fadeMs: cfg.fadeMs,
+      floorDb: state.floorDb ?? -70,
+      medianDb: -70,
+      spreadDb: 0,
+      samples: samples.length,
+    };
+  }
+
+  const dbs = samples.map((s) => s.db).sort((a, b) => a - b);
+  const pct = (p: number) =>
+    dbs[Math.min(dbs.length - 1, Math.max(0, Math.round(p * (dbs.length - 1))))];
+  const floorDb = pct(0.1);
+  const medianDb = pct(0.5);
+  const p90 = pct(0.9);
+  const spreadDb = Math.max(0, p90 - floorDb);
+  const quantize = (v: number, step: number) => Math.round(v / step) * step;
+
+  const thresholdDb = quantize(
+    Math.max(-75, Math.min(-25, floorDb - 10)),
+    0.5,
+  );
+  const holdMs = quantize(
+    Math.max(2500, Math.min(9000, 2500 + spreadDb * 50)),
+    500,
+  );
+  const returnMs = quantize(Math.max(5000, Math.min(18_000, holdMs * 2)), 500);
+  const fadeMs = quantize(Math.max(150, Math.min(800, holdMs / 8)), 10);
+
+  setFailoverConfig({ thresholdDb, holdMs, returnMs, fadeMs });
+  commit({
+    floorDb,
+    tunedAt: now,
+    lastEvent: `Auto-tuned from ${samples.length} programme samples — threshold ${thresholdDb.toFixed(1)} dBFS (floor ${floorDb.toFixed(1)} dBFS)`,
+    lastEventAt: now,
+  });
+
+  return {
+    ok: true,
+    reason: "measured programme floor",
+    thresholdDb,
+    holdMs,
+    returnMs,
+    fadeMs,
+    floorDb,
+    medianDb,
+    spreadDb,
+    samples: samples.length,
+  };
+}
 
 function loadConfig(): FailoverConfig {
   try {
@@ -112,6 +221,8 @@ let state: FailoverState = {
   deadMs: 0,
   healthyMs: 0,
   levelDb: -120,
+  floorDb: null,
+  tunedAt: 0,
   takes: 0,
   lastEvent: null,
   lastEventAt: 0,
@@ -269,6 +380,7 @@ export function evaluateFailover(
   }
 
   if (levelDb !== state.levelDb) commit({ levelDb });
+  recordLevel(levelDb, now, state.active);
   const engine = getEngine();
   const dead = Number.isFinite(levelDb) && levelDb < cfg.thresholdDb;
 

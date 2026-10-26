@@ -1,6 +1,7 @@
 import { Brand } from "@/components/Brand";
 import { LogoDropdown } from "@/components/LogoDropdown";
 import { ConsoleSidebar } from "@/components/console/ConsoleSidebar";
+import { HeaderInputMeters } from "@/components/console/HeaderInputMeters";
 import { InputTab } from "@/components/console/InputTab";
 import { MeterBridge } from "@/components/console/MeterBridge";
 import { MonitorReadout } from "@/components/console/MonitorReadout";
@@ -1095,6 +1096,9 @@ export default function Dashboard() {
                 </span>
               </Button>
             )}
+
+            {/* stereo input: visible from every console page */}
+            <HeaderInputMeters />
 
             {/* monitor bus: what the speakers are really being fed */}
             <MonitorReadout />

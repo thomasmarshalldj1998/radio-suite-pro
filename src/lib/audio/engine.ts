@@ -4,7 +4,8 @@
  * Signal flow:
  *   source (mic | generator | file) → 2-channel program bus
  *     → silence gate → failover crossfade → input trim
- *     → HPF ─┬─ input meters (L/R)
+ *     → flat-top declipper (fixed 4 ms) → restoration → HPF
+ *            ─┬─ input meters (L/R)
  *            ├─ spectrum (pre)
  *            └─ phase rotator (4-stage allpass cascade)
  *               → 6-band EQ → harmonic exciter (parallel)
@@ -59,6 +60,10 @@ import {
   LIMITER_WORKLET_NAME,
   limiterWorkletSource,
 } from "./limiter";
+import {
+  DECLIP_WORKLET_NAME,
+  declipWorkletSource,
+} from "./declip";
 import { createSpscRing, type SpscRing } from "./spsc-ring";
 import {
   DEVICE_RAMP_MS,
@@ -228,6 +233,10 @@ export interface MeterSnapshot {
   agcWindow: { frozen: boolean; spreadDb: number };
   /** Current de-esser cut (dB). */
   deessCut: number;
+  /** Flat-top repair: share of input samples rebuilt this meter pass (%). */
+  declipRepair: number;
+  /** Largest peak reconstruction boost from the declipper (dB). */
+  declipPeakDb: number;
   /** current loudness-rider gain in dB (negative = pulling down) */
   riderDb: number;
   /** Loudness target in force (LUFS) and the measured deviation from it. */
@@ -324,6 +333,8 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
   gr: { bands: [0, 0, 0, 0, 0, 0], deq: [0, 0, 0, 0, 0], agc: 0, agcFast: 0, limiter: 0 },
   agcWindow: { frozen: false, spreadDb: 0 },
   deessCut: 0,
+  declipRepair: 0,
+  declipPeakDb: 0,
   riderDb: 0,
   loudnessTarget: -14,
   loudnessDeviation: null,
@@ -811,6 +822,16 @@ export class AudioEngine {
   private workletReady = false;
   private workletGr = 0;
   private workletConfig = "";
+  /** Flat-top declipper — inserted at the input, constant latency. */
+  private declipNode: AudioWorkletNode | null = null;
+  private declipReady = false;
+  private declipConfig = "";
+  private declipMeter: Float32Array<ArrayBufferLike> | null = null;
+  private declipPeakMeter: Float32Array<ArrayBufferLike> | null = null;
+  private declipRepairPct = 0;
+  private declipPeakDb = 0;
+  /** Reported by the worklet when SharedArrayBuffer is unavailable. */
+  private declipFallbackMeter = { repairPct: 0, peakRestoreDb: 0 };
   /** Slow second limiter stage (program limiter). */
   private progComp!: DynamicsCompressorNode;
   private outputGain!: GainNode;
@@ -1046,6 +1067,9 @@ export class AudioEngine {
       // The limiter module must be registered before buildGraph can create the
       // node. Failure is not fatal: the native compressor path stays in place.
       await this.loadLimiterWorklet(ctx);
+      // Same contract for the declipper: without the module the input is a
+      // plain wire, never a half-connected stage.
+      await this.loadDeclipWorklet(ctx);
       this.buildGraph(ctx);
     }
     const ctx = this.ctx;
@@ -1240,6 +1264,10 @@ export class AudioEngine {
     this.written.clear();
     this.workletLimiter = null;
     this.limiterMeter = null;
+    this.declipNode = null;
+    this.declipMeter = null;
+    this.declipPeakMeter = null;
+    this.declipReady = false;
     this.clearGraphRefs();
   }
 
@@ -1263,6 +1291,28 @@ export class AudioEngine {
       this.workletReady = true;
     } catch {
       this.workletReady = false;
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+
+  /** Register the flat-top declipper on the audio thread. */
+  private async loadDeclipWorklet(ctx: AudioContext): Promise<void> {
+    this.declipReady = false;
+    this.declipNode = null;
+    this.declipMeter = null;
+    this.declipPeakMeter = null;
+    this.declipConfig = "";
+    if (!ctx.audioWorklet) return;
+    let url = "";
+    try {
+      url = URL.createObjectURL(
+        new Blob([declipWorkletSource()], { type: "text/javascript" }),
+      );
+      await ctx.audioWorklet.addModule(url);
+      this.declipReady = true;
+    } catch {
+      this.declipReady = false;
     } finally {
       if (url) URL.revokeObjectURL(url);
     }
@@ -1296,6 +1346,9 @@ export class AudioEngine {
     this.cwBands = [];
     this.cwSplits = [];
     this.webMatrix = null;
+    this.declipNode = null;
+    this.declipMeter = null;
+    this.declipPeakMeter = null;
   }
 
   /* ── graph construction ───────────────────────────────────────────────── */
@@ -1501,9 +1554,58 @@ export class AudioEngine {
     this.gateBuf = new Float32Array(this.gateAnalyser.fftSize);
     this.sourceBus.connect(this.gateAnalyser);
 
+    // ── flat-top declipper ──
+    // Sits on the raw input trim, before the HPF and phase rotator, because
+    // flat tops have to be seen before any filter smears their edges. The
+    // kernel carries a fixed ~4 ms delay whether or not it is engaged: a
+    // stage that changed latency when toggled would pitch-shift the program.
+    this.declipNode = null;
+    this.declipMeter = null;
+    this.declipPeakMeter = null;
+    if (this.declipReady) {
+      try {
+        let meter: SharedArrayBuffer | undefined;
+        let peak: SharedArrayBuffer | undefined;
+        if (typeof SharedArrayBuffer !== "undefined") {
+          meter = new SharedArrayBuffer(4);
+          peak = new SharedArrayBuffer(4);
+          this.declipMeter = new Float32Array(meter, 0, 1);
+          this.declipPeakMeter = new Float32Array(peak, 0, 1);
+        }
+        const node = new AudioWorkletNode(ctx, DECLIP_WORKLET_NAME, {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          channelCount: 2,
+          channelCountMode: "explicit",
+          channelInterpretation: "speakers",
+          processorOptions: meter && peak ? { meter, peak } : undefined,
+        });
+        node.port.onmessage = (e: MessageEvent) => {
+          const d = e.data as { repairPct?: number; peakRestoreDb?: number } | null;
+          if (d && Number.isFinite(d.repairPct)) {
+            this.declipFallbackMeter = {
+              repairPct: Math.max(0, Math.min(100, d.repairPct as number)),
+              peakRestoreDb: Math.max(0, Math.min(24, d.peakRestoreDb ?? 0)),
+            };
+          }
+        };
+        this.declipNode = node;
+      } catch {
+        this.declipNode = null;
+        this.declipMeter = null;
+        this.declipPeakMeter = null;
+      }
+    }
+
     // restoration inserts between the input trim and the HPF, so the noise
     // shelf and harmonic products are cleaned by the high-pass that follows.
-    this.inputGain.connect(this.restNotch1);
+    if (this.declipNode) {
+      this.inputGain.connect(this.declipNode);
+      this.declipNode.connect(this.restNotch1);
+    } else {
+      this.inputGain.connect(this.restNotch1);
+    }
     this.restNotch1.connect(this.restNotch2);
     this.restNotch2.connect(this.restLp);
     this.restLp.connect(this.dcHpf);
@@ -2282,6 +2384,30 @@ export class AudioEngine {
 
     // ── on-air broadcast delay ──
     this.applyAirDelay(params.delay);
+
+    // ── flat-top declipper ──
+    // The Restoration panel's adaptive controls are the primary editor; the
+    // advanced Impulse-restore block is the detailed editor for the same
+    // stage, so enabling either one engages it (advanced wins on detail).
+    const decl = params.psy.declipper;
+    const impulse = adv.restoration.impulse;
+    const declipOn = decl.on || impulse.on;
+    const declipSens = impulse.on ? impulse.sensitivity : decl.sensitivity;
+    const declipRecon = impulse.on ? impulse.reconstruct : decl.reconstruct;
+    const declipThreshold = impulse.on
+      ? impulse.clipThresholdDb
+      : -0.15 - (Math.max(0, Math.min(100, declipSens)) / 100) * 1.85;
+    const recon = Math.max(0, Math.min(100, declipRecon)) / 100;
+    const declipKey = `${declipOn}|${declipThreshold.toFixed(2)}|${recon.toFixed(2)}`;
+    if (this.declipNode && declipKey !== this.declipConfig) {
+      this.declipConfig = declipKey;
+      this.declipNode.port.postMessage({
+        on: declipOn,
+        thresholdDb: declipThreshold,
+        maxRestoreDb: 0.5 + recon * 5.5,
+        mix: 0.25 + recon * 0.75,
+      });
+    }
 
     // ── v3.1 restoration ──
     const nr = adv.restoration.nr;
@@ -3961,6 +4087,10 @@ export class AudioEngine {
     // The lookahead line is the one buffer the UI cannot reach: flush it on
     // the audio thread, between quanta, with the kernel's own reset.
     this.workletLimiter?.port.postMessage({ reset: true });
+    this.declipNode?.port.postMessage({ reset: true });
+    this.declipRepairPct = 0;
+    this.declipPeakDb = 0;
+    this.declipFallbackMeter = { repairPct: 0, peakRestoreDb: 0 };
     if (this.params) this.apply(this.params);
   }
 
@@ -4269,6 +4399,25 @@ export class AudioEngine {
     this.inAnalyserR.getFloatTimeDomainData(this.inBufR);
     this.inPeakL = peakDb(this.inBufL);
     this.inPeakR = peakDb(this.inBufR);
+    const declipTarget = this.declipMeter
+      ? this.declipMeter[0]
+      : this.declipFallbackMeter.repairPct;
+    const declipPeakTarget = this.declipPeakMeter
+      ? this.declipPeakMeter[0]
+      : this.declipFallbackMeter.peakRestoreDb;
+    // A block-level repair figure jitters; the panel needs a readable gauge.
+    // Attack quickly, release slowly, and let the peak readout decay on its
+    // own so a single repaired transient stays visible for a moment.
+    const repairTarget = Number.isFinite(declipTarget)
+      ? Math.max(0, Math.min(100, declipTarget))
+      : 0;
+    this.declipRepairPct +=
+      (repairTarget - this.declipRepairPct) *
+      (repairTarget >= this.declipRepairPct ? 0.55 : 0.12);
+    const peakTarget = Number.isFinite(declipPeakTarget)
+      ? Math.max(0, Math.min(24, declipPeakTarget))
+      : 0;
+    this.declipPeakDb = Math.max(peakTarget, this.declipPeakDb - 0.25);
     if (Math.max(this.inPeakL, this.inPeakR) > -70) this.lastProgramAt = now;
     if (Math.max(this.inPeakL, this.inPeakR) > -0.2) this.clipInUntil = now + CLIP_HOLD_MS;
 
@@ -4689,6 +4838,8 @@ export class AudioEngine {
       },
       agcWindow: { frozen: this.agcFrozen, spreadDb: this.agcSpreadDb },
       deessCut: this.deessCutDb,
+      declipRepair: this.declipRepairPct,
+      declipPeakDb: this.declipPeakDb,
       riderDb: this.riderDb,
       loudnessTarget: target.lufs,
       loudnessDeviation: loudnessDeviation(this.lufsIValue, target.lufs),
