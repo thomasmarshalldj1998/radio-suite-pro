@@ -1377,10 +1377,12 @@ export class AudioEngine {
 
   /** Build a 2×2 routing matrix; the taps are written by setChannelMatrix. */
   private createMatrix(ctx: AudioContext): ChannelMatrix {
+    // A ChannelSplitterNode is fixed at channelCount = outputs,
+    // channelCountMode = "explicit" and channelInterpretation = "discrete" by
+    // spec, and assigning any of those throws InvalidStateError (Chrome:
+    // "channelInterpretation cannot be changed from 'discrete'"). The
+    // defaults are already the routing we want, so the node is left alone.
     const split = ctx.createChannelSplitter(2);
-    split.channelCount = 2;
-    split.channelCountMode = "explicit";
-    split.channelInterpretation = "speakers";
     const merge = ctx.createChannelMerger(2);
     const taps: [GainNode, GainNode, GainNode, GainNode] = [
       ctx.createGain(),
