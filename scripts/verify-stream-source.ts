@@ -162,6 +162,13 @@ function sourceServer(
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Poll instead of sleeping a fixed period, so a loaded machine is not a failure. */
+const until = async (pred: () => boolean, ms = 1500): Promise<boolean> => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !pred()) await wait(25);
+  return pred();
+};
+
 {
   const { server, port, got } = await sourceServer(200);
   const states: string[] = [];
@@ -372,8 +379,8 @@ console.log("\n7 · handshake that waits for frames");
   const res = await opening;
   check(res.ok, "the source still reaches live", res.error ?? "");
   src.close();
-  await wait(120);
-  check(got.body.length === 1024, "and the server received every byte", `${got.body.length}`);
+  const allArrived = await until(() => got.body.length >= 1024);
+  check(allArrived && got.body.length === 1024, "and the server received every byte", `${got.body.length}`);
   server.close();
 }
 

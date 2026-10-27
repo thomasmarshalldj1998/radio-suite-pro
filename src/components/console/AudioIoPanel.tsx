@@ -165,7 +165,22 @@ export function AudioIoPanel({
   const renderInput = (slot: InputSlot) => {
     const main = slot === "main";
     const isActive = io.activeInput === slot;
-    const level = main ? snap.io.mainDb : snap.io.backupDb;
+    // Post-trim, per-channel levels — the same meter the failover measures,
+    // but through the channel format and the preamp, which is what actually
+    // reaches the program bus.
+    const lvl = main
+      ? {
+          l: snap.io.mainL,
+          r: snap.io.mainR,
+          corr: snap.io.mainCorr,
+          clip: snap.io.mainClip,
+        }
+      : {
+          l: snap.io.backupL,
+          r: snap.io.backupR,
+          corr: snap.io.backupCorr,
+          clip: snap.io.backupClip,
+        };
     const deviceId = main ? engine.inputDeviceId : cfg.backupInput;
     const label = main ? io.mainLabel : io.backupLabel || "No backup input";
     const gain = main ? cfg.mainGainDb : cfg.backupGainDb;
@@ -270,7 +285,69 @@ export function AudioIoPanel({
           onChange={(e) => engine.setInputGain(slot, Number(e.target.value))}
         />
 
-        <BusMeter l={level} r={level} className="mt-2.5" />
+        <BusMeter l={lvl.l} r={lvl.r} className="mt-2.5" />
+
+        <div className="mt-1.5 flex items-center justify-between gap-2 text-[9px]">
+          <span className="text-panel-mut">
+            Phase{" "}
+            <b
+              className={cn(
+                "text-readout font-semibold",
+                lvl.corr < -0.2
+                  ? "text-meter-hot"
+                  : lvl.corr < 0.5
+                    ? "text-meter-warn"
+                    : "text-meter-ok",
+              )}
+              title="Stereo correlation of this input — below 0 the feed loses level in a mono fold-down"
+            >
+              {lvl.corr >= 0.999 ? "mono" : lvl.corr.toFixed(2)}
+            </b>
+          </span>
+          <span
+            className={cn(
+              "rounded-sm px-1.5 py-0.5 text-[8px] font-bold tracking-[0.12em] uppercase",
+              lvl.clip ? "bg-meter-hot/15 text-meter-hot" : "text-panel-mut",
+            )}
+            title={
+              lvl.clip
+                ? "The input reached the digital ceiling — lower the preamp gain"
+                : "Input peak"
+            }
+          >
+            {lvl.clip ? "Clip" : `pk ${dbText(Math.max(lvl.l, lvl.r))}`}
+          </span>
+        </div>
+
+        <div className="mt-2 flex gap-2">
+          {isActive ? (
+            <>
+              <span className="flex h-7 flex-1 items-center justify-center rounded border border-signal/40 bg-signal/10 text-[9px] font-bold tracking-[0.14em] text-signal uppercase">
+                On bus
+              </span>
+              {io.manualHold && (
+                <button
+                  type="button"
+                  onClick={() => engine.resumeAutoInput()}
+                  className="h-7 rounded border border-meter-warn/50 px-2 text-[9px] font-bold tracking-[0.12em] text-meter-warn uppercase transition-colors hover:bg-meter-warn/10"
+                  title="Resume automatic silence failover"
+                >
+                  Auto
+                </button>
+              )}
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => engine.takeInputToAir(slot)}
+              disabled={!main && !snap.io.backupReady}
+              className="h-7 flex-1 rounded border border-border/70 text-[9px] font-bold tracking-[0.14em] text-panel-mut uppercase transition-colors hover:border-signal/50 hover:text-signal disabled:opacity-40"
+              title="Put this input on the program bus and pause automatic failover"
+            >
+              Take to air
+            </button>
+          )}
+        </div>
 
         {main ? (
           <div className="mt-2 flex gap-2">
@@ -459,7 +536,9 @@ export function AudioIoPanel({
         right={
           <span className="flex items-center gap-1.5 text-[9px] text-panel-mut">
             <Radio className="size-3" />
-            failover window {cfg.backupEnabled ? "armed" : "off"}
+            {io.manualHold
+              ? "manual hold — failover paused"
+              : `failover window ${cfg.backupEnabled ? "armed" : "off"}`}
           </span>
         }
       />

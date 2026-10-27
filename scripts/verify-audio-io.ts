@@ -60,29 +60,38 @@ const fakeParam = (value = 1) => ({
   },
 });
 
+interface FakeAnalyser {
+  fftSize: number;
+  connect(): unknown;
+  disconnect(): void;
+  getFloatTimeDomainData(buf: Float32Array): void;
+}
+
 interface FakePath {
-  analyser: {
-    fftSize: number;
-    connect(): unknown;
-    disconnect(): void;
-    getFloatTimeDomainData(buf: Float32Array): void;
-  };
-  buf: Float32Array;
+  detector: FakeAnalyser;
+  detBuf: Float32Array;
+  analyserL: FakeAnalyser;
+  analyserR: FakeAnalyser;
+  bufL: Float32Array;
+  bufR: Float32Array;
   fader: { gain: ReturnType<typeof fakeParam> };
   gain: { gain: ReturnType<typeof fakeParam> };
+  /** Amplitudes the three taps report, newest first for the engineers. */
+  amps: { device: number; l: number; r: number };
   label: string;
 }
 
 /**
- * A path whose detector reports `db` on every read. The buffer is filled with
- * a DC value of the matching amplitude; peakDb measures max|x|, so the level
- * the state machine sees is exactly the one asked for.
+ * A path whose detectors report the amplitudes held in `amps`. The buffer is
+ * filled with a DC value of that amplitude; peakDb measures max|x|, so the
+ * level the engine reads is exactly the one asked for, and correlationOf on a
+ * matching pair reports +1 (or −1 when the right leg is inverted).
  */
 const fakePath = (db: number): FakePath => {
   const amp = dbToGain(db);
-  const buf = new Float32Array(1024);
-  return {
-    analyser: {
+  const path: FakePath = {
+    amps: { device: amp, l: amp, r: amp },
+    detector: {
       fftSize: 1024,
       connect() {
         return this;
@@ -91,13 +100,57 @@ const fakePath = (db: number): FakePath => {
         /* nothing to tear down */
       },
       getFloatTimeDomainData(target: Float32Array) {
-        target.fill(amp);
+        target.fill(path.amps.device);
       },
     },
-    buf,
+    analyserL: {
+      fftSize: 1024,
+      connect() {
+        return this;
+      },
+      disconnect() {
+        /* nothing to tear down */
+      },
+      getFloatTimeDomainData(target: Float32Array) {
+        target.fill(path.amps.l);
+      },
+    },
+    analyserR: {
+      fftSize: 1024,
+      connect() {
+        return this;
+      },
+      disconnect() {
+        /* nothing to tear down */
+      },
+      getFloatTimeDomainData(target: Float32Array) {
+        target.fill(path.amps.r);
+      },
+    },
+    detBuf: new Float32Array(1024),
+    bufL: new Float32Array(1024),
+    bufR: new Float32Array(1024),
     fader: { gain: fakeParam(1) },
     gain: { gain: fakeParam(1) },
     label: "test input",
+  };
+  return path;
+};
+
+/** Set the device detector and both display legs to one level. */
+const setLevel = (path: FakePath | null, db: number) => {
+  if (!path) return;
+  const amp = dbToGain(db);
+  path.amps = { device: amp, l: amp, r: amp };
+};
+
+/** Set the display legs independently; `invert` flips the right leg's phase. */
+const setStereo = (path: FakePath | null, lDb: number, rDb: number, invert = false) => {
+  if (!path) return;
+  path.amps = {
+    device: Math.max(dbToGain(lDb), dbToGain(rDb)),
+    l: dbToGain(lDb),
+    r: invert ? -dbToGain(rDb) : dbToGain(rDb),
   };
 };
 
@@ -108,7 +161,20 @@ interface EngineInternals {
   mainPath: FakePath | null;
   backupPath: FakePath | null;
   updateInputRouting(now: number): void;
-  ioState: { activeInput: "main" | "backup"; autoSwitched: boolean };
+  /** Live input measurements, as the meter pass leaves them. */
+  mainLevelDb: number;
+  backupLevelDb: number;
+  mainChannelDb: [number, number];
+  backupChannelDb: [number, number];
+  mainCorr: number;
+  backupCorr: number;
+  mainClipAt: number;
+  backupClipAt: number;
+  ioState: {
+    activeInput: "main" | "backup";
+    autoSwitched: boolean;
+    manualHold: boolean;
+  };
 }
 
 const makeEngine = () => {
@@ -117,14 +183,6 @@ const makeEngine = () => {
   engine.mainPath = fakePath(-120);
   engine.backupPath = fakePath(-120);
   return engine;
-};
-
-const setLevel = (path: FakePath | null, db: number) => {
-  if (!path) return;
-  const amp = dbToGain(db);
-  path.analyser.getFloatTimeDomainData = (target: Float32Array) => {
-    target.fill(amp);
-  };
 };
 
 /* ── 1 · no failover while the main input is healthy ───────────────────── */
@@ -235,6 +293,75 @@ check(
 const booted = new AudioEngine();
 check(booted.io.sampleRate === 48000, "the next boot restores the rate");
 check(booted.io.latencyFrames === 128, "and the quantum");
+
+/* ── 8 · per-channel input metering, phase and clip ────────────────────── */
+
+console.log("\n8 · input metering");
+const t0 = performance.now();
+e = makeEngine();
+e.io.backupEnabled = true;
+setLevel(e.mainPath, -20);
+setLevel(e.backupPath, -60);
+setStereo(e.mainPath, -12, -24);
+e.updateInputRouting(t0);
+check(
+  Math.abs(e.mainChannelDb[0] + 12) < 0.6 && Math.abs(e.mainChannelDb[1] + 24) < 0.6,
+  "each input channel reports its own level",
+  `${e.mainChannelDb[0].toFixed(1)} / ${e.mainChannelDb[1].toFixed(1)} dBFS`,
+);
+check(e.mainCorr > 0.99, "an in-phase input reads correlated", e.mainCorr.toFixed(2));
+check(e.mainClipAt === 0, "a normal level is not flagged as clipped");
+check(
+  Math.abs(e.mainLevelDb + 12) < 0.6,
+  "the failover level is the loudest channel, not the sum",
+  `${e.mainLevelDb.toFixed(1)} dBFS`,
+);
+
+setStereo(e.mainPath, -12, -12, true);
+e.updateInputRouting(t0);
+check(e.mainCorr < -0.99, "an inverted input reads out of phase", e.mainCorr.toFixed(2));
+
+setStereo(e.mainPath, -0.05, -20);
+e.updateInputRouting(t0);
+check(e.mainClipAt > 0, "a channel at the ceiling flags the input as clipped");
+
+// A preamp move must not change what failover decides on: the detector is
+// ahead of the trim, so a quiet preamp can never look like a dead feed.
+setLevel(e.mainPath, -20);
+e.setInputGain("main", 18);
+e.updateInputRouting(t0);
+check(
+  Math.abs(e.mainLevelDb + 20) < 0.6,
+  "the failover detector sits ahead of the preamp",
+  `${e.mainLevelDb.toFixed(1)} dBFS`,
+);
+
+/* ── 9 · manual take to air ────────────────────────────────────────────── */
+
+console.log("\n9 · manual take to air");
+e = makeEngine();
+e.io.backupEnabled = true;
+setLevel(e.mainPath, -20);
+setLevel(e.backupPath, -20);
+e.updateInputRouting(t0);
+check(e.inputActive === "main", "setup: Input 1 is on the bus");
+e.takeInputToAir("backup");
+check(e.inputActive === "backup", "an operator can take Input 2 to air");
+check(e.ioState.manualHold, "and the console reports failover paused");
+e.updateInputRouting(t0 + 10_000);
+check(
+  e.inputActive === "backup",
+  "a healthy Input 1 does not yank the bus back under a manual take",
+);
+e.resumeAutoInput();
+e.updateInputRouting(t0 + 11_000);
+e.updateInputRouting(t0 + 16_000);
+check(e.inputActive === "main", "resuming hands the bus back to the failover");
+check(!e.ioState.manualHold, "and the pause is cleared");
+
+e.takeInputToAir("backup");
+check(e.backupPath?.fader.gain.value === 1, "the taken input is faded in");
+check(e.mainPath?.fader.gain.value === 0, "and the other is faded out");
 
 console.log(`\n${passed} checks passed, ${failed} failed.`);
 process.exit(failed === 0 ? 0 : 1);

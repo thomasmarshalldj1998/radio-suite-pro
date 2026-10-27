@@ -197,6 +197,10 @@ const INPUT_SILENT_DB = -55;
 const INPUT_HEALTHY_DB = -50;
 /** Crossfade between the two input paths. */
 const INPUT_CROSSFADE_MS = 60;
+/** Post-trim peak at or above this is a clipped input, dBFS. */
+const INPUT_CLIP_DB = -0.1;
+/** How long a clip stays flagged, so a single sample is still visible. */
+const INPUT_CLIP_HOLD_MS = 1500;
 
 export interface MeterSnapshot {
   t: number;
@@ -286,9 +290,23 @@ export interface MeterSnapshot {
   io: {
     input: InputSlot;
     autoSwitched: boolean;
+    /** Mono peak of each input, ahead of the preamp: what failover decides on. */
     mainDb: number;
     backupDb: number;
     backupReady: boolean;
+    /** Per-channel input level, post-trim and post-channel-format, dBFS. */
+    mainL: number;
+    mainR: number;
+    backupL: number;
+    backupR: number;
+    /** Stereo correlation of each input (1 = mono, −1 = out of phase). */
+    mainCorr: number;
+    backupCorr: number;
+    /** The input hit the digital ceiling inside the clip-hold window. */
+    mainClip: boolean;
+    backupClip: boolean;
+    /** An operator pinned an input; automatic failover is paused. */
+    manualHold: boolean;
     webL: number;
     webR: number;
     monitorL: number;
@@ -367,6 +385,15 @@ export const SILENT_SNAPSHOT: MeterSnapshot = {
     mainDb: -120,
     backupDb: -120,
     backupReady: false,
+    mainL: -120,
+    mainR: -120,
+    backupL: -120,
+    backupR: -120,
+    mainCorr: 1,
+    backupCorr: 1,
+    mainClip: false,
+    backupClip: false,
+    manualHold: false,
     webL: -120,
     webR: -120,
     monitorL: -120,
@@ -437,14 +464,26 @@ const AIR_DELAY_FADE_MS = 60;
 interface InputPath {
   stream: MediaStream;
   node: MediaStreamAudioSourceNode;
+  /** Forces the feed to two channels, so a mono input is not lost to L. */
+  format: GainNode;
   /** Preamp trim, from the I/O panel. */
   gain: GainNode;
   /** Failover crossfade (1 = on the bus, 0 = parked). */
   fader: GainNode;
   matrix: ChannelMatrix;
-  /** Post-preamp level, ahead of the fader — a parked backup still meters. */
-  analyser: AnalyserNode;
-  buf: Float32Array<ArrayBuffer>;
+  /**
+   * Device level, ahead of the trim and the fader: preamp gain must not be
+   * able to make a live input look silent to the failover logic, and a parked
+   * backup still reports its own level.
+   */
+  detector: AnalyserNode;
+  detBuf: Float32Array<ArrayBuffer>;
+  /** Post-trim, post-channel-format level per channel, ahead of the fader. */
+  analyserL: AnalyserNode;
+  analyserR: AnalyserNode;
+  bufL: Float32Array<ArrayBuffer>;
+  bufR: Float32Array<ArrayBuffer>;
+  displaySplit: ChannelSplitterNode;
   label: string;
 }
 
@@ -499,8 +538,19 @@ export class AudioEngine {
   private autoSwitched = false;
   private inputSilentSince = 0;
   private inputHealthySince = 0;
+  /** Mono device peak per input — the failover's own measurement. */
   private mainLevelDb = -120;
   private backupLevelDb = -120;
+  /** Post-trim L/R levels and stereo correlation per input. */
+  private mainChannelDb: [number, number] = [-120, -120];
+  private backupChannelDb: [number, number] = [-120, -120];
+  private mainCorr = 1;
+  private backupCorr = 1;
+  /** Last time each input reached the digital ceiling (0 = never). */
+  private mainClipAt = 0;
+  private backupClipAt = 0;
+  /** Operator pinned an input on the bus; silence failover is paused. */
+  private inputManualHold = false;
   /** The two opened input paths, each a complete source → matrix → bus chain. */
   private mainPath: InputPath | null = null;
   private backupPath: InputPath | null = null;
@@ -2849,6 +2899,7 @@ export class AudioEngine {
     config: IoConfig;
     activeInput: InputSlot;
     autoSwitched: boolean;
+    manualHold: boolean;
     mainLabel: string;
     backupLabel: string;
     backupStatus: MicStatus;
@@ -2865,6 +2916,7 @@ export class AudioEngine {
       config: { ...this.io },
       activeInput: this.inputActive,
       autoSwitched: this.autoSwitched,
+      manualHold: this.inputManualHold,
       mainLabel: this.mainPath?.label ?? this.micLabel,
       backupLabel: this.backupPath?.label ?? this.backupMicLabel,
       backupStatus: this.backupMicStatus,
@@ -3585,8 +3637,15 @@ export class AudioEngine {
     this.micStatus = "idle";
     this.inputActive = "main";
     this.autoSwitched = false;
+    this.inputManualHold = false;
     this.mainLevelDb = -120;
     this.backupLevelDb = -120;
+    this.mainChannelDb = [-120, -120];
+    this.backupChannelDb = [-120, -120];
+    this.mainCorr = 1;
+    this.backupCorr = 1;
+    this.mainClipAt = 0;
+    this.backupClipAt = 0;
   }
 
   /* ── input paths: main + backup, with silence failover ───────────────── */
@@ -3602,6 +3661,16 @@ export class AudioEngine {
     slot: InputSlot,
   ): InputPath {
     const node = ctx.createMediaStreamSource(stream);
+    // A mono interface — or a mono track off a multi-channel device — arrives
+    // as one channel, and a ChannelSplitter is fixed to "discrete". Feeding
+    // that straight into the matrix put the whole input on the left leg and
+    // left the right silent, which every stage downstream then read as a
+    // hard-left image. Forcing two channels with speaker rules up-mixes a
+    // mono feed to both legs, and down-mixes a multichannel one properly.
+    const format = ctx.createGain();
+    format.channelCount = 2;
+    format.channelCountMode = "explicit";
+    format.channelInterpretation = "speakers";
     const gain = ctx.createGain();
     const fader = ctx.createGain();
     gain.gain.value = dbToGain(
@@ -3609,17 +3678,33 @@ export class AudioEngine {
     );
     fader.gain.value = this.inputActive === slot ? 1 : 0;
     const matrix = this.createMatrix(ctx);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    const buf = new Float32Array(analyser.fftSize);
 
-    node.connect(gain);
-    // Detect the *device* level, ahead of the trim: preamp gain must not be
-    // able to make a live input look silent to the failover logic.
-    node.connect(analyser);
-    gain.connect(fader);
-    fader.connect(matrix.split);
-    matrix.merge.connect(this.sourceBus);
+    // Device level ahead of the trim: the failover decides on what the
+    // hardware delivered, never on where the preamp slider sits.
+    const detector = ctx.createAnalyser();
+    detector.fftSize = 1024;
+    const detBuf = new Float32Array(detector.fftSize);
+
+    // Display meters tap the matrix output — post-trim, post-channel-format
+    // and ahead of the failover fader, so a parked backup still reads and a
+    // mono fold-down shows up as one.
+    const displaySplit = ctx.createChannelSplitter(2);
+    const analyserL = ctx.createAnalyser();
+    const analyserR = ctx.createAnalyser();
+    analyserL.fftSize = 1024;
+    analyserR.fftSize = 1024;
+    const bufL = new Float32Array(analyserL.fftSize);
+    const bufR = new Float32Array(analyserR.fftSize);
+
+    node.connect(format);
+    node.connect(detector);
+    format.connect(gain);
+    gain.connect(matrix.split);
+    matrix.merge.connect(displaySplit);
+    displaySplit.connect(analyserL, 0);
+    displaySplit.connect(analyserR, 1);
+    matrix.merge.connect(fader);
+    fader.connect(this.sourceBus);
 
     // The write cache belongs to the previous path; drop the keys before this
     // one is configured, or the stale "already at this value" would skip it.
@@ -3635,20 +3720,30 @@ export class AudioEngine {
     return {
       stream,
       node,
+      format,
       gain,
       fader,
       matrix,
-      analyser,
-      buf,
+      detector,
+      detBuf,
+      analyserL,
+      analyserR,
+      bufL,
+      bufR,
+      displaySplit,
       label: track?.label || (slot === "main" ? "Input 1" : "Input 2"),
     };
   }
 
   private releaseInputPath(path: InputPath): void {
     path.node.disconnect();
+    path.format.disconnect();
     path.gain.disconnect();
     path.fader.disconnect();
-    path.analyser.disconnect();
+    path.detector.disconnect();
+    path.displaySplit.disconnect();
+    path.analyserL.disconnect();
+    path.analyserR.disconnect();
     path.matrix.split.disconnect();
     path.matrix.merge.disconnect();
     for (const tap of path.matrix.taps) tap.disconnect();
@@ -3686,18 +3781,55 @@ export class AudioEngine {
    * comes back healthy it is restored. Hysteresis stops a source sitting on
    * the threshold from flapping the bus during a show.
    */
+  /**
+   * One pass over an input: the device peak the failover decides on, the
+   * post-trim L/R levels the panel draws, the stereo correlation that says
+   * whether the feed will survive a mono fold-down, and whether it clipped.
+   */
+  private measureInput(path: InputPath | null): {
+    device: number;
+    l: number;
+    r: number;
+    corr: number;
+    clipped: boolean;
+  } {
+    if (!path) return { device: -120, l: -120, r: -120, corr: 1, clipped: false };
+    path.detector.getFloatTimeDomainData(path.detBuf);
+    path.analyserL.getFloatTimeDomainData(path.bufL);
+    path.analyserR.getFloatTimeDomainData(path.bufR);
+    const l = peakDb(path.bufL);
+    const r = peakDb(path.bufR);
+    return {
+      device: peakDb(path.detBuf),
+      l,
+      r,
+      corr: correlationOf(path.bufL, path.bufR),
+      clipped: Math.max(l, r) >= INPUT_CLIP_DB,
+    };
+  }
+
   private updateInputRouting(now: number): void {
-    if (this.mainPath) {
-      this.mainPath.analyser.getFloatTimeDomainData(this.mainPath.buf);
-      this.mainLevelDb = peakDb(this.mainPath.buf);
-    } else {
-      this.mainLevelDb = -120;
-    }
-    if (this.backupPath) {
-      this.backupPath.analyser.getFloatTimeDomainData(this.backupPath.buf);
-      this.backupLevelDb = peakDb(this.backupPath.buf);
-    } else {
-      this.backupLevelDb = -120;
+    const main = this.measureInput(this.mainPath);
+    const backup = this.measureInput(this.backupPath);
+    this.mainLevelDb = main.device;
+    this.backupLevelDb = backup.device;
+    this.mainChannelDb = [main.l, main.r];
+    this.backupChannelDb = [backup.l, backup.r];
+    this.mainCorr = main.corr;
+    this.backupCorr = backup.corr;
+    if (main.clipped) this.mainClipAt = now;
+    if (backup.clipped) this.backupClipAt = now;
+
+    // A manual take is a decision about the show, not a fault: the automatic
+    // routing stays out of the way until the operator resumes it. The one
+    // exception is an input that has physically gone away — a pinned bus that
+    // no longer has a path is dead air, not a decision.
+    if (this.inputManualHold) {
+      if (this.inputActive === "backup" && !this.backupPath) {
+        this.inputManualHold = false;
+        this.switchInput("main", false);
+      }
+      return;
     }
     if (!this.mainPath || !this.backupPath || !this.io.backupEnabled) {
       if (this.inputActive !== "main") this.switchInput("main", false);
@@ -3805,6 +3937,9 @@ export class AudioEngine {
     this.backupMicStatus = "idle";
     this.backupMicLabel = "";
     this.backupLevelDb = -120;
+    this.backupChannelDb = [-120, -120];
+    this.backupCorr = 1;
+    this.backupClipAt = 0;
     if (this.inputActive === "backup") {
       this.inputActive = "main";
       this.autoSwitched = false;
@@ -4169,6 +4304,33 @@ export class AudioEngine {
    * lib.dom in this tree, hence the structural type; Chromium (and the
    * Electron shell) has shipped it since v110. "" = OS default.
    */
+  /**
+   * Operator takes an input to air.
+   *
+   * Automatic failover pauses with it: an operator who has just decided which
+   * feed is programme does not want the state machine handing the bus back
+   * four seconds later because the other input came up. `resumeAutoInput`
+   * returns control; re-arming an input does the same.
+   */
+  takeInputToAir(slot: InputSlot): void {
+    if (slot === "backup" && !this.backupPath) return;
+    this.inputManualHold = true;
+    this.inputSilentSince = 0;
+    this.inputHealthySince = 0;
+    if (this.inputActive !== slot) this.switchInput(slot, false);
+    else this.applyInputFaders();
+    this.notify();
+  }
+
+  /** Hand the bus back to the silence failover. */
+  resumeAutoInput(): void {
+    if (!this.inputManualHold) return;
+    this.inputManualHold = false;
+    this.inputSilentSince = 0;
+    this.inputHealthySince = 0;
+    this.notify();
+  }
+
   private async applyOutputDevice(): Promise<void> {
     const ctx = this.ctx as (AudioContext & {
       setSinkId?: (sinkId: string) => Promise<void>;
@@ -4877,6 +5039,16 @@ export class AudioEngine {
         mainDb: this.mainLevelDb,
         backupDb: this.backupLevelDb,
         backupReady: this.backupPath !== null,
+        mainL: this.mainChannelDb[0],
+        mainR: this.mainChannelDb[1],
+        backupL: this.backupChannelDb[0],
+        backupR: this.backupChannelDb[1],
+        mainCorr: this.mainCorr,
+        backupCorr: this.backupCorr,
+        mainClip: this.mainClipAt > 0 && now - this.mainClipAt < INPUT_CLIP_HOLD_MS,
+        backupClip:
+          this.backupClipAt > 0 && now - this.backupClipAt < INPUT_CLIP_HOLD_MS,
+        manualHold: this.inputManualHold,
         webL,
         webR,
         monitorL: monL,
